@@ -31,11 +31,30 @@ local TARGET_TRAITS = {
 
 local isMacroRunning = false
 local isJumpEnabled = true
+local isAutoBuyEnabled = false
+local isAutoItemsEnabled = false
+local isAutoCrateEnabled = false
 local jumpDelay = 0.6
 local rollCount = 0
 local traitSkipValue = 3
 
--- ===== دالة SetTraitSkip =====
+local ITEMS_TO_USE = {
+    "RerollTrait", "UltraClover", "FortunesDiamond",
+    "MythicLostCrate", "EpicLootCrate", "RadiantShard",
+    "DamagePotion", "MultiRollPotion", "DropRatePotion",
+    "ReviveSpeedPotion", "RollSpeedPotion", "CoinPotion",
+    "LuckPotion", "MovementSpeedPotion",
+}
+
+-- ===== دوال مساعدة =====
+local RF_BASE = {"Packages","_Index","sleitnick_knit@1.7.0","knit","Services"}
+
+local function invokeRF(path, ...)
+    local obj = ReplicatedStorage
+    for _, p in ipairs(path) do obj = obj:WaitForChild(p) end
+    return obj:InvokeServer(...)
+end
+
 local function setTraitSkip(val)
     pcall(function()
         ReplicatedStorage:WaitForChild("Packages")
@@ -50,7 +69,50 @@ local function setTraitSkip(val)
     end)
 end
 
--- ===== دالة القفز =====
+local function useItem(itemId, amount)
+    pcall(invokeRF, {table.unpack(RF_BASE),"ItemService","RF","UseItem"}, itemId, amount or 1)
+end
+
+local function useAllItems()
+    for _, itemId in ipairs(ITEMS_TO_USE) do
+        useItem(itemId, 1)
+        task.wait(0.3)
+    end
+end
+
+local function autoBuyAll()
+    pcall(function()
+        local Knit = require(ReplicatedStorage.Packages.Knit)
+        local ShopService = Knit.GetService("ShopService")
+        local ShopConfig = require(ReplicatedStorage.GameInfo.ShopConfig)
+        for _, slotDef in ShopConfig.Slots do
+            pcall(function()
+                ShopService:Purchase(slotDef.ItemId, slotDef.MaxPerPlayer or 1)
+            end)
+            task.wait(0.3)
+        end
+    end)
+end
+
+local function getQuestService()
+    local Knit = require(ReplicatedStorage.Packages.Knit)
+    return Knit.GetService("QuestService")
+end
+
+local function crazyHeartExchange(exchangeType)
+    pcall(function()
+        local QuestService = getQuestService()
+        QuestService:TurnIn(exchangeType)
+    end)
+    task.wait(0.5)
+    if exchangeType == "CrazyHeartCrateExchange" then
+        for i = 1, 10 do
+            pcall(invokeRF, {table.unpack(RF_BASE),"ItemService","RF","UseItem"}, "CrazyDiamondCrate", 1)
+            task.wait(0.3)
+        end
+    end
+end
+
 local function doJump()
     local character = localPlayer.Character
     if not character then return end
@@ -117,7 +179,6 @@ end
 local RollTab = Window:CreateTab("🎲 Auto Roll", nil)
 RollTab:CreateSection("إعدادات الرول")
 
--- TraitSkip Slider
 RollTab:CreateSlider({
     Name = "Trait Skip",
     Range = {1, 5},
@@ -131,7 +192,6 @@ RollTab:CreateSlider({
     end,
 })
 
--- القفز التلقائي
 RollTab:CreateToggle({
     Name = "القفز التلقائي",
     CurrentValue = true,
@@ -141,7 +201,6 @@ RollTab:CreateToggle({
     end,
 })
 
--- زر تشغيل الأوتو رول
 RollTab:CreateButton({
     Name = "▶ تشغيل / إيقاف الأوتو رول",
     Callback = function()
@@ -180,9 +239,27 @@ RollTab:CreateButton({
             })
 
             task.spawn(function()
+                local buyTimer, itemTimer, crateTimer = 0, 0, 0
                 while isMacroRunning do
                     forceOpenAutoRollUI()
                     if isJumpEnabled then doJump() end
+
+                    buyTimer   = buyTimer   + jumpDelay
+                    itemTimer  = itemTimer  + jumpDelay
+                    crateTimer = crateTimer + jumpDelay
+
+                    if isAutoBuyEnabled and buyTimer >= 60 then
+                        buyTimer = 0
+                        task.spawn(autoBuyAll)
+                    end
+                    if isAutoItemsEnabled and itemTimer >= 30 then
+                        itemTimer = 0
+                        task.spawn(useAllItems)
+                    end
+                    if isAutoCrateEnabled and crateTimer >= 60 then
+                        crateTimer = 0
+                        task.spawn(function() crazyHeartExchange("CrazyHeartCrateExchange") end)
+                    end
 
                     local currentTrait = getCurrentTraitFromUI()
                     if currentTrait then
@@ -203,6 +280,75 @@ RollTab:CreateButton({
                 end
             end)
         end
+    end,
+})
+
+-- ===== تاب المتجر =====
+local ShopTab = Window:CreateTab("🛒 المتجر", nil)
+ShopTab:CreateSection("المتجر")
+
+ShopTab:CreateToggle({
+    Name = "الشراء التلقائي (كل 60 ثانية)",
+    CurrentValue = false,
+    Flag = "autobuy",
+    Callback = function(Value)
+        isAutoBuyEnabled = Value
+    end,
+})
+
+ShopTab:CreateButton({
+    Name = "🛒 شراء المتجر الآن",
+    Callback = function()
+        Rayfield:Notify({Title="🛒 المتجر", Content="جاري الشراء...", Duration=3, Image=4483362458})
+        task.spawn(autoBuyAll)
+    end,
+})
+
+ShopTab:CreateSection("الأيتمز")
+
+ShopTab:CreateToggle({
+    Name = "الأيتمز التلقائية (كل 30 ثانية)",
+    CurrentValue = false,
+    Flag = "autoitems",
+    Callback = function(Value)
+        isAutoItemsEnabled = Value
+    end,
+})
+
+ShopTab:CreateButton({
+    Name = "🎒 استخدام كل الأيتمز الآن",
+    Callback = function()
+        Rayfield:Notify({Title="🎒 الأيتمز", Content="جاري الاستخدام...", Duration=3, Image=4483362458})
+        task.spawn(useAllItems)
+    end,
+})
+
+-- ===== تاب Trade =====
+local CrateTab = Window:CreateTab("💎 Trade", nil)
+CrateTab:CreateSection("Crazy Heart NPC")
+
+CrateTab:CreateToggle({
+    Name = "الكريتس التلقائية (كل 60 ثانية)",
+    CurrentValue = false,
+    Flag = "autocrate",
+    Callback = function(Value)
+        isAutoCrateEnabled = Value
+    end,
+})
+
+CrateTab:CreateButton({
+    Name = "💎 بادل 125 → 10 Crates",
+    Callback = function()
+        Rayfield:Notify({Title="💎 Trade", Content="جاري المبادلة...", Duration=3, Image=4483362458})
+        task.spawn(function() crazyHeartExchange("CrazyHeartCrateExchange") end)
+    end,
+})
+
+CrateTab:CreateButton({
+    Name = "👑 بادل 1000 → Crazy Heart Title",
+    Callback = function()
+        Rayfield:Notify({Title="👑 Title", Content="جاري الحصول على التايتل...", Duration=3, Image=4483362458})
+        task.spawn(function() crazyHeartExchange("CrazyHeartTitleExchange") end)
     end,
 })
 
@@ -259,7 +405,7 @@ MiscTab:CreateToggle({
 
 -- ===== إشعار البداية =====
 Rayfield:Notify({
-    Title = "⚡ Auto Roll Hub",
+    Title = "issacnicc7",
     Content = "تم تحميل السكريبت!",
     Duration = 5,
     Image = 4483362458,
