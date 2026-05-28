@@ -1,5 +1,24 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+   Name = "⚡ Auto Roll Hub",
+   LoadingTitle = "⚡ Auto Roll Hub",
+   LoadingSubtitle = "by 1_F0",
+   ConfigurationSaving = {
+      Enabled = false,
+      FolderName = nil,
+      FileName = "AutoRollHub"
+   },
+   Discord = {
+      Enabled = false,
+      Invite = "noinvitelink",
+      RememberJoins = true
+   },
+   KeySystem = false,
+})
+
+-- ===== الإعدادات =====
 local Players = game:GetService("Players")
-local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
@@ -14,7 +33,7 @@ local isMacroRunning = false
 local isJumpEnabled = true
 local jumpDelay = 0.6
 local rollCount = 0
-local traitSkipValue = 3 -- القيمة الافتراضية
+local traitSkipValue = 3
 
 -- ===== دالة SetTraitSkip =====
 local function setTraitSkip(val)
@@ -94,194 +113,154 @@ local function getCurrentTraitFromUI()
     return nil
 end
 
--- ===== بناء الواجهة =====
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "AutoRollPro"
-ScreenGui.ResetOnSpawn = false
-pcall(function() ScreenGui.Parent = CoreGui end)
+-- ===== تاب الأوتو رول =====
+local RollTab = Window:CreateTab("🎲 Auto Roll", nil)
+RollTab:CreateSection("إعدادات الرول")
 
-local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 340, 0, 290)
-MainFrame.Position = UDim2.new(0.5, -170, 0.4, -145)
-MainFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 20)
-MainFrame.Active = true
-MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
-Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 14)
+-- TraitSkip Slider
+RollTab:CreateSlider({
+    Name = "Trait Skip",
+    Range = {1, 5},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = traitSkipValue,
+    Flag = "traitskip",
+    Callback = function(Value)
+        traitSkipValue = Value
+        setTraitSkip(Value)
+    end,
+})
 
--- العنوان
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, 0, 0, 42)
-Title.Text = "⚡ REMOTE AUTO-ROLL v2"
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.Font = Enum.Font.GothamBold
-Title.TextSize = 13
-Title.BackgroundColor3 = Color3.fromRGB(20, 20, 40)
-Title.Parent = MainFrame
-Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 14)
+-- القفز التلقائي
+RollTab:CreateToggle({
+    Name = "القفز التلقائي",
+    CurrentValue = true,
+    Flag = "jumpToggle",
+    Callback = function(Value)
+        isJumpEnabled = Value
+    end,
+})
 
--- الحالة
-local StatusLabel = Instance.new("TextLabel")
-StatusLabel.Size = UDim2.new(0, 300, 0, 32)
-StatusLabel.Position = UDim2.new(0, 20, 0, 52)
-StatusLabel.Text = "الحالة: جاهز"
-StatusLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
-StatusLabel.BackgroundColor3 = Color3.fromRGB(16, 16, 30)
-StatusLabel.Font = Enum.Font.Gotham
-StatusLabel.TextSize = 12
-StatusLabel.Parent = MainFrame
-Instance.new("UICorner", StatusLabel).CornerRadius = UDim.new(0, 8)
-
--- عداد اللفات
-local RollLabel = Instance.new("TextLabel")
-RollLabel.Size = UDim2.new(0, 300, 0, 28)
-RollLabel.Position = UDim2.new(0, 20, 0, 90)
-RollLabel.Text = "اللفات: 0"
-RollLabel.TextColor3 = Color3.fromRGB(100, 220, 255)
-RollLabel.BackgroundColor3 = Color3.fromRGB(10, 25, 40)
-RollLabel.Font = Enum.Font.GothamBold
-RollLabel.TextSize = 12
-RollLabel.Parent = MainFrame
-Instance.new("UICorner", RollLabel).CornerRadius = UDim.new(0, 8)
-
--- === قسم TraitSkip ===
-local SkipLabel = Instance.new("TextLabel")
-SkipLabel.Size = UDim2.new(0, 300, 0, 24)
-SkipLabel.Position = UDim2.new(0, 20, 0, 126)
-SkipLabel.Text = "TraitSkip: " .. tostring(traitSkipValue)
-SkipLabel.TextColor3 = Color3.fromRGB(255, 200, 80)
-SkipLabel.BackgroundTransparency = 1
-SkipLabel.Font = Enum.Font.GothamBold
-SkipLabel.TextSize = 12
-SkipLabel.TextXAlignment = Enum.TextXAlignment.Right
-SkipLabel.Parent = MainFrame
-
-local SkipFrame = Instance.new("Frame")
-SkipFrame.Size = UDim2.new(0, 300, 0, 32)
-SkipFrame.Position = UDim2.new(0, 20, 0, 152)
-SkipFrame.BackgroundTransparency = 1
-SkipFrame.Parent = MainFrame
-
-local skipOptions = {1, 2, 3, 4, 5}
-local skipBtns = {}
-for i, val in ipairs(skipOptions) do
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 52, 0, 30)
-    btn.Position = UDim2.new(0, (i-1) * 58, 0, 0)
-    btn.Text = tostring(val)
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 13
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.BackgroundColor3 = (val == traitSkipValue) and Color3.fromRGB(180, 120, 0) or Color3.fromRGB(30, 30, 50)
-    btn.Parent = SkipFrame
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
-    table.insert(skipBtns, btn)
-
-    btn.Activated:Connect(function()
-        traitSkipValue = val
-        SkipLabel.Text = "TraitSkip: " .. tostring(val)
-        setTraitSkip(val)
-        for _, b in ipairs(skipBtns) do
-            b.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
-        end
-        btn.BackgroundColor3 = Color3.fromRGB(180, 120, 0)
-    end)
-end
-
--- زر القفز التلقائي
-local JumpBtn = Instance.new("TextButton")
-JumpBtn.Size = UDim2.new(0, 300, 0, 34)
-JumpBtn.Position = UDim2.new(0, 20, 0, 194)
-JumpBtn.Text = "القفز التلقائي: مفعّل ✅"
-JumpBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-JumpBtn.BackgroundColor3 = Color3.fromRGB(6, 120, 140)
-JumpBtn.Font = Enum.Font.GothamBold
-JumpBtn.TextSize = 13
-JumpBtn.Parent = MainFrame
-Instance.new("UICorner", JumpBtn).CornerRadius = UDim.new(0, 9)
-
--- زر التشغيل
-local ToggleBtn = Instance.new("TextButton")
-ToggleBtn.Size = UDim2.new(0, 300, 0, 42)
-ToggleBtn.Position = UDim2.new(0, 20, 0, 238)
-ToggleBtn.Text = "▶ تشغيل الأوتو رول"
-ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
-ToggleBtn.Font = Enum.Font.GothamBold
-ToggleBtn.TextSize = 14
-ToggleBtn.Parent = MainFrame
-Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 10)
-
--- ===== الأحداث =====
-JumpBtn.Activated:Connect(function()
-    isJumpEnabled = not isJumpEnabled
-    if isJumpEnabled then
-        JumpBtn.Text = "القفز التلقائي: مفعّل ✅"
-        JumpBtn.BackgroundColor3 = Color3.fromRGB(6, 120, 140)
-    else
-        JumpBtn.Text = "القفز التلقائي: معطّل ❌"
-        JumpBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
-    end
-end)
-
-local function startMacro()
-    if isMacroRunning then return end
-
-    -- تطبيق TraitSkip قبل البدء
-    setTraitSkip(traitSkipValue)
-    task.wait(0.2)
-
-    forceOpenAutoRollUI()
-    task.wait(0.2)
-
-    local clicked = clickAutoRollButton()
-    if not clicked then
-        StatusLabel.Text = "❌ تعذر إيجاد زر الأوتو رول"
-        return
-    end
-
-    isMacroRunning = true
-    rollCount = 0
-    ToggleBtn.Text = "■ إيقاف الماكرو"
-    ToggleBtn.BackgroundColor3 = Color3.fromRGB(160, 30, 30)
-
-    task.spawn(function()
-        while isMacroRunning do
+-- زر تشغيل الأوتو رول
+RollTab:CreateButton({
+    Name = "▶ تشغيل / إيقاف الأوتو رول",
+    Callback = function()
+        if isMacroRunning then
+            isMacroRunning = false
+            clickAutoRollButton()
+            Rayfield:Notify({
+                Title = "⏹ تم الإيقاف",
+                Content = "اللفات: " .. tostring(rollCount),
+                Duration = 4,
+                Image = 4483362458
+            })
+        else
+            setTraitSkip(traitSkipValue)
+            task.wait(0.2)
             forceOpenAutoRollUI()
+            task.wait(0.2)
 
-            if isJumpEnabled then
-                doJump()
+            if not clickAutoRollButton() then
+                Rayfield:Notify({
+                    Title = "❌ خطأ",
+                    Content = "تعذر إيجاد زر الأوتو رول",
+                    Duration = 4,
+                    Image = 4483362458
+                })
+                return
             end
 
-            local currentTrait = getCurrentTraitFromUI()
-            if currentTrait then
-                rollCount = rollCount + 1
-                RollLabel.Text = "اللفات: " .. tostring(rollCount)
-                StatusLabel.Text = "السمة: " .. tostring(currentTrait)
+            isMacroRunning = true
+            rollCount = 0
+            Rayfield:Notify({
+                Title = "✅ تم التشغيل",
+                Content = "الأوتو رول شغال!",
+                Duration = 3,
+                Image = 4483362458
+            })
 
-                if TARGET_TRAITS[currentTrait] then
-                    StatusLabel.Text = "🎉 اصطياد: " .. tostring(currentTrait)
-                    isMacroRunning = false
-                    clickAutoRollButton()
-                    ToggleBtn.Text = "▶ تشغيل الأوتو رول"
-                    ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
-                    break
+            task.spawn(function()
+                while isMacroRunning do
+                    forceOpenAutoRollUI()
+                    if isJumpEnabled then doJump() end
+
+                    local currentTrait = getCurrentTraitFromUI()
+                    if currentTrait then
+                        rollCount = rollCount + 1
+                        if TARGET_TRAITS[currentTrait] then
+                            isMacroRunning = false
+                            clickAutoRollButton()
+                            Rayfield:Notify({
+                                Title = "🎉 اصطياد!",
+                                Content = "حصلت على: " .. tostring(currentTrait) .. "\nاللفات: " .. tostring(rollCount),
+                                Duration = 10,
+                                Image = 4483362458
+                            })
+                            break
+                        end
+                    end
+                    task.wait(jumpDelay)
                 end
-            end
-
-            task.wait(jumpDelay)
+            end)
         end
-    end)
-end
+    end,
+})
 
-ToggleBtn.Activated:Connect(function()
-    if isMacroRunning then
-        isMacroRunning = false
-        clickAutoRollButton()
-        ToggleBtn.Text = "▶ تشغيل الأوتو رول"
-        ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
-        StatusLabel.Text = "تم الإيقاف — اللفات: " .. tostring(rollCount)
-    else
-        startMacro()
-    end
-end)
+-- ===== تاب Misc =====
+local MiscTab = Window:CreateTab("🎲 Misc", nil)
+MiscTab:CreateSection("الحركة")
+
+MiscTab:CreateSlider({
+    Name = "WalkSpeed",
+    Range = {1, 350},
+    Increment = 1,
+    Suffix = "Speed",
+    CurrentValue = 16,
+    Flag = "sliderws",
+    Callback = function(Value)
+        localPlayer.Character.Humanoid.WalkSpeed = Value
+    end,
+})
+
+MiscTab:CreateSlider({
+    Name = "JumpPower",
+    Range = {1, 350},
+    Increment = 1,
+    Suffix = "Power",
+    CurrentValue = 16,
+    Flag = "sliderjp",
+    Callback = function(Value)
+        localPlayer.Character.Humanoid.JumpPower = Value
+    end,
+})
+
+MiscTab:CreateToggle({
+    Name = "Infinite Jump",
+    CurrentValue = false,
+    Flag = "infjump",
+    Callback = function(Value)
+        _G.infinjump = Value
+        if not _G.infinJumpStarted then
+            _G.infinJumpStarted = true
+            local m = localPlayer:GetMouse()
+            m.KeyDown:Connect(function(k)
+                if _G.infinjump and k:byte() == 32 then
+                    local humanoid = localPlayer.Character:FindFirstChildOfClass("Humanoid")
+                    if humanoid then
+                        humanoid:ChangeState("Jumping")
+                        task.wait()
+                        humanoid:ChangeState("Seated")
+                    end
+                end
+            end)
+        end
+    end,
+})
+
+-- ===== إشعار البداية =====
+Rayfield:Notify({
+    Title = "⚡ Auto Roll Hub",
+    Content = "تم تحميل السكريبت!",
+    Duration = 5,
+    Image = 4483362458,
+})
