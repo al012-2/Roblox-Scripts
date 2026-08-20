@@ -1,0 +1,567 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local player = Players.LocalPlayer
+local PlayerGui = player:WaitForChild("PlayerGui")
+
+if PlayerGui:FindFirstChild("AOPG_UltraUI") then
+    PlayerGui.AOPG_UltraUI:Destroy()
+end
+
+-- الإعدادات العامة
+local selectedDummy = "Quest Dummy 1"
+local selectedWeapon = nil
+local activeKeys = {Q = true, E = true, R = true, F = true}
+local farmDistance = 5
+local autoFarmEnabled = false
+local autoEnabled = false
+local autoEquipEnabled = true
+local autoSkillsEnabled = true
+local lastSkillTime = 0
+
+-- إنشاء الشاشة الرئيسية
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AOPG_UltraUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
+
+local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 380, 0, 640)
+Main.Position = UDim2.new(0.5, -190, 0.1, 0)
+Main.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
+Main.BorderSizePixel = 0
+Main.Parent = ScreenGui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(0, 170, 255)
+UIStroke.Thickness = 1.5
+UIStroke.Transparency = 0.4
+UIStroke.Parent = Main
+
+-- شريط العنوان
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 40)
+TitleBar.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = Main
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 12)
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -50, 1, 0)
+Title.Position = UDim2.new(0, 15, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "⚡ AOPG ULTRA HUB"
+Title.TextColor3 = Color3.fromRGB(0, 200, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 14
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TitleBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -35, 0.5, -15)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(255, 60, 80)
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 12
+CloseBtn.Parent = TitleBar
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 8)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+
+-- حاوية المحتوى
+local Container = Instance.new("ScrollingFrame")
+Container.Size = UDim2.new(1, -20, 1, -55)
+Container.Position = UDim2.new(0, 10, 0, 45)
+Container.BackgroundTransparency = 1
+Container.BorderSizePixel = 0
+Container.ScrollBarThickness = 4
+Container.ScrollBarImageColor3 = Color3.fromRGB(0, 170, 255)
+Container.Parent = Main
+
+local CList = Instance.new("UIListLayout")
+CList.Parent = Container
+CList.SortOrder = Enum.SortOrder.LayoutOrder
+CList.Padding = UDim.new(0, 10)
+
+local function CreateSection(title)
+    local Sec = Instance.new("Frame")
+    Sec.Size = UDim2.new(1, -8, 0, 30)
+    Sec.BackgroundTransparency = 1
+    
+    local Lbl = Instance.new("TextLabel")
+    Lbl.Size = UDim2.new(1, 0, 1, 0)
+    Lbl.BackgroundTransparency = 1
+    Lbl.Text = "❖ " .. title
+    Lbl.TextColor3 = Color3.fromRGB(0, 170, 255)
+    Lbl.Font = Enum.Font.GothamBold
+    Lbl.TextSize = 12
+    Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    Lbl.Parent = Sec
+    return Sec
+end
+
+-- 1. اختيار المسافة (Distance Selector)
+CreateSection("مسافة الهجوم عن البوت (Distance)"):SetParent(Container)
+
+local DistFrame = Instance.new("Frame")
+DistFrame.Size = UDim2.new(1, -8, 0, 36)
+DistFrame.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+DistFrame.Parent = Container
+Instance.new("UICorner", DistFrame).CornerRadius = UDim.new(0, 8)
+
+local DistGrid = Instance.new("UIGridLayout")
+DistGrid.Parent = DistFrame
+DistGrid.CellSize = UDim2.new(0.15, 0, 0.8, 0)
+DistGrid.CellPadding = UDim2.new(0.016, 0, 0, 0)
+DistGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+DistGrid.VerticalAlignment = Enum.VerticalAlignment.Center
+
+local distances = {2, 5, 10, 20, 50, 100}
+local distButtons = {}
+
+for _, d in pairs(distances) do
+    local dBtn = Instance.new("TextButton")
+    dBtn.Text = tostring(d)
+    dBtn.Font = Enum.Font.GothamBold
+    dBtn.TextSize = 11
+    dBtn.BackgroundColor3 = (farmDistance == d) and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(30, 35, 48)
+    dBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    dBtn.Parent = DistFrame
+    Instance.new("UICorner", dBtn).CornerRadius = UDim.new(0, 6)
+    
+    distButtons[d] = dBtn
+    dBtn.MouseButton1Click:Connect(function()
+        farmDistance = d
+        for val, btn in pairs(distButtons) do
+            btn.BackgroundColor3 = (val == farmDistance) and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(30, 35, 48)
+        end
+    end)
+end
+
+-- 2. قائمة المهمات والأسلحة
+CreateSection("تحديد المهمة والسلاح"):SetParent(Container)
+
+local QuestScroll = Instance.new("ScrollingFrame")
+QuestScroll.Size = UDim2.new(1, -8, 0, 70)
+QuestScroll.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+QuestScroll.BorderSizePixel = 0
+QuestScroll.ScrollBarThickness = 3
+QuestScroll.Parent = Container
+Instance.new("UICorner", QuestScroll).CornerRadius = UDim.new(0, 8)
+
+local QList = Instance.new("UIListLayout")
+QList.Parent = QuestScroll
+QList.Padding = UDim.new(0, 3)
+
+local function UpdateQuestList()
+    for _, child in pairs(QuestScroll:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    local interactables = workspace:FindFirstChild("Interactables")
+    if interactables then
+        for _, dummy in pairs(interactables:GetChildren()) do
+            if dummy.Name:find("Quest Dummy") then
+                local Btn = Instance.new("TextButton")
+                Btn.Size = UDim2.new(1, -6, 0, 22)
+                Btn.BackgroundColor3 = (dummy.Name == selectedDummy) and Color3.fromRGB(0, 140, 220) or Color3.fromRGB(30, 35, 48)
+                Btn.Text = "  " .. dummy.Name
+                Btn.TextColor3 = Color3.fromRGB(240, 240, 240)
+                Btn.Font = Enum.Font.Gotham
+                Btn.TextSize = 11
+                Btn.TextXAlignment = Enum.TextXAlignment.Left
+                Btn.Parent = QuestScroll
+                Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 4)
+
+                Btn.MouseButton1Click:Connect(function()
+                    selectedDummy = dummy.Name
+                    UpdateQuestList()
+                end)
+            end
+        end
+    end
+    QuestScroll.CanvasSize = UDim2.new(0, 0, 0, QList.AbsoluteContentSize.Y + 5)
+end
+UpdateQuestList()
+
+local WeaponScroll = Instance.new("ScrollingFrame")
+WeaponScroll.Size = UDim2.new(1, -8, 0, 70)
+WeaponScroll.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+WeaponScroll.BorderSizePixel = 0
+WeaponScroll.ScrollBarThickness = 3
+WeaponScroll.Parent = Container
+Instance.new("UICorner", WeaponScroll).CornerRadius = UDim.new(0, 8)
+
+local WList = Instance.new("UIListLayout")
+WList.Parent = WeaponScroll
+WList.Padding = UDim.new(0, 3)
+
+local function GetCharacter()
+    local entities = workspace:FindFirstChild("Entities")
+    if entities and entities:FindFirstChild(player.Name) then
+        return entities[player.Name]
+    end
+    return player.Character
+end
+
+local function UpdateWeaponList()
+    for _, child in pairs(WeaponScroll:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+
+    local tools = {}
+    local backpack = player:FindFirstChild("Backpack")
+    if backpack then
+        for _, item in pairs(backpack:GetChildren()) do
+            if item:IsA("Tool") then table.insert(tools, item.Name) end
+        end
+    end
+
+    local char = GetCharacter()
+    if char then
+        for _, item in pairs(char:GetChildren()) do
+            if item:IsA("Tool") then table.insert(tools, item.Name) end
+        end
+    end
+
+    for _, wName in pairs(tools) do
+        if not selectedWeapon then selectedWeapon = wName end
+        local Btn = Instance.new("TextButton")
+        Btn.Size = UDim2.new(1, -6, 0, 22)
+        Btn.BackgroundColor3 = (wName == selectedWeapon) and Color3.fromRGB(0, 160, 100) or Color3.fromRGB(30, 35, 48)
+        Btn.Text = "  ⚔️ " .. wName
+        Btn.TextColor3 = Color3.fromRGB(240, 240, 240)
+        Btn.Font = Enum.Font.Gotham
+        Btn.TextSize = 11
+        Btn.TextXAlignment = Enum.TextXAlignment.Left
+        Btn.Parent = WeaponScroll
+        Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 4)
+
+        Btn.MouseButton1Click:Connect(function()
+            selectedWeapon = wName
+            UpdateWeaponList()
+        end)
+    end
+    WeaponScroll.CanvasSize = UDim2.new(0, 0, 0, WList.AbsoluteContentSize.Y + 5)
+end
+UpdateWeaponList()
+
+-- 3. المهارات والتفعيل
+CreateSection("أزرار المهارات المفعلة"):SetParent(Container)
+
+local SkillFrame = Instance.new("Frame")
+SkillFrame.Size = UDim2.new(1, -8, 0, 50)
+SkillFrame.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+SkillFrame.Parent = Container
+Instance.new("UICorner", SkillFrame).CornerRadius = UDim.new(0, 8)
+
+local SGrid = Instance.new("UIGridLayout")
+SGrid.Parent = SkillFrame
+SGrid.CellSize = UDim2.new(0, 36, 0, 20)
+SGrid.CellPadding = UDim2.new(0, 4, 0, 4)
+SGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+SGrid.VerticalAlignment = Enum.VerticalAlignment.Center
+
+local availableKeys = {"Q", "E", "R", "F", "Y", "J", "K", "L", "H", "X", "Z", "C", "V"}
+for _, keyStr in pairs(availableKeys) do
+    local kBtn = Instance.new("TextButton")
+    kBtn.Text = keyStr
+    kBtn.Font = Enum.Font.GothamBold
+    kBtn.TextSize = 10
+    kBtn.BackgroundColor3 = activeKeys[keyStr] and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(35, 40, 52)
+    kBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    kBtn.Parent = SkillFrame
+    Instance.new("UICorner", kBtn).CornerRadius = UDim.new(0, 4)
+
+    kBtn.MouseButton1Click:Connect(function()
+        activeKeys[keyStr] = not activeKeys[keyStr]
+        kBtn.BackgroundColor3 = activeKeys[keyStr] and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(35, 40, 52)
+    end)
+end
+
+-- 4. أزرار التشغيل التلقائي
+CreateSection("التشغيل التلقائي (Auto Automation)"):SetParent(Container)
+
+local function CreateToggle(text, defaultState, callback)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(1, -8, 0, 32)
+    Frame.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+    Frame.Parent = Container
+    Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 8)
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -50, 1, 0)
+    Label.Position = UDim2.new(0, 12, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = text
+    Label.TextColor3 = Color3.fromRGB(220, 220, 230)
+    Label.Font = Enum.Font.GothamMedium
+    Label.TextSize = 11
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    local Toggle = Instance.new("TextButton")
+    Toggle.Size = UDim2.new(0, 36, 0, 18)
+    Toggle.Position = UDim2.new(1, -44, 0.5, -9)
+    Toggle.BackgroundColor3 = defaultState and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(50, 55, 70)
+    Toggle.Text = ""
+    Toggle.Parent = Frame
+    Instance.new("UICorner", Toggle).CornerRadius = UDim.new(1, 0)
+
+    local Circle = Instance.new("Frame")
+    Circle.Size = UDim2.new(0, 12, 0, 12)
+    Circle.Position = defaultState and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
+    Circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Circle.Parent = Toggle
+    Instance.new("UICorner", Circle).CornerRadius = UDim.new(1, 0)
+
+    local state = defaultState
+    Toggle.MouseButton1Click:Connect(function()
+        state = not state
+        Toggle.BackgroundColor3 = state and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(50, 55, 70)
+        Circle.Position = state and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
+        callback(state)
+    end)
+end
+
+-- منطق الطيران المباشر بالمسافة المحددة مع جعل النظرة نحو البوت دائماً
+local function FlyToTargetEnemy(targetHRP)
+    local char = GetCharacter()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp or not targetHRP then return end
+
+    -- حساب الموقع بالمسافة المحددة من زر Distance
+    local standPos = targetHRP.Position + (targetHRP.CFrame.LookVector * farmDistance) + Vector3.new(0, 1.5, 0)
+    local targetCFrame = CFrame.lookAt(standPos, targetHRP.Position)
+
+    local distance = (hrp.Position - targetCFrame.Position).Magnitude
+    if distance < 2 then
+        hrp.CFrame = targetCFrame
+        return
+    end
+
+    local tweenInfo = TweenInfo.new(distance / 160, Enum.EasingStyle.Linear)
+    local tween = TweenService:Create(hrp, tweenInfo, {CFrame = targetCFrame})
+    tween:Play()
+    tween.Completed:Wait()
+end
+
+local function GetQuestPart()
+    local ok, result = pcall(function()
+        return workspace.Interactables[selectedDummy][selectedDummy]
+    end)
+    return ok and result or nil
+end
+
+local function GetCurrentTargetData()
+    local quests = player:FindFirstChild("Quests2")
+    if quests and quests:FindFirstChild("1") and quests["1"]:FindFirstChild("Targets") then
+        local targetObj = quests["1"].Targets:GetChildren()[1]
+        if targetObj then
+            local killed = targetObj:FindFirstChild("Killed")
+            local amount = targetObj:FindFirstChild("Amount")
+            return targetObj.Name, killed, amount
+        end
+    end
+    return nil, nil, nil
+end
+
+local function GetTargetEnemy(targetName)
+    local closestEnemy = nil
+    local shortestDistance = math.huge
+    local char = GetCharacter()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local searchLocations = {workspace:FindFirstChild("Entities"), workspace:FindFirstChild("Enemies"), workspace}
+    for _, location in pairs(searchLocations) do
+        if location then
+            for _, model in pairs(location:GetChildren()) do
+                if model:IsA("Model") and model.Name ~= player.Name and model.Name:find(targetName) and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 and model:FindFirstChild("HumanoidRootPart") then
+                    local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
+                    if dist < shortestDistance then
+                        shortestDistance = dist
+                        closestEnemy = model
+                    end
+                end
+            end
+        end
+    end
+    return closestEnemy
+end
+
+local function TakeQuest()
+    local QuestPart = GetQuestPart()
+    if not QuestPart then return end
+
+    local char = GetCharacter()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local targetPos = QuestPart.Position + Vector3.new(0, 3, 4)
+        local targetCFrame = CFrame.lookAt(targetPos, QuestPart.Position)
+        local tween = TweenService:Create(hrp, TweenInfo.new((hrp.Position - targetPos).Magnitude / 160, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
+        tween:Play()
+        tween.Completed:Wait()
+    end
+
+    task.wait(0.2)
+
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if Remotes then
+        if Remotes:FindFirstChild("talk") then Remotes.talk:FireServer(QuestPart) end
+        task.wait(0.3)
+        if Remotes:FindFirstChild("quest") then
+            Remotes.quest:FireServer("Accept", { Index = 1, Model = QuestPart })
+        end
+    end
+end
+
+local function CloseDialogue()
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if Remotes then
+        pcall(function() Remotes.talk:FireServer("Cancel") end)
+        pcall(function() Remotes.talk:FireServer(nil) end)
+        pcall(function() Remotes.quest:FireServer("Cancel") end)
+    end
+    for _, v in pairs(PlayerGui:GetChildren()) do
+        if v:IsA("ScreenGui") and v.Name ~= "AOPG_UltraUI" then
+            local name = v.Name:lower()
+            if name:find("dialog") or name:find("talk") or name:find("quest") or name:find("interaction") then
+                v.Enabled = false
+            end
+        end
+    end
+end
+
+local function AutoEquipSelectedWeapon()
+    if not autoEquipEnabled or not selectedWeapon then return end
+    local char = GetCharacter()
+    if not char then return end
+
+    local currentTool = char:FindFirstChildOfClass("Tool")
+    if not currentTool or currentTool.Name ~= selectedWeapon then
+        local backpack = player:FindFirstChild("Backpack")
+        if backpack then
+            local targetTool = backpack:FindFirstChild(selectedWeapon)
+            if targetTool and char:FindFirstChild("Humanoid") then
+                char.Humanoid:EquipTool(targetTool)
+            end
+        end
+    end
+end
+
+local function CastSkills()
+    if not autoSkillsEnabled then return end
+    if tick() - lastSkillTime > 0.6 then
+        lastSkillTime = tick()
+        for keyName, isEnabled in pairs(activeKeys) do
+            if isEnabled then
+                local enumKey = Enum.KeyCode[keyName]
+                if enumKey then
+                    VirtualInputManager:SendKeyEvent(true, enumKey, false, game)
+                    task.wait(0.03)
+                    VirtualInputManager:SendKeyEvent(false, enumKey, false, game)
+                end
+            end
+        end
+    end
+end
+
+local function PerformAttack()
+    AutoEquipSelectedWeapon()
+    local char = GetCharacter()
+    if not char then return end
+
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        tool:Activate()
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        if remotes then
+            if remotes:FindFirstChild("Attack") then remotes.Attack:FireServer()
+            elseif remotes:FindFirstChild("Hit") then remotes.Hit:FireServer() end
+        end
+        CastSkills()
+    end
+end
+
+local function AutoFarmLoop()
+    task.spawn(function()
+        while autoFarmEnabled do
+            task.wait(0.08)
+            local targetName, killedObj, amountObj = GetCurrentTargetData()
+            if targetName then
+                local kVal = killedObj and killedObj.Value or 0
+                local aVal = amountObj and amountObj.Value or 5
+
+                if kVal >= aVal then
+                    task.wait(0.2)
+                    TakeQuest()
+                    task.wait(0.3)
+                    CloseDialogue()
+                else
+                    local enemy = GetTargetEnemy(targetName)
+                    if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
+                        FlyToTargetEnemy(enemy.HumanoidRootPart)
+                        PerformAttack()
+                    end
+                end
+            else
+                if autoEnabled then
+                    TakeQuest()
+                    task.wait(0.3)
+                    CloseDialogue()
+                else
+                    autoFarmEnabled = false
+                    break
+                end
+            end
+        end
+    end)
+end
+
+CreateToggle("Auto تجديد المهمة تلقائياً", false, function(v)
+    autoEnabled = v
+    if autoEnabled then TakeQuest() task.wait(0.4) CloseDialogue() end
+end)
+
+CreateToggle("Auto Equip Weapon (السلاح)", true, function(v) autoEquipEnabled = v end)
+CreateToggle("Auto Skills (المهارات الأزرار)", true, function(v) autoSkillsEnabled = v end)
+CreateToggle("Auto Farm (تلفيل ومواجهة البوت)", false, function(v)
+    autoFarmEnabled = v
+    if autoFarmEnabled then AutoFarmLoop() end
+end)
+
+-- السحب (Dragging)
+local dragging, dragInput, dragStart, startPos
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+
+TitleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+Container.CanvasSize = UDim2.new(0, 0, 0, CList.AbsoluteContentSize.Y + 20)
+print("AOPG Ultra UI Loaded Successfully!")
