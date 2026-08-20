@@ -22,7 +22,7 @@ local autoEquipEnabled = true
 local autoSkillsEnabled = true
 local lastSkillTime = 0
 
--- إنشاء الشاشة الرئيسية
+-- الشاشة الرئيسية
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "AOPG_UltraUI"
 ScreenGui.ResetOnSpawn = false
@@ -30,95 +30,86 @@ ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = PlayerGui
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.new(0, 380, 0, 640)
-Main.Position = UDim2.new(0.5, -190, 0.1, 0)
-Main.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
+Main.Size = UDim2.new(0, 360, 0, 520)
+Main.Position = UDim2.new(0.5, -180, 0.15, 0)
+Main.BackgroundColor3 = Color3.fromRGB(18, 20, 26)
 Main.BorderSizePixel = 0
 Main.Parent = ScreenGui
-Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
 
 local UIStroke = Instance.new("UIStroke")
 UIStroke.Color = Color3.fromRGB(0, 170, 255)
 UIStroke.Thickness = 1.5
-UIStroke.Transparency = 0.4
 UIStroke.Parent = Main
 
 -- شريط العنوان
 local TitleBar = Instance.new("Frame")
-TitleBar.Size = UDim2.new(1, 0, 0, 40)
-TitleBar.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+TitleBar.Size = UDim2.new(1, 0, 0, 36)
+TitleBar.BackgroundColor3 = Color3.fromRGB(26, 30, 40)
 TitleBar.BorderSizePixel = 0
 TitleBar.Parent = Main
-Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 12)
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 10)
 
 local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, -50, 1, 0)
-Title.Position = UDim2.new(0, 15, 0, 0)
+Title.Size = UDim2.new(1, -40, 1, 0)
+Title.Position = UDim2.new(0, 12, 0, 0)
 Title.BackgroundTransparency = 1
 Title.Text = "⚡ AOPG ULTRA HUB"
-Title.TextColor3 = Color3.fromRGB(0, 200, 255)
+Title.TextColor3 = Color3.fromRGB(0, 190, 255)
 Title.Font = Enum.Font.GothamBold
-Title.TextSize = 14
+Title.TextSize = 13
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = TitleBar
 
 local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 30, 0, 30)
-CloseBtn.Position = UDim2.new(1, -35, 0.5, -15)
+CloseBtn.Size = UDim2.new(0, 26, 0, 26)
+CloseBtn.Position = UDim2.new(1, -31, 0.5, -13)
 CloseBtn.BackgroundColor3 = Color3.fromRGB(255, 60, 80)
 CloseBtn.Text = "✕"
 CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.TextSize = 12
+CloseBtn.TextSize = 11
 CloseBtn.Parent = TitleBar
-Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
 CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
 
--- حاوية المحتوى
-local Container = Instance.new("ScrollingFrame")
-Container.Size = UDim2.new(1, -20, 1, -55)
-Container.Position = UDim2.new(0, 10, 0, 45)
+-- حاوية العناصر بدون أخطاء السكرول
+local Container = Instance.new("Frame")
+Container.Size = UDim2.new(1, -20, 1, -46)
+Container.Position = UDim2.new(0, 10, 0, 42)
 Container.BackgroundTransparency = 1
-Container.BorderSizePixel = 0
-Container.ScrollBarThickness = 4
-Container.ScrollBarImageColor3 = Color3.fromRGB(0, 170, 255)
 Container.Parent = Main
 
 local CList = Instance.new("UIListLayout")
 CList.Parent = Container
 CList.SortOrder = Enum.SortOrder.LayoutOrder
-CList.Padding = UDim.new(0, 10)
+CList.Padding = UDim.new(0, 8)
 
-local function CreateSection(title)
-    local Sec = Instance.new("Frame")
-    Sec.Size = UDim2.new(1, -8, 0, 30)
-    Sec.BackgroundTransparency = 1
-    
+local function CreateLabel(text)
     local Lbl = Instance.new("TextLabel")
-    Lbl.Size = UDim2.new(1, 0, 1, 0)
+    Lbl.Size = UDim2.new(1, 0, 0, 18)
     Lbl.BackgroundTransparency = 1
-    Lbl.Text = "❖ " .. title
+    Lbl.Text = text
     Lbl.TextColor3 = Color3.fromRGB(0, 170, 255)
     Lbl.Font = Enum.Font.GothamBold
-    Lbl.TextSize = 12
+    Lbl.TextSize = 11
     Lbl.TextXAlignment = Enum.TextXAlignment.Left
-    Lbl.Parent = Sec
-    return Sec
+    Lbl.Parent = Container
 end
 
--- 1. اختيار المسافة (Distance Selector)
-CreateSection("مسافة الهجوم عن البوت (Distance)"):SetParent(Container)
+-- 1. أزرار التحكم بالمسافة (Distance)
+CreateLabel("❖ مسافة الهجوم عن البوت (Distance):")
 
 local DistFrame = Instance.new("Frame")
-DistFrame.Size = UDim2.new(1, -8, 0, 36)
-DistFrame.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+DistFrame.Size = UDim2.new(1, 0, 0, 30)
+DistFrame.BackgroundColor3 = Color3.fromRGB(26, 30, 40)
 DistFrame.Parent = Container
-Instance.new("UICorner", DistFrame).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner", DistFrame).CornerRadius = UDim.new(0, 6)
 
 local DistGrid = Instance.new("UIGridLayout")
 DistGrid.Parent = DistFrame
 DistGrid.CellSize = UDim2.new(0.15, 0, 0.8, 0)
-DistGrid.CellPadding = UDim2.new(0.016, 0, 0, 0)
+DistGrid.CellPadding = UDim2.new(0.015, 0, 0, 0)
 DistGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
 DistGrid.VerticalAlignment = Enum.VerticalAlignment.Center
 
@@ -129,31 +120,31 @@ for _, d in pairs(distances) do
     local dBtn = Instance.new("TextButton")
     dBtn.Text = tostring(d)
     dBtn.Font = Enum.Font.GothamBold
-    dBtn.TextSize = 11
-    dBtn.BackgroundColor3 = (farmDistance == d) and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(30, 35, 48)
+    dBtn.TextSize = 10
+    dBtn.BackgroundColor3 = (farmDistance == d) and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(36, 42, 56)
     dBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     dBtn.Parent = DistFrame
-    Instance.new("UICorner", dBtn).CornerRadius = UDim.new(0, 6)
+    Instance.new("UICorner", dBtn).CornerRadius = UDim.new(0, 4)
     
     distButtons[d] = dBtn
     dBtn.MouseButton1Click:Connect(function()
         farmDistance = d
         for val, btn in pairs(distButtons) do
-            btn.BackgroundColor3 = (val == farmDistance) and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(30, 35, 48)
+            btn.BackgroundColor3 = (val == farmDistance) and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(36, 42, 56)
         end
     end)
 end
 
--- 2. قائمة المهمات والأسلحة
-CreateSection("تحديد المهمة والسلاح"):SetParent(Container)
+-- 2. قائمة المهمات والسلاح
+CreateLabel("❖ اختيار المهمة والسلاح:")
 
 local QuestScroll = Instance.new("ScrollingFrame")
-QuestScroll.Size = UDim2.new(1, -8, 0, 70)
-QuestScroll.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+QuestScroll.Size = UDim2.new(1, 0, 0, 65)
+QuestScroll.BackgroundColor3 = Color3.fromRGB(26, 30, 40)
 QuestScroll.BorderSizePixel = 0
 QuestScroll.ScrollBarThickness = 3
 QuestScroll.Parent = Container
-Instance.new("UICorner", QuestScroll).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner", QuestScroll).CornerRadius = UDim.new(0, 6)
 
 local QList = Instance.new("UIListLayout")
 QList.Parent = QuestScroll
@@ -168,12 +159,12 @@ local function UpdateQuestList()
         for _, dummy in pairs(interactables:GetChildren()) do
             if dummy.Name:find("Quest Dummy") then
                 local Btn = Instance.new("TextButton")
-                Btn.Size = UDim2.new(1, -6, 0, 22)
-                Btn.BackgroundColor3 = (dummy.Name == selectedDummy) and Color3.fromRGB(0, 140, 220) or Color3.fromRGB(30, 35, 48)
+                Btn.Size = UDim2.new(1, -6, 0, 20)
+                Btn.BackgroundColor3 = (dummy.Name == selectedDummy) and Color3.fromRGB(0, 140, 220) or Color3.fromRGB(36, 42, 56)
                 Btn.Text = "  " .. dummy.Name
                 Btn.TextColor3 = Color3.fromRGB(240, 240, 240)
                 Btn.Font = Enum.Font.Gotham
-                Btn.TextSize = 11
+                Btn.TextSize = 10
                 Btn.TextXAlignment = Enum.TextXAlignment.Left
                 Btn.Parent = QuestScroll
                 Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 4)
@@ -190,12 +181,12 @@ end
 UpdateQuestList()
 
 local WeaponScroll = Instance.new("ScrollingFrame")
-WeaponScroll.Size = UDim2.new(1, -8, 0, 70)
-WeaponScroll.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+WeaponScroll.Size = UDim2.new(1, 0, 0, 65)
+WeaponScroll.BackgroundColor3 = Color3.fromRGB(26, 30, 40)
 WeaponScroll.BorderSizePixel = 0
 WeaponScroll.ScrollBarThickness = 3
 WeaponScroll.Parent = Container
-Instance.new("UICorner", WeaponScroll).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner", WeaponScroll).CornerRadius = UDim.new(0, 6)
 
 local WList = Instance.new("UIListLayout")
 WList.Parent = WeaponScroll
@@ -232,12 +223,12 @@ local function UpdateWeaponList()
     for _, wName in pairs(tools) do
         if not selectedWeapon then selectedWeapon = wName end
         local Btn = Instance.new("TextButton")
-        Btn.Size = UDim2.new(1, -6, 0, 22)
-        Btn.BackgroundColor3 = (wName == selectedWeapon) and Color3.fromRGB(0, 160, 100) or Color3.fromRGB(30, 35, 48)
+        Btn.Size = UDim2.new(1, -6, 0, 20)
+        Btn.BackgroundColor3 = (wName == selectedWeapon) and Color3.fromRGB(0, 160, 100) or Color3.fromRGB(36, 42, 56)
         Btn.Text = "  ⚔️ " .. wName
         Btn.TextColor3 = Color3.fromRGB(240, 240, 240)
         Btn.Font = Enum.Font.Gotham
-        Btn.TextSize = 11
+        Btn.TextSize = 10
         Btn.TextXAlignment = Enum.TextXAlignment.Left
         Btn.Parent = WeaponScroll
         Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 4)
@@ -251,18 +242,18 @@ local function UpdateWeaponList()
 end
 UpdateWeaponList()
 
--- 3. المهارات والتفعيل
-CreateSection("أزرار المهارات المفعلة"):SetParent(Container)
+-- 3. المهارات
+CreateLabel("❖ أزرار المهارات المفعلة:")
 
 local SkillFrame = Instance.new("Frame")
-SkillFrame.Size = UDim2.new(1, -8, 0, 50)
-SkillFrame.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+SkillFrame.Size = UDim2.new(1, 0, 0, 45)
+SkillFrame.BackgroundColor3 = Color3.fromRGB(26, 30, 40)
 SkillFrame.Parent = Container
-Instance.new("UICorner", SkillFrame).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner", SkillFrame).CornerRadius = UDim.new(0, 6)
 
 local SGrid = Instance.new("UIGridLayout")
 SGrid.Parent = SkillFrame
-SGrid.CellSize = UDim2.new(0, 36, 0, 20)
+SGrid.CellSize = UDim2.new(0, 32, 0, 18)
 SGrid.CellPadding = UDim2.new(0, 4, 0, 4)
 SGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
 SGrid.VerticalAlignment = Enum.VerticalAlignment.Center
@@ -272,50 +263,50 @@ for _, keyStr in pairs(availableKeys) do
     local kBtn = Instance.new("TextButton")
     kBtn.Text = keyStr
     kBtn.Font = Enum.Font.GothamBold
-    kBtn.TextSize = 10
-    kBtn.BackgroundColor3 = activeKeys[keyStr] and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(35, 40, 52)
+    kBtn.TextSize = 9
+    kBtn.BackgroundColor3 = activeKeys[keyStr] and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(40, 46, 60)
     kBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     kBtn.Parent = SkillFrame
     Instance.new("UICorner", kBtn).CornerRadius = UDim.new(0, 4)
 
     kBtn.MouseButton1Click:Connect(function()
         activeKeys[keyStr] = not activeKeys[keyStr]
-        kBtn.BackgroundColor3 = activeKeys[keyStr] and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(35, 40, 52)
+        kBtn.BackgroundColor3 = activeKeys[keyStr] and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(40, 46, 60)
     end)
 end
 
--- 4. أزرار التشغيل التلقائي
-CreateSection("التشغيل التلقائي (Auto Automation)"):SetParent(Container)
+-- 4. التفعيلات التلقائية
+CreateLabel("❖ خيارات الأوتو (Auto Controls):")
 
 local function CreateToggle(text, defaultState, callback)
     local Frame = Instance.new("Frame")
-    Frame.Size = UDim2.new(1, -8, 0, 32)
-    Frame.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+    Frame.Size = UDim2.new(1, 0, 0, 28)
+    Frame.BackgroundColor3 = Color3.fromRGB(26, 30, 40)
     Frame.Parent = Container
-    Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 6)
 
     local Label = Instance.new("TextLabel")
-    Label.Size = UDim2.new(1, -50, 1, 0)
-    Label.Position = UDim2.new(0, 12, 0, 0)
+    Label.Size = UDim2.new(1, -45, 1, 0)
+    Label.Position = UDim2.new(0, 10, 0, 0)
     Label.BackgroundTransparency = 1
     Label.Text = text
     Label.TextColor3 = Color3.fromRGB(220, 220, 230)
     Label.Font = Enum.Font.GothamMedium
-    Label.TextSize = 11
+    Label.TextSize = 10
     Label.TextXAlignment = Enum.TextXAlignment.Left
     Label.Parent = Frame
 
     local Toggle = Instance.new("TextButton")
-    Toggle.Size = UDim2.new(0, 36, 0, 18)
-    Toggle.Position = UDim2.new(1, -44, 0.5, -9)
-    Toggle.BackgroundColor3 = defaultState and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(50, 55, 70)
+    Toggle.Size = UDim2.new(0, 32, 0, 16)
+    Toggle.Position = UDim2.new(1, -38, 0.5, -8)
+    Toggle.BackgroundColor3 = defaultState and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(50, 56, 70)
     Toggle.Text = ""
     Toggle.Parent = Frame
     Instance.new("UICorner", Toggle).CornerRadius = UDim.new(1, 0)
 
     local Circle = Instance.new("Frame")
-    Circle.Size = UDim2.new(0, 12, 0, 12)
-    Circle.Position = defaultState and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
+    Circle.Size = UDim2.new(0, 10, 0, 10)
+    Circle.Position = defaultState and UDim2.new(1, -13, 0.5, -5) or UDim2.new(0, 3, 0.5, -5)
     Circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
     Circle.Parent = Toggle
     Instance.new("UICorner", Circle).CornerRadius = UDim.new(1, 0)
@@ -323,20 +314,19 @@ local function CreateToggle(text, defaultState, callback)
     local state = defaultState
     Toggle.MouseButton1Click:Connect(function()
         state = not state
-        Toggle.BackgroundColor3 = state and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(50, 55, 70)
-        Circle.Position = state and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
+        Toggle.BackgroundColor3 = state and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(50, 56, 70)
+        Circle.Position = state and UDim2.new(1, -13, 0.5, -5) or UDim2.new(0, 3, 0.5, -5)
         callback(state)
     end)
 end
 
--- منطق الطيران المباشر بالمسافة المحددة مع جعل النظرة نحو البوت دائماً
+-- وظائف المهارات والفرامات والأوتو
 local function FlyToTargetEnemy(targetHRP)
     local char = GetCharacter()
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp or not targetHRP then return end
 
-    -- حساب الموقع بالمسافة المحددة من زر Distance
     local standPos = targetHRP.Position + (targetHRP.CFrame.LookVector * farmDistance) + Vector3.new(0, 1.5, 0)
     local targetCFrame = CFrame.lookAt(standPos, targetHRP.Position)
 
@@ -531,7 +521,7 @@ CreateToggle("Auto تجديد المهمة تلقائياً", false, function(v)
 end)
 
 CreateToggle("Auto Equip Weapon (السلاح)", true, function(v) autoEquipEnabled = v end)
-CreateToggle("Auto Skills (المهارات الأزرار)", true, function(v) autoSkillsEnabled = v end)
+CreateToggle("Auto Skills (المهارات)", true, function(v) autoSkillsEnabled = v end)
 CreateToggle("Auto Farm (تلفيل ومواجهة البوت)", false, function(v)
     autoFarmEnabled = v
     if autoFarmEnabled then AutoFarmLoop() end
@@ -562,6 +552,3 @@ UserInputService.InputChanged:Connect(function(input)
         Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
     end
 end)
-
-Container.CanvasSize = UDim2.new(0, 0, 0, CList.AbsoluteContentSize.Y + 20)
-print("AOPG Ultra UI Loaded Successfully!")
