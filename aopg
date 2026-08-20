@@ -23,24 +23,35 @@ local Window = Library:Window({
 
 local KeybindList = Library:KeybindList("Keybinds")
 
--- Variables & State
+-- Services
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
+-- Variables
 local selectedDummy = "Quest Dummy 1"
 local selectedWeapon = nil
 local farmDistance = 5
 local farmPosition = "Behind"
+local selectedIsland = nil
+local selectedNPC = nil
+local selectedDungeon = nil
 
 local autoFarmEnabled = false
 local autoQuestEnabled = false
 local autoEquipEnabled = true
 local autoSkillsEnabled = true
+local killAnyNearby = false -- يقتل أي NPC قريب
 local autoBusoHaki = false
 local autoKenHaki = false
 local autoConquerorHaki = false
+
+local busoActivated = false
+local kenActivated = false
+local conquerorActivated = false
 
 local activeKeys = {
     Q = true, E = true, R = true, F = true, Y = true,
@@ -48,14 +59,57 @@ local activeKeys = {
     Z = false, X = false, C = false, V = false, H = false
 }
 local lastSkillTime = 0
+local farmPart = nil
+local noclipConnection = nil
 
--- Helpers
+-- ===================== Helpers =====================
 local function GetCharacter()
     local entities = workspace:FindFirstChild("Entities")
     if entities and entities:FindFirstChild(player.Name) then
         return entities[player.Name]
     end
     return player.Character
+end
+
+local function GetOrCreateFarmPart()
+    if farmPart and farmPart.Parent then return farmPart end
+    farmPart = Instance.new("Part")
+    farmPart.Name = "FarmPositionPart"
+    farmPart.Size = Vector3.new(1, 1, 1)
+    farmPart.Transparency = 1
+    farmPart.CanCollide = false
+    farmPart.Anchored = true
+    farmPart.Parent = workspace
+    return farmPart
+end
+
+local function EnableNoclip()
+    if noclipConnection then return end
+    noclipConnection = RunService.Stepped:Connect(function()
+        local char = GetCharacter()
+        if char then
+            for _, part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end)
+end
+
+local function DisableNoclip()
+    if noclipConnection then
+        noclipConnection:Disconnect()
+        noclipConnection = nil
+    end
+    local char = GetCharacter()
+    if char then
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                part.CanCollide = true
+            end
+        end
+    end
 end
 
 local function GetQuestPart()
@@ -68,13 +122,11 @@ end
 local function TakeQuest()
     local QuestPart = GetQuestPart()
     if not QuestPart then return end
-
     local char = GetCharacter()
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if hrp then
         hrp.CFrame = CFrame.lookAt(QuestPart.Position + Vector3.new(0, 3, 4), QuestPart.Position)
     end
-
     task.wait(0.1)
     local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
     if Remotes then
@@ -106,7 +158,7 @@ local function GetCurrentTargetData()
     return nil, nil, nil
 end
 
-local function GetTargetEnemy(targetName)
+local function GetClosestEnemy(optionalName)
     local closestEnemy = nil
     local shortestDistance = math.huge
     local char = GetCharacter()
@@ -117,11 +169,17 @@ local function GetTargetEnemy(targetName)
     for _, location in pairs(searchLocations) do
         if location then
             for _, model in pairs(location:GetChildren()) do
-                if model:IsA("Model") and model.Name ~= player.Name and model.Name:find(targetName) and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 and model:FindFirstChild("HumanoidRootPart") then
-                    local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
-                    if dist < shortestDistance then
-                        shortestDistance = dist
-                        closestEnemy = model
+                if model:IsA("Model") and model.Name ~= player.Name 
+                    and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 
+                    and model:FindFirstChild("HumanoidRootPart") then
+                    
+                    -- لو killAnyNearby = true ياخذ أي واحد، غير كذا يدور على الاسم
+                    if killAnyNearby or (optionalName and model.Name:find(optionalName)) then
+                        local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
+                        if dist < shortestDistance and dist < 300 then -- حد أقصى 300
+                            shortestDistance = dist
+                            closestEnemy = model
+                        end
                     end
                 end
             end
@@ -145,14 +203,51 @@ local function PositionToEnemy(targetHRP)
         offset = Vector3.new(0, -farmDistance, 0)
     end
 
-    hrp.CFrame = CFrame.lookAt(targetHRP.Position + offset, targetHRP.Position)
+    local part = GetOrCreateFarmPart()
+    part.CFrame = CFrame.lookAt(targetHRP.Position + offset, targetHRP.Position)
+
+    local bp = hrp:FindFirstChild("FarmBodyPosition")
+    if not bp then
+        bp = Instance.new("BodyPosition")
+        bp.Name = "FarmBodyPosition"
+        bp.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+        bp.P = 50000
+        bp.D = 2000
+        bp.Parent = hrp
+    end
+    bp.Position = part.Position
+
+    local bg = hrp:FindFirstChild("FarmBodyGyro")
+    if not bg then
+        bg = Instance.new("BodyGyro")
+        bg.Name = "FarmBodyGyro"
+        bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+        bg.P = 5000
+        bg.Parent = hrp
+    end
+    bg.CFrame = CFrame.lookAt(hrp.Position, targetHRP.Position)
+end
+
+local function ClearFarmForces()
+    local char = GetCharacter()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local bp = hrp:FindFirstChild("FarmBodyPosition")
+        if bp then bp:Destroy() end
+        local bg = hrp:FindFirstChild("FarmBodyGyro")
+        if bg then bg:Destroy() end
+    end
+    if farmPart then
+        farmPart:Destroy()
+        farmPart = nil
+    end
 end
 
 local function AutoEquipSelectedWeapon()
     if not autoEquipEnabled or not selectedWeapon then return end
     local char = GetCharacter()
     if not char then return end
-
     local currentTool = char:FindFirstChildOfClass("Tool")
     if not currentTool or currentTool.Name ~= selectedWeapon then
         local backpack = player:FindFirstChild("Backpack")
@@ -165,31 +260,46 @@ local function AutoEquipSelectedWeapon()
     end
 end
 
+local function PressKey(key)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, key, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end)
+end
+
 local function CastSkills()
-    if autoBusoHaki then
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.J, false, game)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.J, false, game)
+    if autoBusoHaki and not busoActivated then
+        PressKey(Enum.KeyCode.J)
+        busoActivated = true
+    elseif not autoBusoHaki then
+        busoActivated = false
     end
-    if autoKenHaki then
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.K, false, game)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.K, false, game)
+
+    if autoKenHaki and not kenActivated then
+        PressKey(Enum.KeyCode.K)
+        kenActivated = true
+    elseif not autoKenHaki then
+        kenActivated = false
     end
-    if autoConquerorHaki then
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.L, false, game)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.L, false, game)
+
+    if autoConquerorHaki and not conquerorActivated then
+        PressKey(Enum.KeyCode.L)
+        conquerorActivated = true
+    elseif not autoConquerorHaki then
+        conquerorActivated = false
     end
 
     if not autoSkillsEnabled then return end
-    if tick() - lastSkillTime > 0.5 then
-        lastSkillTime = tick()
-        for keyName, isEnabled in pairs(activeKeys) do
-            if isEnabled then
-                local enumKey = Enum.KeyCode[keyName]
-                if enumKey then
-                    VirtualInputManager:SendKeyEvent(true, enumKey, false, game)
-                    task.wait(0.02)
-                    VirtualInputManager:SendKeyEvent(false, enumKey, false, game)
-                end
+    if tick() - lastSkillTime < 0.85 then return end
+    lastSkillTime = tick()
+
+    for keyName, isEnabled in pairs(activeKeys) do
+        if isEnabled then
+            local enumKey = Enum.KeyCode[keyName]
+            if enumKey then
+                PressKey(enumKey)
+                task.wait(0.12)
             end
         end
     end
@@ -199,7 +309,6 @@ local function PerformAttack()
     AutoEquipSelectedWeapon()
     local char = GetCharacter()
     if not char then return end
-
     local tool = char:FindFirstChildOfClass("Tool")
     if tool then
         tool:Activate()
@@ -212,7 +321,109 @@ local function PerformAttack()
     end
 end
 
--- UI Setup
+-- ===================== Fly Function =====================
+local function FlyToPosition(targetPos, name)
+    local char = GetCharacter()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    ClearFarmForces()
+    EnableNoclip()
+
+    local finalPos = targetPos + Vector3.new(0, 8, 0)
+
+    local bp = Instance.new("BodyPosition")
+    bp.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    bp.P = 12000
+    bp.D = 800
+    bp.Position = hrp.Position
+    bp.Parent = hrp
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    bg.P = 3000
+    bg.CFrame = hrp.CFrame
+    bg.Parent = hrp
+
+    local distance = (hrp.Position - finalPos).Magnitude
+    local time = math.clamp(distance / 80, 1.5, 8)
+
+    local tween = TweenService:Create(bp, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Position = finalPos
+    })
+    tween:Play()
+    tween.Completed:Wait()
+
+    bp:Destroy()
+    bg:Destroy()
+    DisableNoclip()
+
+    Library:Notification({
+        Title = "Travel",
+        Description = "وصلت إلى: " .. tostring(name),
+        Duration = 3
+    })
+end
+
+local function GetIslandPosition(islandName)
+    local islands = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Islands")
+    if not islands then return nil end
+    local islandFolder = islands:FindFirstChild(islandName)
+    if not islandFolder then return nil end
+
+    local model = islandFolder:FindFirstChild("Model") or islandFolder
+    local target = model:FindFirstChild(islandName) or model:FindFirstChildWhichIsA("BasePart") or model:FindFirstChildWhichIsA("Model")
+    
+    if target then
+        if target:IsA("Model") then return target:GetPivot().Position
+        elseif target:IsA("BasePart") then return target.Position end
+    end
+    return nil
+end
+
+local function GetNPCPosition(npcName)
+    local interactables = workspace:FindFirstChild("Interactables")
+    if not interactables then return nil end
+    local npc = interactables:FindFirstChild(npcName)
+    if not npc then return nil end
+
+    local part = npc:FindFirstChild(npcName) or npc:FindFirstChildWhichIsA("BasePart") or npc:FindFirstChildWhichIsA("Model")
+    if part then
+        if part:IsA("Model") then return part:GetPivot().Position
+        elseif part:IsA("BasePart") then return part.Position end
+    end
+    return npc:IsA("Model") and npc:GetPivot().Position or nil
+end
+
+local function GetDungeonPosition(dungeonName)
+    local map = workspace:FindFirstChild("Map")
+    if not map then return nil end
+
+    -- نبحث في أماكن محتملة
+    local possible = {
+        map:FindFirstChild("Dungeons"),
+        map:FindFirstChild("Dungeon"),
+        map:FindFirstChild("Raids"),
+        map
+    }
+
+    for _, folder in pairs(possible) do
+        if folder then
+            local dung = folder:FindFirstChild(dungeonName)
+            if dung then
+                local part = dung:FindFirstChildWhichIsA("BasePart") or dung:FindFirstChildWhichIsA("Model")
+                if part then
+                    if part:IsA("Model") then return part:GetPivot().Position
+                    else return part.Position end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- ===================== UI =====================
 Window:Category("Main Farm")
 local FarmPage = Window:Page({Name = "Auto Farm", Icon = "138827881557940"})
 
@@ -224,6 +435,7 @@ FarmSection:Toggle({
     Default = false,
     Callback = function(Value)
         autoFarmEnabled = Value
+        if not Value then ClearFarmForces() end
     end
 })
 
@@ -241,9 +453,14 @@ FarmSection:Toggle({
     Name = "Auto Equip Weapon (تجهيز السلاح)",
     Flag = "AutoEquipToggle",
     Default = true,
-    Callback = function(Value)
-        autoEquipEnabled = Value
-    end
+    Callback = function(Value) autoEquipEnabled = Value end
+})
+
+FarmSection:Toggle({
+    Name = "Kill Any Nearby NPC (يقتل أي قريب)",
+    Flag = "KillAnyNearby",
+    Default = false,
+    Callback = function(Value) killAnyNearby = Value end
 })
 
 local TargetSection = FarmPage:Section({Name = "Target & Weapon", Side = 2})
@@ -270,14 +487,23 @@ TargetSection:Dropdown({
 })
 
 local weaponList = {}
-local backpack = player:FindFirstChild("Backpack")
-if backpack then
-    for _, item in pairs(backpack:GetChildren()) do
-        if item:IsA("Tool") then table.insert(weaponList, item.Name) end
+local function RefreshWeapons()
+    weaponList = {}
+    local backpack = player:FindFirstChild("Backpack")
+    if backpack then
+        for _, item in pairs(backpack:GetChildren()) do
+            if item:IsA("Tool") then table.insert(weaponList, item.Name) end
+        end
     end
+    if player.Character then
+        for _, item in pairs(player.Character:GetChildren()) do
+            if item:IsA("Tool") then table.insert(weaponList, item.Name) end
+        end
+    end
+    if #weaponList == 0 then weaponList = {"Unarmed"} end
+    selectedWeapon = weaponList[1]
 end
-if #weaponList == 0 then weaponList = {"Unarmed"} end
-selectedWeapon = weaponList[1]
+RefreshWeapons()
 
 TargetSection:Dropdown({
     Name = "Select Weapon",
@@ -286,6 +512,14 @@ TargetSection:Dropdown({
     Items = weaponList,
     Callback = function(Value)
         selectedWeapon = type(Value) == "table" and Value[1] or Value
+    end
+})
+
+TargetSection:Button({
+    Name = "Refresh Weapons (تحديث الأسلحة)",
+    Callback = function()
+        RefreshWeapons()
+        Library:Notification({Title = "Weapons", Description = "تم تحديث الأسلحة (" .. #weaponList .. ")", Duration = 3})
     end
 })
 
@@ -303,14 +537,166 @@ TargetSection:Slider({
     Name = "Farm Distance",
     Flag = "FarmDistSlider",
     Min = 2,
-    Max = 30,
+    Max = 300,
     Default = 5,
     Suffix = " studs",
-    Callback = function(Value)
-        farmDistance = Value
+    Callback = function(Value) farmDistance = Value end
+})
+
+-- ===================== Travel Page =====================
+Window:Category("Travel")
+local TravelPage = Window:Page({Name = "التنقل", Icon = "138827881557940"})
+
+-- Islands
+local IslandSection = TravelPage:Section({Name = "الجزر", Side = 1})
+
+local islandList = {}
+local function RefreshIslands()
+    islandList = {}
+    local folder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Islands")
+    if folder then
+        for _, island in pairs(folder:GetChildren()) do
+            table.insert(islandList, island.Name)
+        end
+    end
+    table.sort(islandList)
+    if #islandList == 0 then islandList = {"Blacksmith's House V2"} end
+    selectedIsland = islandList[1]
+end
+RefreshIslands()
+
+IslandSection:Dropdown({
+    Name = "اختر الجزيرة",
+    Flag = "IslandDropdown",
+    Default = {islandList[1]},
+    Items = islandList,
+    Callback = function(Value) selectedIsland = type(Value) == "table" and Value[1] or Value end
+})
+
+IslandSection:Button({
+    Name = "روح للجزيرة",
+    Callback = function()
+        if selectedIsland then
+            task.spawn(function()
+                local pos = GetIslandPosition(selectedIsland)
+                if pos then FlyToPosition(pos, selectedIsland)
+                else Library:Notification({Title = "Island", Description = "ما لقيت الجزيرة", Duration = 3}) end
+            end)
+        end
     end
 })
 
+IslandSection:Button({
+    Name = "تحديث الجزر",
+    Callback = function()
+        RefreshIslands()
+        Library:Notification({Title = "Islands", Description = "تم التحديث (" .. #islandList .. ")", Duration = 3})
+    end
+})
+
+-- NPCs
+local NPCSection = TravelPage:Section({Name = "الـ NPCs", Side = 2})
+
+local npcList = {}
+local function RefreshNPCs()
+    npcList = {}
+    local folder = workspace:FindFirstChild("Interactables")
+    if folder then
+        for _, npc in pairs(folder:GetChildren()) do
+            if not npc.Name:find("Quest Dummy") then
+                table.insert(npcList, npc.Name)
+            end
+        end
+    end
+    table.sort(npcList)
+    if #npcList == 0 then npcList = {"Challenger"} end
+    selectedNPC = npcList[1]
+end
+RefreshNPCs()
+
+NPCSection:Dropdown({
+    Name = "اختر الـ NPC",
+    Flag = "NPCDropdown",
+    Default = {npcList[1]},
+    Items = npcList,
+    Callback = function(Value) selectedNPC = type(Value) == "table" and Value[1] or Value end
+})
+
+NPCSection:Button({
+    Name = "روح للـ NPC",
+    Callback = function()
+        if selectedNPC then
+            task.spawn(function()
+                local pos = GetNPCPosition(selectedNPC)
+                if pos then FlyToPosition(pos, selectedNPC)
+                else Library:Notification({Title = "NPC", Description = "ما لقيت الـ NPC", Duration = 3}) end
+            end)
+        end
+    end
+})
+
+NPCSection:Button({
+    Name = "تحديث الـ NPCs",
+    Callback = function()
+        RefreshNPCs()
+        Library:Notification({Title = "NPCs", Description = "تم التحديث (" .. #npcList .. ")", Duration = 3})
+    end
+})
+
+-- Dungeons
+local DungeonSection = TravelPage:Section({Name = "الدنجن", Side = 1})
+
+local dungeonList = {}
+local function RefreshDungeons()
+    dungeonList = {}
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        for _, folder in pairs({map:FindFirstChild("Dungeons"), map:FindFirstChild("Dungeon"), map:FindFirstChild("Raids"), map}) do
+            if folder then
+                for _, item in pairs(folder:GetChildren()) do
+                    if item.Name:lower():find("dungeon") or item.Name:lower():find("raid") or item.Name:lower():find("boss") then
+                        table.insert(dungeonList, item.Name)
+                    end
+                end
+            end
+        end
+    end
+    table.sort(dungeonList)
+    if #dungeonList == 0 then dungeonList = {"Dungeon"} end
+    selectedDungeon = dungeonList[1]
+end
+RefreshDungeons()
+
+DungeonSection:Dropdown({
+    Name = "اختر الدنجن",
+    Flag = "DungeonDropdown",
+    Default = {dungeonList[1]},
+    Items = dungeonList,
+    Callback = function(Value) selectedDungeon = type(Value) == "table" and Value[1] or Value end
+})
+
+DungeonSection:Button({
+    Name = "روح للدنجن",
+    Callback = function()
+        if selectedDungeon then
+            task.spawn(function()
+                local pos = GetDungeonPosition(selectedDungeon)
+                if pos then FlyToPosition(pos, selectedDungeon)
+                else Library:Notification({Title = "Dungeon", Description = "ما لقيت الدنجن", Duration = 3}) end
+            end)
+        end
+    end
+})
+
+DungeonSection:Button({
+    Name = "تحديث الدنجن",
+    Callback = function()
+        RefreshDungeons()
+        Library:Notification({Title = "Dungeons", Description = "تم التحديث (" .. #dungeonList .. ")", Duration = 3})
+    end
+})
+
+-- ===================== Skills =====================
 Window:Category("Skills & Haki")
 local SkillsPage = Window:Page({Name = "Abilities", Icon = "138827881557940"})
 
@@ -320,9 +706,7 @@ SkillSection:Toggle({
     Name = "Auto Use Skills (تفعيل المهارات)",
     Flag = "AutoSkillsToggle",
     Default = true,
-    Callback = function(Value)
-        autoSkillsEnabled = Value
-    end
+    Callback = function(Value) autoSkillsEnabled = Value end
 })
 
 local availableKeys = {"Q", "E", "R", "F", "Y", "Z", "X", "C", "V"}
@@ -331,9 +715,7 @@ for _, k in pairs(availableKeys) do
         Name = "Use Skill [" .. k .. "]",
         Flag = "SkillKey_" .. k,
         Default = activeKeys[k] or false,
-        Callback = function(Value)
-            activeKeys[k] = Value
-        end
+        Callback = function(Value) activeKeys[k] = Value end
     })
 end
 
@@ -343,48 +725,71 @@ HakiSection:Toggle({
     Name = "Auto Armament Haki (J)",
     Flag = "AutoBuso",
     Default = false,
-    Callback = function(Value) autoBusoHaki = Value end
+    Callback = function(Value)
+        autoBusoHaki = Value
+        if not Value then busoActivated = false end
+    end
 })
 
 HakiSection:Toggle({
     Name = "Auto Observation Haki (K)",
     Flag = "AutoKen",
     Default = false,
-    Callback = function(Value) autoKenHaki = Value end
+    Callback = function(Value)
+        autoKenHaki = Value
+        if not Value then kenActivated = false end
+    end
 })
 
 HakiSection:Toggle({
     Name = "Auto Conqueror Haki (L)",
     Flag = "AutoConqueror",
     Default = false,
-    Callback = function(Value) autoConquerorHaki = Value end
+    Callback = function(Value)
+        autoConquerorHaki = Value
+        if not Value then conquerorActivated = false end
+    end
 })
 
 Window:Category("Settings")
 Library:CreateSettingsPage(Window, KeybindList)
 
--- Loop Execution
+-- ===================== Loop =====================
 task.spawn(function()
     while true do
         task.wait(0.05)
         if autoFarmEnabled then
             local targetName, killedObj, amountObj = GetCurrentTargetData()
-            if targetName then
+            
+            if killAnyNearby then
+                -- يقتل أي NPC قريب
+                local enemy = GetClosestEnemy(nil)
+                if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
+                    PositionToEnemy(enemy.HumanoidRootPart)
+                    PerformAttack()
+                else
+                    ClearFarmForces()
+                end
+            elseif targetName then
                 local kVal = killedObj and killedObj.Value or 0
                 local aVal = amountObj and amountObj.Value or 5
 
                 if kVal >= aVal then
+                    ClearFarmForces()
                     TakeQuest()
                     task.wait(0.2)
                     CloseDialogue()
                 else
-                    local enemy = GetTargetEnemy(targetName)
+                    local enemy = GetClosestEnemy(targetName)
                     if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
                         PositionToEnemy(enemy.HumanoidRootPart)
                         PerformAttack()
+                    else
+                        ClearFarmForces()
                     end
                 end
             else
+                ClearFarmForces()
                 if autoQuestEnabled then
                     TakeQuest()
                     task.wait(0.2)
