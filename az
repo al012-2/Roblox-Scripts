@@ -1,0 +1,882 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "AOPG ULTRA",
+    LoadingTitle = "JX Edition | Auto Farm Hub",
+    LoadingSubtitle = "by JX",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "AOPG_Ultra",
+        FileName = "Config"
+    },
+    KeySystem = false,
+})
+
+-- Services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+
+-- Variables
+local selectedDummy = "Quest Dummy 1"
+local selectedWeapon = nil
+local selectedFarmNPC = nil
+local farmDistance = 5
+local farmPosition = "Behind"
+local killRange = 500
+local selectedIsland = nil
+local selectedNPC = nil
+local selectedDungeon = nil
+
+local autoFarmEnabled = false
+local autoQuestEnabled = false
+local autoEquipEnabled = true
+local autoSkillsEnabled = true
+local killAnyNearby = true
+local autoBusoHaki = false
+local autoKenHaki = false
+local autoConquerorHaki = false
+
+local busoActivated = false
+local kenActivated = false
+local conquerorActivated = false
+
+local activeKeys = {
+    Q = true, E = true, R = true, F = true, Y = true,
+    J = false, K = false, L = false,
+    Z = false, X = false, C = false, V = false, H = false
+}
+local lastSkillTime = 0
+local farmPart = nil
+local noclipConnection = nil
+
+-- ===================== Helpers =====================
+local function GetCharacter()
+    local entities = workspace:FindFirstChild("Entities")
+    if entities and entities:FindFirstChild(player.Name) then
+        return entities[player.Name]
+    end
+    return player.Character
+end
+
+local function GetOrCreateFarmPart()
+    if farmPart and farmPart.Parent then return farmPart end
+    farmPart = Instance.new("Part")
+    farmPart.Name = "FarmPositionPart"
+    farmPart.Size = Vector3.new(1, 1, 1)
+    farmPart.Transparency = 1
+    farmPart.CanCollide = false
+    farmPart.Anchored = true
+    farmPart.Parent = workspace
+    return farmPart
+end
+
+local function EnableNoclip()
+    if noclipConnection then return end
+    noclipConnection = RunService.Stepped:Connect(function()
+        local char = GetCharacter()
+        if char then
+            for _, part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end)
+end
+
+local function DisableNoclip()
+    if noclipConnection then
+        noclipConnection:Disconnect()
+        noclipConnection = nil
+    end
+    local char = GetCharacter()
+    if char then
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                part.CanCollide = true
+            end
+        end
+    end
+end
+
+local function GetQuestPart()
+    local ok, result = pcall(function()
+        return workspace.Interactables[selectedDummy][selectedDummy]
+    end)
+    return ok and result or nil
+end
+
+local function TakeQuest()
+    local QuestPart = GetQuestPart()
+    if not QuestPart then return end
+    local char = GetCharacter()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.lookAt(QuestPart.Position + Vector3.new(0, 3, 4), QuestPart.Position)
+    end
+    task.wait(0.1)
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if Remotes then
+        if Remotes:FindFirstChild("talk") then Remotes.talk:FireServer(QuestPart) end
+        task.wait(0.2)
+        if Remotes:FindFirstChild("quest") then
+            Remotes.quest:FireServer("Accept", { Index = 1, Model = QuestPart })
+        end
+    end
+end
+
+local function CloseDialogue()
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if Remotes then
+        pcall(function() Remotes.talk:FireServer("Cancel") end)
+        pcall(function() Remotes.talk:FireServer(nil) end)
+        pcall(function() Remotes.quest:FireServer("Cancel") end)
+    end
+end
+
+local function GetCurrentTargetData()
+    local quests = player:FindFirstChild("Quests2")
+    if quests and quests:FindFirstChild("1") and quests["1"]:FindFirstChild("Targets") then
+        local targetObj = quests["1"].Targets:GetChildren()[1]
+        if targetObj then
+            return targetObj.Name, targetObj:FindFirstChild("Killed"), targetObj:FindFirstChild("Amount")
+        end
+    end
+    return nil, nil, nil
+end
+
+local function GetClosestEnemy(optionalName)
+    local closestEnemy = nil
+    local shortestDistance = math.huge
+    local char = GetCharacter()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local entities = workspace:FindFirstChild("Entities")
+    if not entities then return nil end
+
+    for _, model in pairs(entities:GetChildren()) do
+        if model:IsA("Model") and model.Name ~= player.Name 
+            and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 
+            and model:FindFirstChild("HumanoidRootPart") then
+
+            local match = true
+
+            if optionalName and optionalName ~= "None" and not killAnyNearby then
+                match = model.Name:find(optionalName) or model.Name == optionalName
+            end
+
+            if match then
+                local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
+                if dist < shortestDistance and dist <= killRange then
+                    shortestDistance = dist
+                    closestEnemy = model
+                end
+            end
+        end
+    end
+    return closestEnemy
+end
+
+local function PositionToEnemy(targetHRP)
+    local char = GetCharacter()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp or not targetHRP then return end
+
+    local offset = Vector3.new(0, 0, 0)
+    if farmPosition == "Behind" then
+        offset = (targetHRP.CFrame.LookVector * -farmDistance) + Vector3.new(0, 1.5, 0)
+    elseif farmPosition == "Above" then
+        offset = Vector3.new(0, farmDistance, 0)
+    elseif farmPosition == "Below" then
+        offset = Vector3.new(0, -farmDistance, 0)
+    end
+
+    local part = GetOrCreateFarmPart()
+    part.CFrame = CFrame.lookAt(targetHRP.Position + offset, targetHRP.Position)
+
+    local bp = hrp:FindFirstChild("FarmBodyPosition")
+    if not bp then
+        bp = Instance.new("BodyPosition")
+        bp.Name = "FarmBodyPosition"
+        bp.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+        bp.P = 50000
+        bp.D = 2000
+        bp.Parent = hrp
+    end
+    bp.Position = part.Position
+
+    local bg = hrp:FindFirstChild("FarmBodyGyro")
+    if not bg then
+        bg = Instance.new("BodyGyro")
+        bg.Name = "FarmBodyGyro"
+        bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+        bg.P = 5000
+        bg.Parent = hrp
+    end
+    bg.CFrame = CFrame.lookAt(hrp.Position, targetHRP.Position)
+end
+
+local function ClearFarmForces()
+    local char = GetCharacter()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local bp = hrp:FindFirstChild("FarmBodyPosition")
+        if bp then bp:Destroy() end
+        local bg = hrp:FindFirstChild("FarmBodyGyro")
+        if bg then bg:Destroy() end
+    end
+    if farmPart then
+        farmPart:Destroy()
+        farmPart = nil
+    end
+end
+
+local function AutoEquipSelectedWeapon()
+    if not autoEquipEnabled or not selectedWeapon then return end
+    local char = GetCharacter()
+    if not char then return end
+    local currentTool = char:FindFirstChildOfClass("Tool")
+    if not currentTool or currentTool.Name ~= selectedWeapon then
+        local backpack = player:FindFirstChild("Backpack")
+        if backpack then
+            local targetTool = backpack:FindFirstChild(selectedWeapon)
+            if targetTool and char:FindFirstChild("Humanoid") then
+                char.Humanoid:EquipTool(targetTool)
+            end
+        end
+    end
+end
+
+local function PressKey(key)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, key, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end)
+end
+
+local function CastSkills()
+    if autoBusoHaki and not busoActivated then
+        PressKey(Enum.KeyCode.J)
+        busoActivated = true
+    elseif not autoBusoHaki then
+        busoActivated = false
+    end
+
+    if autoKenHaki and not kenActivated then
+        PressKey(Enum.KeyCode.K)
+        kenActivated = true
+    elseif not autoKenHaki then
+        kenActivated = false
+    end
+
+    if autoConquerorHaki and not conquerorActivated then
+        PressKey(Enum.KeyCode.L)
+        conquerorActivated = true
+    elseif not autoConquerorHaki then
+        conquerorActivated = false
+    end
+
+    if not autoSkillsEnabled then return end
+    if tick() - lastSkillTime < 0.85 then return end
+    lastSkillTime = tick()
+
+    for keyName, isEnabled in pairs(activeKeys) do
+        if isEnabled then
+            local enumKey = Enum.KeyCode[keyName]
+            if enumKey then
+                PressKey(enumKey)
+                task.wait(0.12)
+            end
+        end
+    end
+end
+
+local function PerformAttack()
+    AutoEquipSelectedWeapon()
+    local char = GetCharacter()
+    if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        tool:Activate()
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        if remotes then
+            if remotes:FindFirstChild("Attack") then remotes.Attack:FireServer()
+            elseif remotes:FindFirstChild("Hit") then remotes.Hit:FireServer() end
+        end
+        CastSkills()
+    end
+end
+
+local function FlyToPosition(targetPos, name)
+    local char = GetCharacter()
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    ClearFarmForces()
+    EnableNoclip()
+
+    local finalPos = targetPos + Vector3.new(0, 8, 0)
+
+    local bp = Instance.new("BodyPosition")
+    bp.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    bp.P = 12000
+    bp.D = 800
+    bp.Position = hrp.Position
+    bp.Parent = hrp
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    bg.P = 3000
+    bg.CFrame = hrp.CFrame
+    bg.Parent = hrp
+
+    local distance = (hrp.Position - finalPos).Magnitude
+    local time = math.clamp(distance / 80, 1.5, 8)
+
+    local tween = TweenService:Create(bp, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Position = finalPos
+    })
+    tween:Play()
+    tween.Completed:Wait()
+
+    bp:Destroy()
+    bg:Destroy()
+    DisableNoclip()
+
+    Rayfield:Notify({
+        Title = "Travel",
+        Content = "وصلت إلى: " .. tostring(name),
+        Duration = 3
+    })
+end
+
+local function GetIslandPosition(islandName)
+    local islands = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Islands")
+    if not islands then return nil end
+    local islandFolder = islands:FindFirstChild(islandName)
+    if not islandFolder then return nil end
+
+    local model = islandFolder:FindFirstChild("Model") or islandFolder
+    local target = model:FindFirstChild(islandName) or model:FindFirstChildWhichIsA("BasePart") or model:FindFirstChildWhichIsA("Model")
+    
+    if target then
+        if target:IsA("Model") then return target:GetPivot().Position
+        elseif target:IsA("BasePart") then return target.Position end
+    end
+    return nil
+end
+
+local function GetNPCPosition(npcName)
+    local interactables = workspace:FindFirstChild("Interactables")
+    if not interactables then return nil end
+    local npc = interactables:FindFirstChild(npcName)
+    if not npc then return nil end
+
+    local part = npc:FindFirstChild(npcName) or npc:FindFirstChildWhichIsA("BasePart") or npc:FindFirstChildWhichIsA("Model")
+    if part then
+        if part:IsA("Model") then return part:GetPivot().Position
+        elseif part:IsA("BasePart") then return part.Position end
+    end
+    return npc:IsA("Model") and npc:GetPivot().Position or nil
+end
+
+local function GetDungeonPosition(dungeonName)
+    local map = workspace:FindFirstChild("Map")
+    if not map then return nil end
+
+    local possible = {
+        map:FindFirstChild("Dungeons"),
+        map:FindFirstChild("Dungeon"),
+        map:FindFirstChild("Raids"),
+        map
+    }
+
+    for _, folder in pairs(possible) do
+        if folder then
+            local dung = folder:FindFirstChild(dungeonName)
+            if dung then
+                local part = dung:FindFirstChildWhichIsA("BasePart") or dung:FindFirstChildWhichIsA("Model")
+                if part then
+                    if part:IsA("Model") then return part:GetPivot().Position
+                    else return part.Position end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- ===================== Tabs =====================
+local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
+local TravelTab = Window:CreateTab("التنقل", 4483362458)
+local SkillsTab = Window:CreateTab("Abilities", 4483362458)
+
+-- ===================== Farm Tab =====================
+FarmTab:CreateSection("Main Controls")
+
+FarmTab:CreateToggle({
+    Name = "Auto Farm (تلفيل تلقائي)",
+    CurrentValue = false,
+    Flag = "AutoFarmToggle",
+    Callback = function(Value)
+        autoFarmEnabled = Value
+        if not Value then ClearFarmForces() end
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto Quest (أخذ المهمة تلقائياً)",
+    CurrentValue = false,
+    Flag = "AutoQuestToggle",
+    Callback = function(Value)
+        autoQuestEnabled = Value
+        if autoQuestEnabled then TakeQuest() task.wait(0.2) CloseDialogue() end
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto Equip Weapon (تجهيز السلاح)",
+    CurrentValue = true,
+    Flag = "AutoEquipToggle",
+    Callback = function(Value) autoEquipEnabled = Value end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Kill Anything in Entities",
+    CurrentValue = true,
+    Flag = "KillAnyNearby",
+    Callback = function(Value) killAnyNearby = Value end,
+})
+
+FarmTab:CreateSlider({
+    Name = "Kill Range (رينج القتل)",
+    Range = {50, 1500},
+    Increment = 10,
+    Suffix = " studs",
+    CurrentValue = 500,
+    Flag = "KillRangeSlider",
+    Callback = function(Value) killRange = Value end,
+})
+
+FarmTab:CreateSection("Target & Weapon")
+
+local dummyList = {}
+local interactables = workspace:FindFirstChild("Interactables")
+if interactables then
+    for _, v in pairs(interactables:GetChildren()) do
+        if v.Name:find("Quest Dummy") then
+            table.insert(dummyList, v.Name)
+        end
+    end
+end
+if #dummyList == 0 then dummyList = {"Quest Dummy 1"} end
+
+FarmTab:CreateDropdown({
+    Name = "Select Quest Dummy",
+    Options = dummyList,
+    CurrentOption = {dummyList[1]},
+    Flag = "DummyDropdown",
+    Callback = function(Option)
+        selectedDummy = Option[1]
+    end,
+})
+
+FarmTab:CreateButton({
+    Name = "Switch Quest Dummy (تبديل سريع للكوست)",
+    Callback = function()
+        if #dummyList == 0 then return end
+        local currentIndex = 1
+        for i, name in ipairs(dummyList) do
+            if name == selectedDummy then
+                currentIndex = i
+                break
+            end
+        end
+        local nextIndex = currentIndex % #dummyList + 1
+        selectedDummy = dummyList[nextIndex]
+        
+        Rayfield:Notify({
+            Title = "Quest Dummy",
+            Content = "تم اختيار الكوست: " .. selectedDummy,
+            Duration = 3
+        })
+    end,
+})
+
+local farmNPCList = {}
+local function RefreshFarmNPCs()
+    farmNPCList = {}
+    local entities = workspace:FindFirstChild("Entities")
+    if entities then
+        for _, model in pairs(entities:GetChildren()) do
+            if model:IsA("Model") and model.Name ~= player.Name and model:FindFirstChild("Humanoid") then
+                table.insert(farmNPCList, model.Name)
+            end
+        end
+    end
+    local unique = {}
+    local result = {}
+    for _, name in ipairs(farmNPCList) do
+        if not unique[name] then
+            unique[name] = true
+            table.insert(result, name)
+        end
+    end
+    farmNPCList = result
+    table.sort(farmNPCList)
+    if #farmNPCList == 0 then farmNPCList = {"None"} end
+    selectedFarmNPC = farmNPCList[1]
+end
+RefreshFarmNPCs()
+
+local FarmNPCDropdown = FarmTab:CreateDropdown({
+    Name = "Select NPC (للفارم)",
+    Options = farmNPCList,
+    CurrentOption = {farmNPCList[1]},
+    Flag = "FarmNPCDropdown",
+    Callback = function(Option)
+        selectedFarmNPC = Option[1]
+    end,
+})
+
+FarmTab:CreateButton({
+    Name = "Refresh NPCs (تحديث الـ NPCs)",
+    Callback = function()
+        RefreshFarmNPCs()
+        FarmNPCDropdown:Refresh(farmNPCList, true)
+        Rayfield:Notify({Title = "NPCs", Content = "تم تحديث قائمة الـ NPCs", Duration = 3})
+    end,
+})
+
+local weaponList = {}
+local function RefreshWeapons()
+    weaponList = {}
+    local backpack = player:FindFirstChild("Backpack")
+    if backpack then
+        for _, item in pairs(backpack:GetChildren()) do
+            if item:IsA("Tool") then table.insert(weaponList, item.Name) end
+        end
+    end
+    if player.Character then
+        for _, item in pairs(player.Character:GetChildren()) do
+            if item:IsA("Tool") then table.insert(weaponList, item.Name) end
+        end
+    end
+    if #weaponList == 0 then weaponList = {"Unarmed"} end
+    selectedWeapon = weaponList[1]
+end
+RefreshWeapons()
+
+local WeaponDropdown = FarmTab:CreateDropdown({
+    Name = "Select Weapon",
+    Options = weaponList,
+    CurrentOption = {weaponList[1]},
+    Flag = "WeaponDropdown",
+    Callback = function(Option)
+        selectedWeapon = Option[1]
+    end,
+})
+
+FarmTab:CreateButton({
+    Name = "Refresh Weapons (تحديث الأسلحة)",
+    Callback = function()
+        RefreshWeapons()
+        WeaponDropdown:Refresh(weaponList, true)
+        Rayfield:Notify({Title = "Weapons", Content = "تم تحديث الأسلحة", Duration = 3})
+    end,
+})
+
+FarmTab:CreateDropdown({
+    Name = "Position Offset",
+    Options = {"Behind", "Above", "Below"},
+    CurrentOption = {"Behind"},
+    Flag = "PositionDropdown",
+    Callback = function(Option)
+        farmPosition = Option[1]
+    end,
+})
+
+FarmTab:CreateSlider({
+    Name = "Farm Distance",
+    Range = {2, 300},
+    Increment = 1,
+    Suffix = " studs",
+    CurrentValue = 5,
+    Flag = "FarmDistSlider",
+    Callback = function(Value) farmDistance = Value end,
+})
+
+-- ===================== Travel Tab =====================
+TravelTab:CreateSection("الجزر")
+
+local islandList = {}
+local function RefreshIslands()
+    islandList = {}
+    local folder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Islands")
+    if folder then
+        for _, island in pairs(folder:GetChildren()) do
+            table.insert(islandList, island.Name)
+        end
+    end
+    table.sort(islandList)
+    if #islandList == 0 then islandList = {"Blacksmith's House V2"} end
+    selectedIsland = islandList[1]
+end
+RefreshIslands()
+
+local IslandDropdown = TravelTab:CreateDropdown({
+    Name = "اختر الجزيرة",
+    Options = islandList,
+    CurrentOption = {islandList[1]},
+    Flag = "IslandDropdown",
+    Callback = function(Option) selectedIsland = Option[1] end,
+})
+
+TravelTab:CreateButton({
+    Name = "روح للجزيرة",
+    Callback = function()
+        if selectedIsland then
+            task.spawn(function()
+                local pos = GetIslandPosition(selectedIsland)
+                if pos then FlyToPosition(pos, selectedIsland)
+                else Rayfield:Notify({Title = "Island", Content = "ما لقيت الجزيرة", Duration = 3}) end
+            end)
+        end
+    end,
+})
+
+TravelTab:CreateButton({
+    Name = "تحديث الجزر",
+    Callback = function()
+        RefreshIslands()
+        IslandDropdown:Refresh(islandList, true)
+        Rayfield:Notify({Title = "Islands", Content = "تم التحديث", Duration = 3})
+    end,
+})
+
+TravelTab:CreateSection("الـ NPCs")
+
+local npcList = {}
+local function RefreshNPCs()
+    npcList = {}
+    local folder = workspace:FindFirstChild("Interactables")
+    if folder then
+        for _, npc in pairs(folder:GetChildren()) do
+            if not npc.Name:find("Quest Dummy") then
+                table.insert(npcList, npc.Name)
+            end
+        end
+    end
+    table.sort(npcList)
+    if #npcList == 0 then npcList = {"Challenger"} end
+    selectedNPC = npcList[1]
+end
+RefreshNPCs()
+
+local NPCDropdown = TravelTab:CreateDropdown({
+    Name = "اختر الـ NPC",
+    Options = npcList,
+    CurrentOption = {npcList[1]},
+    Flag = "NPCDropdown",
+    Callback = function(Option) selectedNPC = Option[1] end,
+})
+
+TravelTab:CreateButton({
+    Name = "روح للـ NPC",
+    Callback = function()
+        if selectedNPC then
+            task.spawn(function()
+                local pos = GetNPCPosition(selectedNPC)
+                if pos then FlyToPosition(pos, selectedNPC)
+                else Rayfield:Notify({Title = "NPC", Content = "ما لقيت الـ NPC", Duration = 3}) end
+            end)
+        end
+    end,
+})
+
+TravelTab:CreateButton({
+    Name = "تحديث الـ NPCs",
+    Callback = function()
+        RefreshNPCs()
+        NPCDropdown:Refresh(npcList, true)
+        Rayfield:Notify({Title = "NPCs", Content = "تم التحديث", Duration = 3})
+    end,
+})
+
+TravelTab:CreateSection("الدنجن")
+
+local dungeonList = {}
+local function RefreshDungeons()
+    dungeonList = {}
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        for _, folder in pairs({map:FindFirstChild("Dungeons"), map:FindFirstChild("Dungeon"), map:FindFirstChild("Raids"), map}) do
+            if folder then
+                for _, item in pairs(folder:GetChildren()) do
+                    if item.Name:lower():find("dungeon") or item.Name:lower():find("raid") or item.Name:lower():find("boss") then
+                        table.insert(dungeonList, item.Name)
+                    end
+                end
+            end
+        end
+    end
+    table.sort(dungeonList)
+    if #dungeonList == 0 then dungeonList = {"Dungeon"} end
+    selectedDungeon = dungeonList[1]
+end
+RefreshDungeons()
+
+local DungeonDropdown = TravelTab:CreateDropdown({
+    Name = "اختر الدنجن",
+    Options = dungeonList,
+    CurrentOption = {dungeonList[1]},
+    Flag = "DungeonDropdown",
+    Callback = function(Option) selectedDungeon = Option[1] end,
+})
+
+TravelTab:CreateButton({
+    Name = "روح للدنجن",
+    Callback = function()
+        if selectedDungeon then
+            task.spawn(function()
+                local pos = GetDungeonPosition(selectedDungeon)
+                if pos then FlyToPosition(pos, selectedDungeon)
+                else Rayfield:Notify({Title = "Dungeon", Content = "ما لقيت الدنجن", Duration = 3}) end
+            end)
+        end
+    end,
+})
+
+TravelTab:CreateButton({
+    Name = "تحديث الدنجن",
+    Callback = function()
+        RefreshDungeons()
+        DungeonDropdown:Refresh(dungeonList, true)
+        Rayfield:Notify({Title = "Dungeons", Content = "تم التحديث", Duration = 3})
+    end,
+})
+
+-- ===================== Skills Tab =====================
+SkillsTab:CreateSection("Skills Toggle")
+
+SkillsTab:CreateToggle({
+    Name = "Auto Use Skills (تفعيل المهارات)",
+    CurrentValue = true,
+    Flag = "AutoSkillsToggle",
+    Callback = function(Value) autoSkillsEnabled = Value end,
+})
+
+local availableKeys = {"Q", "E", "R", "F", "Y", "Z", "X", "C", "V"}
+for _, k in pairs(availableKeys) do
+    SkillsTab:CreateToggle({
+        Name = "Use Skill [" .. k .. "]",
+        CurrentValue = activeKeys[k] or false,
+        Flag = "SkillKey_" .. k,
+        Callback = function(Value) activeKeys[k] = Value end,
+    })
+end
+
+SkillsTab:CreateSection("Haki Settings")
+
+SkillsTab:CreateToggle({
+    Name = "Auto Armament Haki (J)",
+    CurrentValue = false,
+    Flag = "AutoBuso",
+    Callback = function(Value)
+        autoBusoHaki = Value
+        if not Value then busoActivated = false end
+    end,
+})
+
+SkillsTab:CreateToggle({
+    Name = "Auto Observation Haki (K)",
+    CurrentValue = false,
+    Flag = "AutoKen",
+    Callback = function(Value)
+        autoKenHaki = Value
+        if not Value then kenActivated = false end
+    end,
+})
+
+SkillsTab:CreateToggle({
+    Name = "Auto Conqueror Haki (L)",
+    CurrentValue = false,
+    Flag = "AutoConqueror",
+    Callback = function(Value)
+        autoConquerorHaki = Value
+        if not Value then conquerorActivated = false end
+    end,
+})
+
+-- ===================== Chat Commands for Mobile Users =====================
+player.Chatted:Connect(function(msg)
+    local args = string.split(msg, " ")
+    local cmd = string.lower(args[1])
+    
+    if cmd == "/farm" then
+        autoFarmEnabled = not autoFarmEnabled
+        Rayfield:Notify({Title = "Auto Farm", Content = "الحالة: " .. tostring(autoFarmEnabled), Duration = 2})
+    elseif cmd == "/quest" then
+        autoQuestEnabled = not autoQuestEnabled
+        Rayfield:Notify({Title = "Auto Quest", Content = "الحالة: " .. tostring(autoQuestEnabled), Duration = 2})
+    elseif cmd == "/switch" then
+        if #dummyList > 0 then
+            local currentIndex = 1
+            for i, name in ipairs(dummyList) do
+                if name == selectedDummy then
+                    currentIndex = i
+                    break
+                end
+            end
+            local nextIndex = currentIndex % #dummyList + 1
+            selectedDummy = dummyList[nextIndex]
+            Rayfield:Notify({Title = "Quest Dummy", Content = "تم تغيير الكوست إلى: " .. selectedDummy, Duration = 3})
+        end
+    end
+end)
+
+-- ===================== Loop =====================
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if autoFarmEnabled then
+            local enemy = GetClosestEnemy(selectedFarmNPC)
+            if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
+                PositionToEnemy(enemy.HumanoidRootPart)
+                PerformAttack()
+            else
+                ClearFarmForces()
+                
+                if autoQuestEnabled then
+                    local targetName, killedObj, amountObj = GetCurrentTargetData()
+                    if not targetName then
+                        TakeQuest()
+                        task.wait(0.2)
+                        CloseDialogue()
+                    elseif killedObj and amountObj and killedObj.Value >= amountObj.Value then
+                        TakeQuest()
+                        task.wait(0.2)
+                        CloseDialogue()
+                    end
+                end
+            end
+        end
+    end
+end)
+
+Rayfield:LoadConfiguration()
+
+Rayfield:Notify({
+    Title = "AOPG ULTRA",
+    Content = "Loaded Successfully with Rayfield UI!",
+    Duration = 5,
+})
