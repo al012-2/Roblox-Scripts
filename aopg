@@ -1,57 +1,55 @@
---// Services
-local UserInputService = game:GetService("UserInputService")
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/jianlobiano/LOADER/refs/heads/main/JX-UI/JX-UI.lua"))()
+local CheatName = "JX-AOPG"
 
-local player = Players.LocalPlayer
+Library.Folders = {
+    Directory = CheatName,
+    Configs = CheatName .. "/Configs",
+    Assets = CheatName .. "/Assets",
+}
 
---// Load UI Library
-local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/lxte/lates-lib/main/Main.lua"))()
-local Window = Library:CreateWindow({
-    Title = "AOPG ULTRA HUB",
-    Theme = "Dark",
-    Size = UDim2.fromOffset(570, 380),
-    Transparency = 0.2,
-    Blurring = true,
-    MinimizeKeybind = Enum.KeyCode.LeftAlt,
+local Accent = Color3.fromRGB(0, 170, 255)
+local Gradient = Color3.fromRGB(0, 80, 150)
+
+Library.Theme.Accent = Accent
+Library.Theme.AccentGradient = Gradient
+Library:ChangeTheme("Accent", Accent)
+Library:ChangeTheme("AccentGradient", Gradient)
+
+local Window = Library:Window({
+    Name = "AOPG ULTRA",
+    SubName = "JX Edition | Auto Farm Hub",
+    Logo = "85279746515974"
 })
 
---// Themes Definition
-local Themes = {
-    Light = {
-        Primary = Color3.fromRGB(232, 232, 232), Secondary = Color3.fromRGB(255, 255, 255),
-        Component = Color3.fromRGB(245, 245, 245), Interactables = Color3.fromRGB(235, 235, 235),
-        Tab = Color3.fromRGB(50, 50, 50), Title = Color3.fromRGB(0, 0, 0), Description = Color3.fromRGB(100, 100, 100),
-        Shadow = Color3.fromRGB(255, 255, 255), Outline = Color3.fromRGB(210, 210, 210), Icon = Color3.fromRGB(100, 100, 100),
-    },
-    Dark = {
-        Primary = Color3.fromRGB(30, 30, 30), Secondary = Color3.fromRGB(35, 35, 35),
-        Component = Color3.fromRGB(40, 40, 40), Interactables = Color3.fromRGB(45, 45, 45),
-        Tab = Color3.fromRGB(200, 200, 200), Title = Color3.fromRGB(240,240,240), Description = Color3.fromRGB(200,200,200),
-        Shadow = Color3.fromRGB(0, 0, 0), Outline = Color3.fromRGB(40, 40, 40), Icon = Color3.fromRGB(220, 220, 220),
-    },
-    Void = {
-        Primary = Color3.fromRGB(15, 15, 15), Secondary = Color3.fromRGB(20, 20, 20),
-        Component = Color3.fromRGB(25, 25, 25), Interactables = Color3.fromRGB(30, 30, 30),
-        Tab = Color3.fromRGB(200, 200, 200), Title = Color3.fromRGB(240,240,240), Description = Color3.fromRGB(200,200,200),
-        Shadow = Color3.fromRGB(0, 0, 0), Outline = Color3.fromRGB(40, 40, 40), Icon = Color3.fromRGB(220, 220, 220),
-    },
-}
-Window:SetTheme(Themes.Dark)
+local KeybindList = Library:KeybindList("Keybinds")
 
---// Variables for Farming
+-- Variables & State
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local player = Players.LocalPlayer
+
+local selectedDummy = "Quest Dummy 1"
+local selectedWeapon = nil
+local farmDistance = 5
+local farmPosition = "Behind"
+
 local autoFarmEnabled = false
 local autoQuestEnabled = false
 local autoEquipEnabled = true
 local autoSkillsEnabled = true
-local farmDistance = 5
-local selectedDummy = "Quest Dummy 1"
-local selectedWeapon = "Chop Fruit"
-local activeKeys = {Q = true, E = true, R = true, F = true}
+local autoBusoHaki = false
+local autoKenHaki = false
+local autoConquerorHaki = false
 
---// Helper Functions
+local activeKeys = {
+    Q = true, E = true, R = true, F = true, Y = true,
+    J = false, K = false, L = false,
+    Z = false, X = false, C = false, V = false, H = false
+}
+local lastSkillTime = 0
+
+-- Helpers
 local function GetCharacter()
     local entities = workspace:FindFirstChild("Entities")
     if entities and entities:FindFirstChild(player.Name) then
@@ -60,151 +58,348 @@ local function GetCharacter()
     return player.Character
 end
 
-local function GetTargetEnemy()
+local function GetQuestPart()
+    local ok, result = pcall(function()
+        return workspace.Interactables[selectedDummy][selectedDummy]
+    end)
+    return ok and result or nil
+end
+
+local function TakeQuest()
+    local QuestPart = GetQuestPart()
+    if not QuestPart then return end
+
+    local char = GetCharacter()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.lookAt(QuestPart.Position + Vector3.new(0, 3, 4), QuestPart.Position)
+    end
+
+    task.wait(0.1)
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if Remotes then
+        if Remotes:FindFirstChild("talk") then Remotes.talk:FireServer(QuestPart) end
+        task.wait(0.2)
+        if Remotes:FindFirstChild("quest") then
+            Remotes.quest:FireServer("Accept", { Index = 1, Model = QuestPart })
+        end
+    end
+end
+
+local function CloseDialogue()
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if Remotes then
+        pcall(function() Remotes.talk:FireServer("Cancel") end)
+        pcall(function() Remotes.talk:FireServer(nil) end)
+        pcall(function() Remotes.quest:FireServer("Cancel") end)
+    end
+end
+
+local function GetCurrentTargetData()
+    local quests = player:FindFirstChild("Quests2")
+    if quests and quests:FindFirstChild("1") and quests["1"]:FindFirstChild("Targets") then
+        local targetObj = quests["1"].Targets:GetChildren()[1]
+        if targetObj then
+            return targetObj.Name, targetObj:FindFirstChild("Killed"), targetObj:FindFirstChild("Amount")
+        end
+    end
+    return nil, nil, nil
+end
+
+local function GetTargetEnemy(targetName)
+    local closestEnemy = nil
+    local shortestDistance = math.huge
     local char = GetCharacter()
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
 
-    local closestEnemy = nil
-    local shortestDistance = math.huge
-
-    local npcs = workspace:FindFirstChild("NPCs") or workspace:FindFirstChild("Enemies") or workspace
-    for _, model in pairs(npcs:GetChildren()) do
-        if model:IsA("Model") and model.Name ~= player.Name and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 and model:FindFirstChild("HumanoidRootPart") then
-            local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
-            if dist < shortestDistance then
-                shortestDistance = dist
-                closestEnemy = model
+    local searchLocations = {workspace:FindFirstChild("Entities"), workspace:FindFirstChild("Enemies"), workspace}
+    for _, location in pairs(searchLocations) do
+        if location then
+            for _, model in pairs(location:GetChildren()) do
+                if model:IsA("Model") and model.Name ~= player.Name and model.Name:find(targetName) and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 and model:FindFirstChild("HumanoidRootPart") then
+                    local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
+                    if dist < shortestDistance then
+                        shortestDistance = dist
+                        closestEnemy = model
+                    end
+                end
             end
         end
     end
     return closestEnemy
 end
 
-local function FlyToTargetEnemy(targetHRP)
+local function PositionToEnemy(targetHRP)
     local char = GetCharacter()
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp or not targetHRP then return end
 
-    local standPos = targetHRP.Position + (targetHRP.CFrame.LookVector * farmDistance) + Vector3.new(0, 1.5, 0)
-    local targetCFrame = CFrame.lookAt(standPos, targetHRP.Position)
-
-    if (hrp.Position - targetCFrame.Position).Magnitude < 2 then
-        hrp.CFrame = targetCFrame
-        return
+    local offset = Vector3.new(0, 0, 0)
+    if farmPosition == "Behind" then
+        offset = (targetHRP.CFrame.LookVector * -farmDistance) + Vector3.new(0, 1.5, 0)
+    elseif farmPosition == "Above" then
+        offset = Vector3.new(0, farmDistance, 0)
+    elseif farmPosition == "Below" then
+        offset = Vector3.new(0, -farmDistance, 0)
     end
 
-    local tween = TweenService:Create(hrp, TweenInfo.new(0.05, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
-    tween:Play()
+    hrp.CFrame = CFrame.lookAt(targetHRP.Position + offset, targetHRP.Position)
 end
 
-local function PerformAttack()
+local function AutoEquipSelectedWeapon()
+    if not autoEquipEnabled or not selectedWeapon then return end
     local char = GetCharacter()
     if not char then return end
 
-    if autoEquipEnabled and selectedWeapon then
+    local currentTool = char:FindFirstChildOfClass("Tool")
+    if not currentTool or currentTool.Name ~= selectedWeapon then
         local backpack = player:FindFirstChild("Backpack")
-        local tool = backpack and backpack:FindFirstChild(selectedWeapon)
-        if tool and char:FindFirstChild("Humanoid") then
-            char.Humanoid:EquipTool(tool)
-        end
-    end
-
-    local equippedTool = char:FindFirstChildOfClass("Tool")
-    if equippedTool then
-        equippedTool:Activate()
-    end
-
-    if autoSkillsEnabled then
-        for key, enabled in pairs(activeKeys) do
-            if enabled and Enum.KeyCode[key] then
-                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode[key], false, game)
-                task.wait(0.01)
-                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode[key], false, game)
+        if backpack then
+            local targetTool = backpack:FindFirstChild(selectedWeapon)
+            if targetTool and char:FindFirstChild("Humanoid") then
+                char.Humanoid:EquipTool(targetTool)
             end
         end
     end
 end
 
---// Add Tab Sections
-Window:AddTabSection({ Name = "Main", Order = 1 })
-Window:AddTabSection({ Name = "Settings", Order = 2 })
+local function CastSkills()
+    if autoBusoHaki then
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.J, false, game)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.J, false, game)
+    end
+    if autoKenHaki then
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.K, false, game)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.K, false, game)
+    end
+    if autoConquerorHaki then
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.L, false, game)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.L, false, game)
+    end
 
---// Main Tab
-local MainTab = Window:AddTab({ Title = "Auto Farm", Section = "Main", Icon = "rbxassetid://11963373994" })
-
-Window:AddSection({ Name = "Farm Controls", Tab = MainTab })
-
-Window:AddToggle({
-    Title = "Auto Farm",
-    Description = "الانتقال للأعداء وضربهم تلقائياً",
-    Tab = MainTab,
-    Callback = function(State)
-        autoFarmEnabled = State
-        task.spawn(function()
-            while autoFarmEnabled do
-                task.wait(0.1)
-                local enemy = GetTargetEnemy()
-                if enemy and enemy:FindFirstChild("HumanoidRootPart") then
-                    FlyToTargetEnemy(enemy.HumanoidRootPart)
-                    PerformAttack()
+    if not autoSkillsEnabled then return end
+    if tick() - lastSkillTime > 0.5 then
+        lastSkillTime = tick()
+        for keyName, isEnabled in pairs(activeKeys) do
+            if isEnabled then
+                local enumKey = Enum.KeyCode[keyName]
+                if enumKey then
+                    VirtualInputManager:SendKeyEvent(true, enumKey, false, game)
+                    task.wait(0.02)
+                    VirtualInputManager:SendKeyEvent(false, enumKey, false, game)
                 end
             end
-        end)
-    end,
+        end
+    end
+end
+
+local function PerformAttack()
+    AutoEquipSelectedWeapon()
+    local char = GetCharacter()
+    if not char then return end
+
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        tool:Activate()
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        if remotes then
+            if remotes:FindFirstChild("Attack") then remotes.Attack:FireServer()
+            elseif remotes:FindFirstChild("Hit") then remotes.Hit:FireServer() end
+        end
+        CastSkills()
+    end
+end
+
+-- UI Setup
+Window:Category("Main Farm")
+local FarmPage = Window:Page({Name = "Auto Farm", Icon = "138827881557940"})
+
+local FarmSection = FarmPage:Section({Name = "Main Controls", Side = 1})
+
+FarmSection:Toggle({
+    Name = "Auto Farm (تلفيل تلقائي)",
+    Flag = "AutoFarmToggle",
+    Default = false,
+    Callback = function(Value)
+        autoFarmEnabled = Value
+    end
 })
 
-Window:AddSlider({
-    Title = "Attack Distance",
-    Description = "مسافة البعد عن البوت أثناء الضرب",
-    Tab = MainTab,
-    MaxValue = 20,
+FarmSection:Toggle({
+    Name = "Auto Quest (أخذ المهمة تلقائياً)",
+    Flag = "AutoQuestToggle",
+    Default = false,
+    Callback = function(Value)
+        autoQuestEnabled = Value
+        if autoQuestEnabled then TakeQuest() task.wait(0.2) CloseDialogue() end
+    end
+})
+
+FarmSection:Toggle({
+    Name = "Auto Equip Weapon (تجهيز السلاح)",
+    Flag = "AutoEquipToggle",
+    Default = true,
+    Callback = function(Value)
+        autoEquipEnabled = Value
+    end
+})
+
+local TargetSection = FarmPage:Section({Name = "Target & Weapon", Side = 2})
+
+local dummyList = {}
+local interactables = workspace:FindFirstChild("Interactables")
+if interactables then
+    for _, v in pairs(interactables:GetChildren()) do
+        if v.Name:find("Quest Dummy") then
+            table.insert(dummyList, v.Name)
+        end
+    end
+end
+if #dummyList == 0 then dummyList = {"Quest Dummy 1"} end
+
+TargetSection:Dropdown({
+    Name = "Select Quest Dummy",
+    Flag = "DummyDropdown",
+    Default = {dummyList[1]},
+    Items = dummyList,
+    Callback = function(Value)
+        selectedDummy = type(Value) == "table" and Value[1] or Value
+    end
+})
+
+local weaponList = {}
+local backpack = player:FindFirstChild("Backpack")
+if backpack then
+    for _, item in pairs(backpack:GetChildren()) do
+        if item:IsA("Tool") then table.insert(weaponList, item.Name) end
+    end
+end
+if #weaponList == 0 then weaponList = {"Unarmed"} end
+selectedWeapon = weaponList[1]
+
+TargetSection:Dropdown({
+    Name = "Select Weapon",
+    Flag = "WeaponDropdown",
+    Default = {weaponList[1]},
+    Items = weaponList,
+    Callback = function(Value)
+        selectedWeapon = type(Value) == "table" and Value[1] or Value
+    end
+})
+
+TargetSection:Dropdown({
+    Name = "Position Offset",
+    Flag = "PositionDropdown",
+    Default = {"Behind"},
+    Items = {"Behind", "Above", "Below"},
+    Callback = function(Value)
+        farmPosition = type(Value) == "table" and Value[1] or Value
+    end
+})
+
+TargetSection:Slider({
+    Name = "Farm Distance",
+    Flag = "FarmDistSlider",
+    Min = 2,
+    Max = 30,
+    Default = 5,
+    Suffix = " studs",
     Callback = function(Value)
         farmDistance = Value
-    end,
+    end
 })
 
-Window:AddSection({ Name = "Equip & Skills", Tab = MainTab })
+Window:Category("Skills & Haki")
+local SkillsPage = Window:Page({Name = "Abilities", Icon = "138827881557940"})
 
-Window:AddToggle({
-    Title = "Auto Equip Weapon",
-    Description = "تجهيز السلاح المختار تلقائياً",
+local SkillSection = SkillsPage:Section({Name = "Skills Toggle", Side = 1})
+
+SkillSection:Toggle({
+    Name = "Auto Use Skills (تفعيل المهارات)",
+    Flag = "AutoSkillsToggle",
     Default = true,
-    Tab = MainTab,
-    Callback = function(State) autoEquipEnabled = State end,
+    Callback = function(Value)
+        autoSkillsEnabled = Value
+    end
 })
 
-Window:AddToggle({
-    Title = "Auto Cast Skills",
-    Description = "استخدام المهارات تلقائياً أثناء الهجوم",
-    Default = true,
-    Tab = MainTab,
-    Callback = function(State) autoSkillsEnabled = State end,
+local availableKeys = {"Q", "E", "R", "F", "Y", "Z", "X", "C", "V"}
+for _, k in pairs(availableKeys) do
+    SkillSection:Toggle({
+        Name = "Use Skill [" .. k .. "]",
+        Flag = "SkillKey_" .. k,
+        Default = activeKeys[k] or false,
+        Callback = function(Value)
+            activeKeys[k] = Value
+        end
+    })
+end
+
+local HakiSection = SkillsPage:Section({Name = "Haki Settings", Side = 2})
+
+HakiSection:Toggle({
+    Name = "Auto Armament Haki (J)",
+    Flag = "AutoBuso",
+    Default = false,
+    Callback = function(Value) autoBusoHaki = Value end
 })
 
---// Settings Tab
-local SettingsTab = Window:AddTab({ Title = "Settings", Section = "Settings", Icon = "rbxassetid://11293977610" })
-
-Window:AddDropdown({
-    Title = "Set Theme",
-    Description = "تغيير ثيم القائمة",
-    Tab = SettingsTab,
-    Options = { ["Light Mode"] = "Light", ["Dark Mode"] = "Dark", ["Extra Dark"] = "Void" },
-    Callback = function(Theme) Window:SetTheme(Themes[Theme]) end,
+HakiSection:Toggle({
+    Name = "Auto Observation Haki (K)",
+    Flag = "AutoKen",
+    Default = false,
+    Callback = function(Value) autoKenHaki = Value end
 })
 
-Window:AddSlider({
-    Title = "UI Transparency",
-    Description = "شفافية الواجهة",
-    Tab = SettingsTab,
-    AllowDecimals = true,
-    MaxValue = 1,
-    Callback = function(Amount) Window:SetSetting("Transparency", Amount) end,
+HakiSection:Toggle({
+    Name = "Auto Conqueror Haki (L)",
+    Flag = "AutoConqueror",
+    Default = false,
+    Callback = function(Value) autoConquerorHaki = Value end
 })
 
-Window:Notify({
-    Title = "AOPG Hub Ready!",
-    Description = "اضغط Left Alt لإخفاء/إظهار الواجهة",
-    Duration = 5
+Window:Category("Settings")
+Library:CreateSettingsPage(Window, KeybindList)
+
+-- Loop Execution
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if autoFarmEnabled then
+            local targetName, killedObj, amountObj = GetCurrentTargetData()
+            if targetName then
+                local kVal = killedObj and killedObj.Value or 0
+                local aVal = amountObj and amountObj.Value or 5
+
+                if kVal >= aVal then
+                    TakeQuest()
+                    task.wait(0.2)
+                    CloseDialogue()
+                else
+                    local enemy = GetTargetEnemy(targetName)
+                    if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
+                        PositionToEnemy(enemy.HumanoidRootPart)
+                        PerformAttack()
+                    end
+                end
+            else
+                if autoQuestEnabled then
+                    TakeQuest()
+                    task.wait(0.2)
+                    CloseDialogue()
+                end
+            end
+        end
+    end
+end)
+
+Window:Init()
+
+Library:Notification({
+    Title = "AOPG ULTRA",
+    Description = "Loaded Successfully into JX-UI!",
+    Duration = 5,
+    Icon = "85279746515974"
 })
