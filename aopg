@@ -34,8 +34,10 @@ local player = Players.LocalPlayer
 -- Variables
 local selectedDummy = "Quest Dummy 1"
 local selectedWeapon = nil
+local selectedFarmNPC = nil
 local farmDistance = 5
 local farmPosition = "Behind"
+local killRange = 500 -- الرينج الجديد
 local selectedIsland = nil
 local selectedNPC = nil
 local selectedDungeon = nil
@@ -44,7 +46,7 @@ local autoFarmEnabled = false
 local autoQuestEnabled = false
 local autoEquipEnabled = true
 local autoSkillsEnabled = true
-local killAnyNearby = false -- يقتل أي NPC قريب
+local killAnyNearby = true
 local autoBusoHaki = false
 local autoKenHaki = false
 local autoConquerorHaki = false
@@ -158,6 +160,7 @@ local function GetCurrentTargetData()
     return nil, nil, nil
 end
 
+-- يقتل أي شيء في workspace.Entities حسب الرينج
 local function GetClosestEnemy(optionalName)
     local closestEnemy = nil
     local shortestDistance = math.huge
@@ -165,22 +168,25 @@ local function GetClosestEnemy(optionalName)
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
 
-    local searchLocations = {workspace:FindFirstChild("Entities"), workspace:FindFirstChild("Enemies"), workspace}
-    for _, location in pairs(searchLocations) do
-        if location then
-            for _, model in pairs(location:GetChildren()) do
-                if model:IsA("Model") and model.Name ~= player.Name 
-                    and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 
-                    and model:FindFirstChild("HumanoidRootPart") then
-                    
-                    -- لو killAnyNearby = true ياخذ أي واحد، غير كذا يدور على الاسم
-                    if killAnyNearby or (optionalName and model.Name:find(optionalName)) then
-                        local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
-                        if dist < shortestDistance and dist < 300 then -- حد أقصى 300
-                            shortestDistance = dist
-                            closestEnemy = model
-                        end
-                    end
+    local entities = workspace:FindFirstChild("Entities")
+    if not entities then return nil end
+
+    for _, model in pairs(entities:GetChildren()) do
+        if model:IsA("Model") and model.Name ~= player.Name 
+            and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0 
+            and model:FindFirstChild("HumanoidRootPart") then
+
+            local match = true
+
+            if optionalName and optionalName ~= "None" and not killAnyNearby then
+                match = model.Name:find(optionalName) or model.Name == optionalName
+            end
+
+            if match then
+                local dist = (hrp.Position - model.HumanoidRootPart.Position).Magnitude
+                if dist < shortestDistance and dist <= killRange then -- هنا الرينج
+                    shortestDistance = dist
+                    closestEnemy = model
                 end
             end
         end
@@ -400,7 +406,6 @@ local function GetDungeonPosition(dungeonName)
     local map = workspace:FindFirstChild("Map")
     if not map then return nil end
 
-    -- نبحث في أماكن محتملة
     local possible = {
         map:FindFirstChild("Dungeons"),
         map:FindFirstChild("Dungeon"),
@@ -457,10 +462,20 @@ FarmSection:Toggle({
 })
 
 FarmSection:Toggle({
-    Name = "Kill Any Nearby NPC (يقتل أي قريب)",
+    Name = "Kill Anything in Entities",
     Flag = "KillAnyNearby",
-    Default = false,
+    Default = true,
     Callback = function(Value) killAnyNearby = Value end
+})
+
+FarmSection:Slider({
+    Name = "Kill Range (رينج القتل)",
+    Flag = "KillRangeSlider",
+    Min = 50,
+    Max = 1500,
+    Default = 500,
+    Suffix = " studs",
+    Callback = function(Value) killRange = Value end
 })
 
 local TargetSection = FarmPage:Section({Name = "Target & Weapon", Side = 2})
@@ -483,6 +498,50 @@ TargetSection:Dropdown({
     Items = dummyList,
     Callback = function(Value)
         selectedDummy = type(Value) == "table" and Value[1] or Value
+    end
+})
+
+local farmNPCList = {}
+local function RefreshFarmNPCs()
+    farmNPCList = {}
+    local entities = workspace:FindFirstChild("Entities")
+    if entities then
+        for _, model in pairs(entities:GetChildren()) do
+            if model:IsA("Model") and model.Name ~= player.Name and model:FindFirstChild("Humanoid") then
+                table.insert(farmNPCList, model.Name)
+            end
+        end
+    end
+    local unique = {}
+    local result = {}
+    for _, name in ipairs(farmNPCList) do
+        if not unique[name] then
+            unique[name] = true
+            table.insert(result, name)
+        end
+    end
+    farmNPCList = result
+    table.sort(farmNPCList)
+    if #farmNPCList == 0 then farmNPCList = {"None"} end
+    selectedFarmNPC = farmNPCList[1]
+end
+RefreshFarmNPCs()
+
+TargetSection:Dropdown({
+    Name = "Select NPC (للفارم)",
+    Flag = "FarmNPCDropdown",
+    Default = {farmNPCList[1]},
+    Items = farmNPCList,
+    Callback = function(Value)
+        selectedFarmNPC = type(Value) == "table" and Value[1] or Value
+    end
+})
+
+TargetSection:Button({
+    Name = "Refresh NPCs (تحديث الـ NPCs)",
+    Callback = function()
+        RefreshFarmNPCs()
+        Library:Notification({Title = "NPCs", Description = "تم تحديث قائمة الـ NPCs (" .. #farmNPCList .. ")", Duration = 3})
     end
 })
 
@@ -547,7 +606,6 @@ TargetSection:Slider({
 Window:Category("Travel")
 local TravelPage = Window:Page({Name = "التنقل", Icon = "138827881557940"})
 
--- Islands
 local IslandSection = TravelPage:Section({Name = "الجزر", Side = 1})
 
 local islandList = {}
@@ -594,7 +652,6 @@ IslandSection:Button({
     end
 })
 
--- NPCs
 local NPCSection = TravelPage:Section({Name = "الـ NPCs", Side = 2})
 
 local npcList = {}
@@ -643,7 +700,6 @@ NPCSection:Button({
     end
 })
 
--- Dungeons
 local DungeonSection = TravelPage:Section({Name = "الدنجن", Side = 1})
 
 local dungeonList = {}
@@ -759,41 +815,24 @@ task.spawn(function()
     while true do
         task.wait(0.05)
         if autoFarmEnabled then
-            local targetName, killedObj, amountObj = GetCurrentTargetData()
-            
-            if killAnyNearby then
-                -- يقتل أي NPC قريب
-                local enemy = GetClosestEnemy(nil)
-                if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
-                    PositionToEnemy(enemy.HumanoidRootPart)
-                    PerformAttack()
-                else
-                    ClearFarmForces()
-                end
-            elseif targetName then
-                local kVal = killedObj and killedObj.Value or 0
-                local aVal = amountObj and amountObj.Value or 5
-
-                if kVal >= aVal then
-                    ClearFarmForces()
-                    TakeQuest()
-                    task.wait(0.2)
-                    CloseDialogue()
-                else
-                    local enemy = GetClosestEnemy(targetName)
-                    if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
-                        PositionToEnemy(enemy.HumanoidRootPart)
-                        PerformAttack()
-                    else
-                        ClearFarmForces()
-                    end
-                end
+            local enemy = GetClosestEnemy(selectedFarmNPC)
+            if enemy and enemy:FindFirstChild("HumanoidRootPart") and enemy.Humanoid.Health > 0 then
+                PositionToEnemy(enemy.HumanoidRootPart)
+                PerformAttack()
             else
                 ClearFarmForces()
+                
                 if autoQuestEnabled then
-                    TakeQuest()
-                    task.wait(0.2)
-                    CloseDialogue()
+                    local targetName, killedObj, amountObj = GetCurrentTargetData()
+                    if not targetName then
+                        TakeQuest()
+                        task.wait(0.2)
+                        CloseDialogue()
+                    elseif killedObj and amountObj and killedObj.Value >= amountObj.Value then
+                        TakeQuest()
+                        task.wait(0.2)
+                        CloseDialogue()
+                    end
                 end
             end
         end
