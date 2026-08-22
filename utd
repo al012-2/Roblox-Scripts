@@ -1,4 +1,3 @@
--- تحميل مكتبة Rayfield UI
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local HttpService = game:GetService("HttpService")
@@ -7,7 +6,6 @@ local LocalPlayer = Players.LocalPlayer
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
 
--- دالة بحث آمنة تضمن إرجاع Remote حقيقي وتتجاهل المجلدات
 local function FindRemote(name)
     local success, result = pcall(function()
         for _, descendant in ipairs(ReplicatedStorage:GetDescendants()) do
@@ -28,7 +26,6 @@ if writefile and not isfolder(FolderName) then
     makefolder(FolderName)
 end
 
--- نظام الكونفج لحفظ الإعدادات تلقائياً عند تغيير السيرفر أو الجيم
 local ConfigFileName = FolderName .. "/AutoConfig.json"
 local ConfigData = {
     AutoReady = false,
@@ -61,8 +58,8 @@ LoadConfig()
 
 local Window = Rayfield:CreateWindow({
     Name = "⚡ UTD Elite Macro System [Config Edition] ⚡",
-    LoadingTitle = "جارِ التحميل...",
-    LoadingSubtitle = "نظام الماكرو المتطور مع الحفظ التلقائي",
+    LoadingTitle = "Loading...",
+    LoadingSubtitle = "Advanced Macro System with Auto-Config",
     ConfigurationSaving = {
         Enabled = true,
         FolderName = FolderName,
@@ -119,9 +116,9 @@ local function SaveCurrentMacro()
             if macroDropdownRef then
                 macroDropdownRef:Refresh(GetSavedMacrosList())
             end
-            Rayfield:Notify({Title = "💾 Saved Successfully", Content = "تم حفظ الماكرو (" .. currentMacroName .. ") برصيد خطوات: " .. #MacroData, Duration = 4})
+            Rayfield:Notify({Title = "Saved Successfully", Content = "Macro (" .. currentMacroName .. ") saved with steps: " .. #MacroData, Duration = 4})
         else
-            Rayfield:Notify({Title = "❌ Save Error", Content = "فشل ترميز بيانات الماكرو!", Duration = 3})
+            Rayfield:Notify({Title = "Save Error", Content = "Failed to encode macro data!", Duration = 3})
         end
     end
 end
@@ -141,9 +138,6 @@ local function LoadMacroByName(name)
     return false
 end
 
---------------------------------------------------
--- دوال تنظيف واسترجاع الإحداثيات
---------------------------------------------------
 local function CleanArg(arg)
     local t = typeof(arg)
     if t == "Vector3" then
@@ -184,9 +178,6 @@ local function RestoreArg(arg)
     return arg
 end
 
---------------------------------------------------
--- 🔴 محرك التسجيل والدعم
---------------------------------------------------
 local oldNamecall
 oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     local method = getnamecallmethod()
@@ -216,14 +207,11 @@ oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     return oldNamecall(self, ...)
 end)
 
---------------------------------------------------
--- دالة تشغيل الماكرو الأساسية
---------------------------------------------------
 local function StartPlayingMacro()
     if isPlaying or #MacroData == 0 then return end
     
     isPlaying = true
-    Rayfield:Notify({Title = "Playing", Content = "جاري تنفيذ خطوات الماكرو: " .. #MacroData, Duration = 3})
+    Rayfield:Notify({Title = "Playing", Content = "Executing macro steps: " .. #MacroData, Duration = 3})
     
     task.spawn(function()
         local playStartTime = GetCurrentTime()
@@ -251,26 +239,22 @@ local function StartPlayingMacro()
     end)
 end
 
--- تحميل الماكرو المحفوظ مسبقاً عند التشغيل
 LoadMacroByName(currentMacroName)
 
---------------------------------------------------
--- الواجهة والتشغيل
---------------------------------------------------
 MacroPlayTab:CreateToggle({
-    Name = "🔴 Manual Record (تسجيل دقيق)",
+    Name = "🔴 Manual Record",
     CurrentValue = false,
     Callback = function(Value)
         isRecording = Value
         if Value then
             MacroData = {} 
             recordStartTime = GetCurrentTime()
-            Rayfield:Notify({Title = "🔴 Recording Started", Content = "بدء التسجيل. حط شخصيتك الآن!", Duration = 3})
+            Rayfield:Notify({Title = "Recording Started", Content = "Recording active, place your units now!", Duration = 3})
         else
             if #MacroData > 0 then
                 SaveCurrentMacro()
             else
-                Rayfield:Notify({Title = "⏹ Stopped", Content = "تم الإيقاف. لم يتم تسجيل خطوات.", Duration = 3})
+                Rayfield:Notify({Title = "Stopped", Content = "Recording stopped. No steps recorded.", Duration = 3})
             end
         end
     end,
@@ -282,14 +266,13 @@ MacroPlayTab:CreateButton({
         if #MacroData > 0 then 
             SaveCurrentMacro() 
         else
-            Rayfield:Notify({Title = "⚠️ Warning", Content = "لا توجد خطوات مسجلة للحفظ!", Duration = 3})
+            Rayfield:Notify({Title = "Warning", Content = "No steps to save!", Duration = 3})
         end
     end,
 })
 
--- زر تشغيل/إيقاف الماكرو (Toggle) مع الحفظ التلقائي
 MacroPlayTab:CreateToggle({
-    Name = "▶ Auto Play Macro (تشغيل تلقائي للماكرو)",
+    Name = "▶ Auto Play Macro",
     CurrentValue = autoPlayEnabled,
     Callback = function(Value)
         autoPlayEnabled = Value
@@ -300,12 +283,11 @@ MacroPlayTab:CreateToggle({
             StartPlayingMacro()
         else
             isPlaying = false
-            Rayfield:Notify({Title = "Stopped", Content = "تم إيقاف تشغيل الماكرو.", Duration = 2})
+            Rayfield:Notify({Title = "Stopped", Content = "Macro playback stopped.", Duration = 2})
         end
     end,
 })
 
--- التحقق التلقائي عند الدخول للجيم الجديد لتشغيل الماكرو فوراً
 if autoPlayEnabled then
     task.spawn(function()
         task.wait(2)
@@ -315,9 +297,8 @@ if autoPlayEnabled then
     end)
 end
 
-MacroPlayTab:CreateSection("⚡ خيارات الأتمتة")
+MacroPlayTab:CreateSection("Automation Options")
 
--- زر الأوتو ريدي مع الحفظ التلقائي للكونفج
 MacroPlayTab:CreateToggle({
     Name = "🟢 Auto Next / Ready",
     CurrentValue = autoReadyEnabled,
@@ -337,32 +318,28 @@ MacroPlayTab:CreateToggle({
                 task.wait(2)
             end
         end)
-        local notifText = Value and "تم تفعيل التجهيز التلقائي وحفظه" or "تم إيقاف التجهيز التلقائي"
+        local notifText = Value and "Auto Ready Enabled & Saved" or "Auto Ready Disabled"
         Rayfield:Notify({Title = "Auto Ready", Content = notifText, Duration = 2})
     end,
 })
 
--- تشغيل الأوتو ريدي فوراً إذا كان مفعل بالكونفج عند دخول سيرفر جديد
 if autoReadyEnabled then
     task.spawn(function()
         while autoReadyEnabled do
             pcall(function()
-                local readyRemote = FindRemote("PlayerReadyToNextWave")
-                if readyRemote then
-                    readyRemote:FireServer()
-                end
-            end)
-            task.wait(2)
-        end
-    end)
-end
+                        local readyRemote = FindRemote("PlayerReadyToNextWave")
+                        if readyRemote then
+                            readyRemote:FireServer()
+                        end
+                    end)
+                task.wait(2)
+            end
+        end)
+    end
 
---------------------------------------------------
--- قسم إدارة الماكرو الكلاسيكي (Management Hub)
---------------------------------------------------
 ManagementTab:CreateInput({
     Name = "✏️ Macro Name",
-    PlaceholderText = "اسم الماكرو...",
+    PlaceholderText = "Macro name...",
     Callback = function(text)
         if text and text ~= "" then 
             currentMacroName = text 
@@ -380,12 +357,12 @@ macroDropdownRef = ManagementTab:CreateDropdown({
         local selected = Option[1]
         if selected and selected ~= "No Macros Found" then
             LoadMacroByName(selected)
-            Rayfield:Notify({Title = "Loaded", Content = "تم تحميل خطوات: " .. #MacroData, Duration = 3})
+            Rayfield:Notify({Title = "Loaded", Content = "Loaded steps: " .. #MacroData, Duration = 3})
         end
     end,
 })
 
-ManagementTab:CreateSection("⚙️ خيارات الإدارة والمشاركة")
+ManagementTab:CreateSection("Management & Sharing Options")
 
 ManagementTab:CreateButton({
     Name = "📤 Export / Copy Macro Code",
@@ -395,19 +372,19 @@ ManagementTab:CreateButton({
             local content = readfile(path)
             if setclipboard then
                 setclipboard(content)
-                Rayfield:Notify({Title = "Exported!", Content = "تم نسخ كود الماكرو للحافظة لإعطائه لخويك!", Duration = 4})
+                Rayfield:Notify({Title = "Exported!", Content = "Macro code copied to clipboard!", Duration = 4})
             else
-                Rayfield:Notify({Title = "Error", Content = "المنفذ لا يدعم نسخ الحافظة!", Duration = 3})
+                Rayfield:Notify({Title = "Error", Content = "Executor does not support clipboard!", Duration = 3})
             end
         else
-            Rayfield:Notify({Title = "Error", Content = "الملف غير موجود للاستخراج!", Duration = 3})
+            Rayfield:Notify({Title = "Error", Content = "File does not exist!", Duration = 3})
         end
     end,
 })
 
 ManagementTab:CreateInput({
     Name = "📥 Import Code Input",
-    PlaceholderText = "الصق كود الماكرو هنا...",
+    PlaceholderText = "Paste macro code here...",
     Callback = function(text)
         if text and text ~= "" then
             importedMacroCode = text
@@ -425,12 +402,12 @@ ManagementTab:CreateButton({
             if success and type(decoded) == "table" then
                 MacroData = decoded
                 SaveCurrentMacro()
-                Rayfield:Notify({Title = "Imported!", Content = "تم استيراد الماكرو وحفظه بنجاح (" .. #MacroData .. " خطوة)", Duration = 4})
+                Rayfield:Notify({Title = "Imported!", Content = "Imported macro successfully (" .. #MacroData .. " steps)", Duration = 4})
             else
-                Rayfield:Notify({Title = "Error", Content = "الكود المُدخل غير صالح أو تالف!", Duration = 3})
+                Rayfield:Notify({Title = "Error", Content = "Invalid or corrupted code!", Duration = 3})
             end
         else
-            Rayfield:Notify({Title = "Error", Content = "الرجاء لصق الكود في خانة الـ Import أولاً!", Duration = 3})
+            Rayfield:Notify({Title = "Error", Content = "Please paste code in Import input first!", Duration = 3})
         end
     end,
 })
@@ -445,9 +422,9 @@ ManagementTab:CreateButton({
             if macroDropdownRef then
                 macroDropdownRef:Refresh(GetSavedMacrosList())
             end
-            Rayfield:Notify({Title = "Deleted", Content = "تم حذف الماكرو (" .. currentMacroName .. ") بنجاح!", Duration = 3})
+            Rayfield:Notify({Title = "Deleted", Content = "Macro (" .. currentMacroName .. ") deleted successfully!", Duration = 3})
         else
-            Rayfield:Notify({Title = "Error", Content = "الملف غير موجود أو تعذر حذفه!", Duration = 3})
+            Rayfield:Notify({Title = "Error", Content = "File does not exist or cannot be deleted!", Duration = 3})
         end
     end,
 })
