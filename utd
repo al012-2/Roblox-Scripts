@@ -1,0 +1,453 @@
+-- تحميل مكتبة Rayfield UI
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+
+-- دالة بحث آمنة تضمن إرجاع Remote حقيقي وتتجاهل المجلدات
+local function FindRemote(name)
+    local success, result = pcall(function()
+        for _, descendant in ipairs(ReplicatedStorage:GetDescendants()) do
+            if descendant.Name == name and (descendant:IsA("RemoteEvent") or descendant:IsA("RemoteFunction")) then
+                return descendant
+            end
+        end
+        return ReplicatedStorage:FindFirstChild(name, true)
+    end)
+    if success and result and (result:IsA("RemoteEvent") or result:IsA("RemoteFunction")) then
+        return result
+    end
+    return nil
+end
+
+local FolderName = "UTD_Legacy_Macros"
+if writefile and not isfolder(FolderName) then
+    makefolder(FolderName)
+end
+
+-- نظام الكونفج لحفظ الإعدادات تلقائياً عند تغيير السيرفر أو الجيم
+local ConfigFileName = FolderName .. "/AutoConfig.json"
+local ConfigData = {
+    AutoReady = false,
+    AutoPlayMacro = false,
+    SelectedMacro = "NewMacro"
+}
+
+local function SaveConfig()
+    if writefile then
+        pcall(function()
+            writefile(ConfigFileName, HttpService:JSONEncode(ConfigData))
+        end)
+    end
+end
+
+local function LoadConfig()
+    if readfile and isfile(ConfigFileName) then
+        local success, res = pcall(function()
+            return HttpService:JSONDecode(readfile(ConfigFileName))
+        end)
+        if success and type(res) == "table" then
+            ConfigData.AutoReady = res.AutoReady or false
+            ConfigData.AutoPlayMacro = res.AutoPlayMacro or false
+            ConfigData.SelectedMacro = res.SelectedMacro or "NewMacro"
+        end
+    end
+end
+
+LoadConfig()
+
+local Window = Rayfield:CreateWindow({
+    Name = "⚡ UTD Elite Macro System [Config Edition] ⚡",
+    LoadingTitle = "جارِ التحميل...",
+    LoadingSubtitle = "نظام الماكرو المتطور مع الحفظ التلقائي",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = FolderName,
+        FileName = "MacroConfig"
+    },
+    KeySystem = false,
+})
+
+local MacroPlayTab = Window:CreateTab("⚡ Macro & Play", 4483362458)
+local ManagementTab = Window:CreateTab("📁 Management Hub", 4483362458)
+
+local MacroData = {}
+local SavedMacros = {}
+local currentMacroName = ConfigData.SelectedMacro
+local importedMacroCode = ""
+local isRecording = false
+local isPlaying = false
+local recordStartTime = 0
+local autoReadyEnabled = ConfigData.AutoReady
+local autoPlayEnabled = ConfigData.AutoPlayMacro
+
+local function GetCurrentTime()
+    return os.clock()
+end
+
+local macroDropdownRef
+
+local function GetSavedMacrosList()
+    SavedMacros = {}
+    if listfiles then
+        local success, files = pcall(function() return listfiles(FolderName) end)
+        if success then
+            for _, file in ipairs(files) do
+                if file:match(".json$") and file ~= "AutoConfig.json" then
+                    local name = file:match("([^/\\]+)%.json$")
+                    if name then
+                        table.insert(SavedMacros, name)
+                    end
+                end
+            end
+        end
+    end
+    if #SavedMacros == 0 then
+        table.insert(SavedMacros, "No Macros Found")
+    end
+    return SavedMacros
+end
+
+local function SaveCurrentMacro()
+    if writefile then
+        local success, encoded = pcall(function() return HttpService:JSONEncode(MacroData) end)
+        if success then
+            writefile(FolderName .. "/" .. currentMacroName .. ".json", encoded)
+            if macroDropdownRef then
+                macroDropdownRef:Refresh(GetSavedMacrosList())
+            end
+            Rayfield:Notify({Title = "💾 Saved Successfully", Content = "تم حفظ الماكرو (" .. currentMacroName .. ") برصيد خطوات: " .. #MacroData, Duration = 4})
+        else
+            Rayfield:Notify({Title = "❌ Save Error", Content = "فشل ترميز بيانات الماكرو!", Duration = 3})
+        end
+    end
+end
+
+local function LoadMacroByName(name)
+    local path = FolderName .. "/" .. name .. ".json"
+    if readfile and isfile(path) then
+        local success, res = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+        if success and type(res) == "table" then
+            MacroData = res
+            currentMacroName = name
+            ConfigData.SelectedMacro = name
+            SaveConfig()
+            return true
+        end
+    end
+    return false
+end
+
+--------------------------------------------------
+-- دوال تنظيف واسترجاع الإحداثيات
+--------------------------------------------------
+local function CleanArg(arg)
+    local t = typeof(arg)
+    if t == "Vector3" then
+        return {__type = "Vector3", x = arg.X, y = arg.Y, z = arg.Z}
+    elseif t == "CFrame" then
+        local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = arg:GetComponents()
+        return {__type = "CFrame", components = {x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22}}
+    elseif t == "number" or t == "string" or t == "boolean" then
+        return arg
+    elseif t == "table" then
+        local cleanTable = {}
+        for k, v in pairs(arg) do
+            local cleaned = CleanArg(v)
+            if cleaned ~= nil then
+                cleanTable[k] = cleaned
+            end
+        end
+        return cleanTable
+    end
+    return nil
+end
+
+local function RestoreArg(arg)
+    if type(arg) == "table" then
+        if arg.__type == "Vector3" then
+            return Vector3.new(arg.x, arg.y, arg.z)
+        elseif arg.__type == "CFrame" then
+            local c = arg.components
+            return CFrame.new(c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12])
+        else
+            local restoredTable = {}
+            for k, v in pairs(arg) do
+                restoredTable[k] = RestoreArg(v)
+            end
+            return restoredTable
+        end
+    end
+    return arg
+end
+
+--------------------------------------------------
+-- 🔴 محرك التسجيل والدعم
+--------------------------------------------------
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if isRecording and (method == "FireServer" or method == "InvokeServer") then
+        local remoteName = self.Name
+        if remoteName:match("PlaceTower") or remoteName:match("UpgradeTower") or remoteName:match("SellTower") or remoteName:match("PlayerReadyToNextWave") then
+            local currentTime = math.floor((GetCurrentTime() - recordStartTime) * 10) / 10
+            
+            local cleanArgs = {}
+            for i, v in ipairs(args) do
+                cleanArgs[i] = CleanArg(v)
+            end
+            
+            local stepData = {
+                RemoteName = remoteName,
+                Arguments = cleanArgs,
+                Time = currentTime
+            }
+            
+            table.insert(MacroData, stepData)
+            print("[EXACT REC] " .. remoteName .. " | Step: " .. #MacroData)
+        end
+    end
+    
+    return oldNamecall(self, ...)
+end)
+
+--------------------------------------------------
+-- دالة تشغيل الماكرو الأساسية
+--------------------------------------------------
+local function StartPlayingMacro()
+    if isPlaying or #MacroData == 0 then return end
+    
+    isPlaying = true
+    Rayfield:Notify({Title = "Playing", Content = "جاري تنفيذ خطوات الماكرو: " .. #MacroData, Duration = 3})
+    
+    task.spawn(function()
+        local playStartTime = GetCurrentTime()
+        for _, step in ipairs(MacroData) do
+            if not isPlaying then break end
+            
+            local targetTime = step.Time or 0
+            local waitTime = targetTime - (GetCurrentTime() - playStartTime)
+            if waitTime > 0 then task.wait(waitTime) end
+            
+            local remote = FindRemote(step.RemoteName)
+            if remote then
+                pcall(function()
+                    local restoredArgs = {}
+                    for i, v in ipairs(step.Arguments or {}) do
+                        restoredArgs[i] = RestoreArg(v)
+                    end
+                    
+                    remote:FireServer(unpack(restoredArgs))
+                    print("[EXACT PLAYED] Success -> " .. step.RemoteName)
+                end)
+            end
+        end
+        isPlaying = false
+    end)
+end
+
+-- تحميل الماكرو المحفوظ مسبقاً عند التشغيل
+LoadMacroByName(currentMacroName)
+
+--------------------------------------------------
+-- الواجهة والتشغيل
+--------------------------------------------------
+MacroPlayTab:CreateToggle({
+    Name = "🔴 Manual Record (تسجيل دقيق)",
+    CurrentValue = false,
+    Callback = function(Value)
+        isRecording = Value
+        if Value then
+            MacroData = {} 
+            recordStartTime = GetCurrentTime()
+            Rayfield:Notify({Title = "🔴 Recording Started", Content = "بدء التسجيل. حط شخصيتك الآن!", Duration = 3})
+        else
+            if #MacroData > 0 then
+                SaveCurrentMacro()
+            else
+                Rayfield:Notify({Title = "⏹ Stopped", Content = "تم الإيقاف. لم يتم تسجيل خطوات.", Duration = 3})
+            end
+        end
+    end,
+})
+
+MacroPlayTab:CreateButton({
+    Name = "💾 Force Save Current Macro",
+    Callback = function()
+        if #MacroData > 0 then 
+            SaveCurrentMacro() 
+        else
+            Rayfield:Notify({Title = "⚠️ Warning", Content = "لا توجد خطوات مسجلة للحفظ!", Duration = 3})
+        end
+    end,
+})
+
+-- زر تشغيل/إيقاف الماكرو (Toggle) مع الحفظ التلقائي
+MacroPlayTab:CreateToggle({
+    Name = "▶ Auto Play Macro (تشغيل تلقائي للماكرو)",
+    CurrentValue = autoPlayEnabled,
+    Callback = function(Value)
+        autoPlayEnabled = Value
+        ConfigData.AutoPlayMacro = Value
+        SaveConfig()
+        
+        if Value then
+            StartPlayingMacro()
+        else
+            isPlaying = false
+            Rayfield:Notify({Title = "Stopped", Content = "تم إيقاف تشغيل الماكرو.", Duration = 2})
+        end
+    end,
+})
+
+-- التحقق التلقائي عند الدخول للجيم الجديد لتشغيل الماكرو فوراً
+if autoPlayEnabled then
+    task.spawn(function()
+        task.wait(2)
+        if #MacroData > 0 then
+            StartPlayingMacro()
+        end
+    end)
+end
+
+MacroPlayTab:CreateSection("⚡ خيارات الأتمتة")
+
+-- زر الأوتو ريدي مع الحفظ التلقائي للكونفج
+MacroPlayTab:CreateToggle({
+    Name = "🟢 Auto Next / Ready",
+    CurrentValue = autoReadyEnabled,
+    Callback = function(Value)
+        autoReadyEnabled = Value
+        ConfigData.AutoReady = Value
+        SaveConfig()
+        
+        task.spawn(function()
+            while autoReadyEnabled do
+                pcall(function()
+                    local readyRemote = FindRemote("PlayerReadyToNextWave")
+                    if readyRemote then
+                        readyRemote:FireServer()
+                    end
+                end)
+                task.wait(2)
+            end
+        end)
+        local notifText = Value and "تم تفعيل التجهيز التلقائي وحفظه" or "تم إيقاف التجهيز التلقائي"
+        Rayfield:Notify({Title = "Auto Ready", Content = notifText, Duration = 2})
+    end,
+})
+
+-- تشغيل الأوتو ريدي فوراً إذا كان مفعل بالكونفج عند دخول سيرفر جديد
+if autoReadyEnabled then
+    task.spawn(function()
+        while autoReadyEnabled do
+            pcall(function()
+                local readyRemote = FindRemote("PlayerReadyToNextWave")
+                if readyRemote then
+                    readyRemote:FireServer()
+                end
+            end)
+            task.wait(2)
+        end
+    end)
+end
+
+--------------------------------------------------
+-- قسم إدارة الماكرو الكلاسيكي (Management Hub)
+--------------------------------------------------
+ManagementTab:CreateInput({
+    Name = "✏️ Macro Name",
+    PlaceholderText = "اسم الماكرو...",
+    Callback = function(text)
+        if text and text ~= "" then 
+            currentMacroName = text 
+            ConfigData.SelectedMacro = text
+            SaveConfig()
+        end
+    end,
+})
+
+macroDropdownRef = ManagementTab:CreateDropdown({
+    Name = "📂 Saved Macros",
+    Options = GetSavedMacrosList(),
+    CurrentOption = currentMacroName,
+    Callback = function(Option)
+        local selected = Option[1]
+        if selected and selected ~= "No Macros Found" then
+            LoadMacroByName(selected)
+            Rayfield:Notify({Title = "Loaded", Content = "تم تحميل خطوات: " .. #MacroData, Duration = 3})
+        end
+    end,
+})
+
+ManagementTab:CreateSection("⚙️ خيارات الإدارة والمشاركة")
+
+ManagementTab:CreateButton({
+    Name = "📤 Export / Copy Macro Code",
+    Callback = function()
+        local path = FolderName .. "/" .. currentMacroName .. ".json"
+        if readfile and isfile(path) then
+            local content = readfile(path)
+            if setclipboard then
+                setclipboard(content)
+                Rayfield:Notify({Title = "Exported!", Content = "تم نسخ كود الماكرو للحافظة لإعطائه لخويك!", Duration = 4})
+            else
+                Rayfield:Notify({Title = "Error", Content = "المنفذ لا يدعم نسخ الحافظة!", Duration = 3})
+            end
+        else
+            Rayfield:Notify({Title = "Error", Content = "الملف غير موجود للاستخراج!", Duration = 3})
+        end
+    end,
+})
+
+ManagementTab:CreateInput({
+    Name = "📥 Import Code Input",
+    PlaceholderText = "الصق كود الماكرو هنا...",
+    Callback = function(text)
+        if text and text ~= "" then
+            importedMacroCode = text
+        end
+    end,
+})
+
+ManagementTab:CreateButton({
+    Name = "📥 Import Macro from Code",
+    Callback = function()
+        if importedMacroCode ~= "" then
+            local success, decoded = pcall(function()
+                return HttpService:JSONDecode(importedMacroCode)
+            end)
+            if success and type(decoded) == "table" then
+                MacroData = decoded
+                SaveCurrentMacro()
+                Rayfield:Notify({Title = "Imported!", Content = "تم استيراد الماكرو وحفظه بنجاح (" .. #MacroData .. " خطوة)", Duration = 4})
+            else
+                Rayfield:Notify({Title = "Error", Content = "الكود المُدخل غير صالح أو تالف!", Duration = 3})
+            end
+        else
+            Rayfield:Notify({Title = "Error", Content = "الرجاء لصق الكود في خانة الـ Import أولاً!", Duration = 3})
+        end
+    end,
+})
+
+ManagementTab:CreateButton({
+    Name = "🗑️ Delete Selected Macro",
+    Callback = function()
+        local path = FolderName .. "/" .. currentMacroName .. ".json"
+        if delfile and isfile(path) then
+            delfile(path)
+            MacroData = {}
+            if macroDropdownRef then
+                macroDropdownRef:Refresh(GetSavedMacrosList())
+            end
+            Rayfield:Notify({Title = "Deleted", Content = "تم حذف الماكرو (" .. currentMacroName .. ") بنجاح!", Duration = 3})
+        else
+            Rayfield:Notify({Title = "Error", Content = "الملف غير موجود أو تعذر حذفه!", Duration = 3})
+        end
+    end,
+})
