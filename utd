@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
+local Workspace = game:GetService("Workspace")
 
 local function FindRemote(name)
     local success, result = pcall(function()
@@ -28,8 +29,11 @@ end
 
 local ConfigFileName = FolderName .. "/AutoConfig.json"
 local ConfigData = {
-    AutoReady = false,
     AutoPlayMacro = false,
+    AutoEventTeleporter = false,
+    AutoNextWave = false,
+    AutoReady = false,
+    AutoReplay = false,
     SelectedMacro = "NewMacro"
 }
 
@@ -47,8 +51,11 @@ local function LoadConfig()
             return HttpService:JSONDecode(readfile(ConfigFileName))
         end)
         if success and type(res) == "table" then
-            ConfigData.AutoReady = res.AutoReady or false
             ConfigData.AutoPlayMacro = res.AutoPlayMacro or false
+            ConfigData.AutoEventTeleporter = res.AutoEventTeleporter or false
+            ConfigData.AutoNextWave = res.AutoNextWave or false
+            ConfigData.AutoReady = res.AutoReady or false
+            ConfigData.AutoReplay = res.AutoReplay or false
             ConfigData.SelectedMacro = res.SelectedMacro or "NewMacro"
         end
     end
@@ -78,8 +85,11 @@ local importedMacroCode = ""
 local isRecording = false
 local isPlaying = false
 local recordStartTime = 0
-local autoReadyEnabled = ConfigData.AutoReady
 local autoPlayEnabled = ConfigData.AutoPlayMacro
+local autoEventTeleporter = ConfigData.AutoEventTeleporter
+local autoNextWaveEnabled = ConfigData.AutoNextWave
+local autoReadyEnabled = ConfigData.AutoReady
+local autoReplayEnabled = ConfigData.AutoReplay
 
 local function GetCurrentTime()
     return os.clock()
@@ -185,7 +195,7 @@ oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     
     if isRecording and (method == "FireServer" or method == "InvokeServer") then
         local remoteName = self.Name
-        if remoteName:match("PlaceTower") or remoteName:match("UpgradeTower") or remoteName:match("SellTower") or remoteName:match("PlayerReadyToNextWave") then
+        if remoteName:match("PlaceTower") or remoteName:match("UpgradeTower") or remoteName:match("SellTower") or remoteName:match("PlayerReadyToNextWave") or remoteName:match("Replay") then
             local currentTime = math.floor((GetCurrentTime() - recordStartTime) * 10) / 10
             
             local cleanArgs = {}
@@ -240,6 +250,77 @@ local function StartPlayingMacro()
 end
 
 LoadMacroByName(currentMacroName)
+
+-- 1. نظام التليبرت للوبي فقط
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if autoEventTeleporter then
+            pcall(function()
+                local lobbyFolder = Workspace:FindFirstChild("Lobby")
+                if lobbyFolder then
+                    local targetPart = lobbyFolder 
+                        and lobbyFolder:FindFirstChild("SummerEventLobby") 
+                        and lobbyFolder.SummerEventLobby:FindFirstChild("EventTeleporters") 
+                        and lobbyFolder.SummerEventLobby.EventTeleporters:FindFirstChild("SummerEventHardTeleporter5") 
+                        and lobbyFolder.SummerEventLobby.EventTeleporters.SummerEventHardTeleporter5:FindFirstChild("Cylinder.119")
+                    
+                    local char = LocalPlayer.Character
+                    local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+                    
+                    if rootPart and targetPart then
+                        rootPart.CFrame = targetPart.CFrame + Vector3.new(0, 3, 0)
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- 2. نظام Auto Next Wave المنفصل
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if autoNextWaveEnabled then
+            pcall(function()
+                local remote = FindRemote("AutoSkipWave") or FindRemote("SkipWave") or FindRemote("NextWave")
+                if remote then
+                    remote:FireServer()
+                end
+            end)
+        end
+    end
+end)
+
+-- 3. نظام Auto Ready المنفصل
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if autoReadyEnabled then
+            pcall(function()
+                local remote = FindRemote("PlayerReadyToNextWave")
+                if remote then
+                    remote:FireServer()
+                end
+            end)
+        end
+    end
+end)
+
+-- 4. نظام Auto Replay المنفصل
+task.spawn(function()
+    while true do
+        task.wait(3)
+        if autoReplayEnabled then
+            pcall(function()
+                local remote = FindRemote("Replay") or FindRemote("VoteReplay")
+                if remote then
+                    remote:FireServer()
+                end
+            end)
+        end
+    end
+end)
 
 MacroPlayTab:CreateToggle({
     Name = "🔴 Manual Record",
@@ -297,45 +378,55 @@ if autoPlayEnabled then
     end)
 end
 
-MacroPlayTab:CreateSection("Automation Options")
+MacroPlayTab:CreateSection("Dedicated Automation Features")
 
 MacroPlayTab:CreateToggle({
-    Name = "🟢 Auto Next / Ready",
+    Name = "⏭️ Auto Next Wave",
+    CurrentValue = autoNextWaveEnabled,
+    Callback = function(Value)
+        autoNextWaveEnabled = Value
+        ConfigData.AutoNextWave = Value
+        SaveConfig()
+        Rayfield:Notify({Title = "Auto Next Wave", Content = Value and "Enabled" or "Disabled", Duration = 2})
+    end,
+})
+
+MacroPlayTab:CreateToggle({
+    Name = "🟢 Auto Ready",
     CurrentValue = autoReadyEnabled,
     Callback = function(Value)
         autoReadyEnabled = Value
         ConfigData.AutoReady = Value
         SaveConfig()
-        
-        task.spawn(function()
-            while autoReadyEnabled do
-                pcall(function()
-                    local readyRemote = FindRemote("PlayerReadyToNextWave")
-                    if readyRemote then
-                        readyRemote:FireServer()
-                    end
-                end)
-                task.wait(2)
-            end
-        end)
-        local notifText = Value and "Auto Ready Enabled & Saved" or "Auto Ready Disabled"
-        Rayfield:Notify({Title = "Auto Ready", Content = notifText, Duration = 2})
+        Rayfield:Notify({Title = "Auto Ready", Content = Value and "Enabled" or "Disabled", Duration = 2})
     end,
 })
 
-if autoReadyEnabled then
-    task.spawn(function()
-        while autoReadyEnabled do
-            pcall(function()
-                        local readyRemote = FindRemote("PlayerReadyToNextWave")
-                        if readyRemote then
-                            readyRemote:FireServer()
-                        end
-                    end)
-                task.wait(2)
-            end
-        end)
-    end
+MacroPlayTab:CreateToggle({
+    Name = "🔄 Auto Replay",
+    CurrentValue = autoReplayEnabled,
+    Callback = function(Value)
+        autoReplayEnabled = Value
+        ConfigData.AutoReplay = Value
+        SaveConfig()
+        Rayfield:Notify({Title = "Auto Replay", Content = Value and "Enabled" or "Disabled", Duration = 2})
+    end,
+})
+
+MacroPlayTab:CreateSection("Lobby Teleporter Protection")
+
+MacroPlayTab:CreateToggle({
+    Name = "🔄 Auto Step to Teleporter (Lobby Only)",
+    CurrentValue = autoEventTeleporter,
+    Callback = function(Value)
+        autoEventTeleporter = Value
+        ConfigData.AutoEventTeleporter = Value
+        SaveConfig()
+        
+        local msg = Value and "تفعيل الحماية: يرجعك للبوابة لو طردك للوبي فقط" or "تم إيقاف تليبرت اللوبي"
+        Rayfield:Notify({Title = "Lobby Teleporter", Content = msg, Duration = 2})
+    end,
+})
 
 ManagementTab:CreateInput({
     Name = "✏️ Macro Name",
