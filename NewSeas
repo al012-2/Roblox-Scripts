@@ -1,0 +1,1062 @@
+-- Game Hub Pro (نسخة نظيفة وحدة)
+
+local env = (getgenv and getgenv()) or _G
+
+-- إغلاق النسخة القديمة لو السكربت اتشغل قبل
+if env.GameHubCleanup then pcall(env.GameHubCleanup) end
+
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local GuiService = game:GetService("GuiService")
+local VIM
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
+local player = Players.LocalPlayer
+local liveFolder = workspace:WaitForChild("Live", 10)
+
+if not liveFolder then
+    warn("[GameHub] مجلد Live غير موجود")
+    return
+end
+
+----------------------------------------------------------------------
+-- إدارة التنظيف
+----------------------------------------------------------------------
+local alive = true
+local connections = {}
+
+env.GameHubFluent = Fluent
+env.GameHubCleanup = function()
+    alive = false
+    for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+    pcall(function() Fluent:Destroy() end)
+    local p = workspace:FindFirstChild("FluentFarmPlatform")
+    if p then p:Destroy() end
+end
+
+----------------------------------------------------------------------
+-- المتغيرات
+----------------------------------------------------------------------
+local isFarming = false
+local isCollectingChests = false
+local currentTarget = "Nearest"
+local selectedWeapon = "Combat"
+local selectedPlayer = nil
+local selectedIsland = nil
+local selectedChestName = nil
+local farmDistance = 5
+local chestHoldTime = 1.5
+local farmMode = "Top"
+local waterWalkEnabled = false
+local chestMap = {}        -- اسم العرض -> بيانات الصندوق
+local visitedChests = {}   -- صناديق تم فتحها في الجمع التلقائي
+
+local islandLocations = {
+    ["Starter Island"] = Vector3.new(220, 45, -80),
+    ["Desert Village"] = Vector3.new(1520, 50, -800),
+    ["Marine Base"] = Vector3.new(-860, 45, 1050),
+    ["Fishman Island"] = Vector3.new(3250, -35, 2450),
+    ["Snow Island"] = Vector3.new(-2050, 55, -1750),
+    ["Sky Island"] = Vector3.new(480, 1165, 3220)
+}
+
+-- أي جزيرة ننتقل لها لو الوحش المختار بعيد وما انحمّل عندك (تخمين من الأسماء، عدّله حسب لعبتك)
+local mobIslandHint = {
+    ["Skypiean Guard"] = "Sky Island",
+    ["Fishman Invader"] = "Fishman Island",
+    ["The Frostborn Tyrant, Rask"] = "Snow Island",
+}
+
+-- المنصة
+local farmPlatform = Instance.new("Part")
+farmPlatform.Name = "FluentFarmPlatform"
+farmPlatform.Size = Vector3.new(8, 1, 8)
+farmPlatform.Transparency = 1
+farmPlatform.Anchored = true
+farmPlatform.CanCollide = false
+farmPlatform.CFrame = CFrame.new(0, -500, 0)
+farmPlatform.Parent = workspace
+
+----------------------------------------------------------------------
+-- النافذة
+----------------------------------------------------------------------
+local Window = Fluent:CreateWindow({
+    Title = "Game Hub Pro",
+    SubTitle = "Complete Controller",
+    TabWidth = 140,
+    Size = UDim2.fromOffset(530, 420),
+    Theme = "Dark"
+})
+
+local Tabs = {
+    Farm = Window:AddTab({ Title = "Farm", Icon = "swords" }),
+    Teleport = Window:AddTab({ Title = "Teleport", Icon = "map-pin" }),
+    Chests = Window:AddTab({ Title = "Chests", Icon = "package" }),
+    Inventory = Window:AddTab({ Title = "Weapons", Icon = "backpack" }),
+    Misc = Window:AddTab({ Title = "Misc", Icon = "sliders" })
+}
+
+local function notify(title, content, dur)
+    pcall(function()
+        Fluent:Notify({ Title = title, Content = content, Duration = dur or 2.5 })
+    end)
+end
+
+-- تشغيل أي تبويب بشكل آمن: الخطأ ما يوقف باقي التبويبات
+local function safeBuild(name, fn)
+    local ok, err = pcall(fn)
+    if not ok then
+        warn("[GameHub] خطأ في تبويب " .. name .. ": " .. tostring(err))
+        notify("Error: " .. name, tostring(err), 8)
+    end
+end
+
+----------------------------------------------------------------------
+-- دوال مساعدة
+----------------------------------------------------------------------
+local function getWeaponsList()
+    local list = {}
+    local function scan(container)
+        if not container then return end
+        for _, item in ipairs(container:GetChildren()) do
+            if item:IsA("Tool") and not table.find(list, item.Name) then
+                table.insert(list, item.Name)
+            end
+        end
+    end
+    scan(player.Character)
+    scan(player:FindFirstChild("Backpack"))
+    if #list == 0 then table.insert(list, "Combat") end
+    return list
+end
+
+local function cleanMobName(name)
+    return (name:gsub("%s*#%d+", ""))
+end
+
+local function getMobsList()
+    local names, seen = {}, {}
+    for _, entity in ipairs(liveFolder:GetChildren()) do
+        if entity:IsA("Model") and not Players:GetPlayerFromCharacter(entity) and entity ~= player.Character then
+            local cleanName = cleanMobName(entity.Name)
+            if not seen[cleanName] then
+                seen[cleanName] = true
+                table.insert(names, cleanName)
+            end
+        end
+    end
+    table.sort(names)
+    table.insert(names, 1, "Nearest")
+    return names
+end
+
+local function getPlayersList()
+    local plist = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player then table.insert(plist, p.Name) end
+    end
+    if #plist == 0 then table.insert(plist, "لا يوجد لاعبين آخرين") end
+    return plist
+end
+
+local function getIslandsNames()
+    local names = {}
+    for name in pairs(islandLocations) do table.insert(names, name) end
+    table.sort(names)
+    return names
+end
+
+local chestKeyword = "chest"
+local excludeWords = {"npc", "quest", "player", "appraiser", "merchant", "shop", "dealer", "vendor", "seller", "buyer", "trader", "guide", "key"}
+
+local function matchesChestName(lowName)
+    if not (lowName:find(chestKeyword, 1, true) or lowName:find("spawner", 1, true)) then
+        return false
+    end
+    for _, w in ipairs(excludeWords) do
+        if lowName:find(w, 1, true) then return false end
+    end
+    return true
+end
+
+-- هل هذا الكائن (أو أحد آبائه) شخصية/NPC؟
+local function hasHumanoidAround(obj)
+    if obj:IsA("Model") and obj:FindFirstChildWhichIsA("Humanoid", true) then return true end
+    local m = obj:FindFirstAncestorOfClass("Model")
+    while m do
+        if m:FindFirstChildOfClass("Humanoid") then return true end
+        m = m:FindFirstAncestorOfClass("Model")
+    end
+    return false
+end
+
+local function getRealChests()
+    local myChar = player.Character
+    local root = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not root then return {} end
+    local myPos = root.Position
+    local found = {}
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            -- فحص الاسم أولاً (رخيص)، والفحوصات الثقيلة بعده فقط
+            local lowName = string.lower(obj.Name)
+            if matchesChestName(lowName) then
+
+                local skip = obj:FindFirstAncestor("Live") or obj:FindFirstAncestor("NPCs")
+                    or (myChar and obj:IsDescendantOf(myChar))
+                    or obj:IsDescendantOf(farmPlatform)
+                    or hasHumanoidAround(obj)
+                    or obj:FindFirstChildWhichIsA("Dialog", true)
+
+                if not skip then
+                    local part
+                    if obj:IsA("BasePart") then
+                        part = obj
+                    else
+                        part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+                    end
+                    if part and part.Parent then
+                        table.insert(found, {
+                            baseName = obj.Name,
+                            model = obj,
+                            part = part,
+                            dist = (myPos - part.Position).Magnitude
+                        })
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(found, function(a, b) return a.dist < b.dist end)
+    return found
+end
+
+-- يبني القائمة ويخزن الصناديق بالاسم (المسافة وقت التحديث)
+local function refreshChestList()
+    chestMap = {}
+    local list = {}
+    for i, c in ipairs(getRealChests()) do
+        local display = string.format("%d. %s (%dm)", i, c.baseName, math.floor(c.dist))
+        chestMap[display] = c
+        table.insert(list, display)
+        if i >= 60 then break end
+    end
+    if #list == 0 then table.insert(list, "لا توجد صناديق متاحة") end
+    return list
+end
+
+-- ================= أدوات الواجهة (GUI) =================
+local function stripRich(t)
+    return (tostring(t):gsub("<[^>]->", ""))
+end
+
+local function isGuiShown(obj)
+    local cur = obj
+    while cur and cur ~= game do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+        cur = cur.Parent
+    end
+    return true
+end
+
+-- يبحث عن نص ظاهر في PlayerGui (أو داخل root إذا انحدد)
+local function findGuiByText(text, root)
+    root = root or player:FindFirstChildOfClass("PlayerGui")
+    if not root then return nil end
+    local want = string.lower(text)
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextButton") or d:IsA("TextLabel") then
+            local t = string.lower(stripRich(d.Text)):match("^%s*(.-)%s*$")
+            if t == want and isGuiShown(d) then return d end
+        end
+    end
+    return nil
+end
+
+-- ضغط زر واجهة: إشارات أولاً، وإذا ما تأثر يضغط بالماوس الافتراضي
+local function clickGui(obj)
+    local btn = obj:IsA("GuiButton") and obj or obj:FindFirstAncestorWhichIsA("GuiButton")
+    if btn then
+        if firesignal then
+            for _, ev in ipairs({"MouseButton1Down", "MouseButton1Click", "Activated", "MouseButton1Up"}) do
+                pcall(function() firesignal(btn[ev]) end)
+            end
+        elseif getconnections then
+            for _, ev in ipairs({"MouseButton1Click", "Activated"}) do
+                pcall(function()
+                    for _, conn in ipairs(getconnections(btn[ev])) do conn:Fire() end
+                end)
+            end
+        end
+    end
+
+    task.wait(0.3)
+
+    if VIM and obj.Parent and isGuiShown(obj) then
+        local pos, size = obj.AbsolutePosition, obj.AbsoluteSize
+        local sg = obj:FindFirstAncestorOfClass("ScreenGui")
+        local inset = (sg and sg.IgnoreGuiInset) and 0 or GuiService:GetGuiInset().Y
+        local x, y = pos.X + size.X / 2, pos.Y + size.Y / 2 + inset
+        pcall(function()
+            VIM:SendMouseMoveEvent(x, y, game)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end)
+    end
+end
+
+-- ضغطة مطولة بالماوس على الصندوق في العالم
+local function holdClickPart(part, duration)
+    if not VIM then return end
+    local cam = workspace.CurrentCamera
+    if not cam or not part or not part.Parent then return end
+
+    local oldType = cam.CameraType
+    pcall(function()
+        cam.CameraType = Enum.CameraType.Scriptable
+        cam.CFrame = CFrame.new(part.Position + Vector3.new(-1, 10, -8), part.Position)
+        task.wait(0.2)
+
+        local v, onScreen = cam:WorldToViewportPoint(part.Position)
+        if onScreen then
+            VIM:SendMouseMoveEvent(v.X, v.Y, game)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(v.X, v.Y, 0, true, game, 0)
+            task.wait(duration)
+            VIM:SendMouseButtonEvent(v.X, v.Y, 0, false, game, 0)
+        end
+    end)
+    pcall(function() cam.CameraType = oldType end)
+end
+
+-- يرجع: (الصندوق موجود؟, تم جمع الغنائم؟)
+local function openChest(c)
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or not c or not c.part or not c.part.Parent then return false, false end
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    char:PivotTo(CFrame.new(c.part.Position + Vector3.new(4, 3, 0)))
+    task.wait(0.3)
+
+    -- 1) البرومبتات و ClickDetector
+    for _, d in ipairs(c.model:GetDescendants()) do
+        if d:IsA("ProximityPrompt") then
+            pcall(function() d.HoldDuration = 0 end)
+            pcall(fireproximityprompt, d)
+        elseif d:IsA("ClickDetector") and fireclickdetector then
+            pcall(fireclickdetector, d)
+        end
+    end
+
+    local function waitLoot(t)
+        local t0 = os.clock()
+        while os.clock() - t0 < t do
+            local b = findGuiByText("loot all")
+            if b then return b end
+            task.wait(0.2)
+        end
+        return nil
+    end
+
+    local lootBtn = waitLoot(1)
+
+    -- 2) إذا ما انفتح: ضغطة مطولة فعلية على الصندوق
+    if not lootBtn then
+        holdClickPart(c.part, chestHoldTime)
+        lootBtn = waitLoot(2.5)
+    end
+
+    -- 3) Loot All ثم Close
+    if lootBtn then
+        task.wait(0.2)
+        clickGui(lootBtn)
+        task.wait(0.4)
+
+        local sg = lootBtn:FindFirstAncestorOfClass("ScreenGui")
+        local closeBtn = sg and findGuiByText("close", sg)
+        if closeBtn then clickGui(closeBtn) end
+        return true, true
+    end
+
+    return true, false
+end
+
+-- ================= Hitbox (للوحوش فقط، مو اللاعبين) =================
+local hitboxEnabled = false
+local hitboxSize = 15
+local hitboxBackup = {}
+
+local function getMobRoot(entity)
+    return entity:FindFirstChild("HumanoidRootPart") or entity.PrimaryPart
+        or entity:FindFirstChild("Root") or entity:FindFirstChild("Torso")
+end
+
+local hitboxRange = 60
+local bringEnabled = false
+local bringDistance = 4
+local bringCount = 10
+
+local function restorePart(part)
+    local o = hitboxBackup[part]
+    if not o then return end
+    hitboxBackup[part] = nil
+    if part and part.Parent then
+        pcall(function()
+            part.Size = o.Size
+            part.Transparency = o.Transparency
+            part.CanCollide = o.CanCollide
+            part.Massless = o.Massless
+        end)
+    end
+end
+
+-- يطبّق الهت بوكس فقط على الوحوش القريبة الحية، ويرجّع الباقي لوضعه الطبيعي
+local function applyHitbox()
+    local char = player.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+    local myPos = myRoot.Position
+    local active = {}
+    local sz = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
+
+    for _, entity in ipairs(liveFolder:GetChildren()) do
+        if entity:IsA("Model") and entity ~= char and not Players:GetPlayerFromCharacter(entity) then
+            local part = getMobRoot(entity)
+            local hum = entity:FindFirstChildOfClass("Humanoid")
+            if part and part:IsA("BasePart") and (not hum or hum.Health > 0)
+                and (myPos - part.Position).Magnitude <= hitboxRange then
+                active[part] = true
+                if not hitboxBackup[part] then
+                    hitboxBackup[part] = {
+                        Size = part.Size,
+                        Transparency = part.Transparency,
+                        CanCollide = part.CanCollide,
+                        Massless = part.Massless
+                    }
+                end
+                if part.Size ~= sz then part.Size = sz end
+                part.Transparency = 0.8
+                part.CanCollide = false
+                part.Massless = true
+            end
+        end
+    end
+
+    for part in pairs(hitboxBackup) do
+        if not active[part] then restorePart(part) end
+    end
+end
+
+local function restoreHitbox()
+    for part, o in pairs(hitboxBackup) do
+        if part and part.Parent then
+            pcall(function()
+                part.Size = o.Size
+                part.Transparency = o.Transparency
+                part.CanCollide = o.CanCollide
+                part.Massless = o.Massless
+            end)
+        end
+    end
+    hitboxBackup = {}
+end
+
+task.spawn(function()
+    while alive do
+        task.wait(0.5)
+        if hitboxEnabled then pcall(applyHitbox) end
+    end
+    pcall(restoreHitbox) -- عند إغلاق السكربت يرجع الأحجام
+end)
+
+-- ================= تشخيص أسماء الوحوش =================
+local function dumpMobs()
+    local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    local groups, order = {}, {}
+
+    local function add(entity, place)
+        if entity == player.Character or Players:GetPlayerFromCharacter(entity) then return end
+        local hum = entity:FindFirstChildOfClass("Humanoid")
+        local part = getMobRoot(entity)
+        local dist = (myRoot and part) and math.floor((myRoot.Position - part.Position).Magnitude) or -1
+        local key = string.format("%s | %s | humanoid=%s", cleanMobName(entity.Name), place, tostring(hum ~= nil))
+        local g = groups[key]
+        if not g then
+            g = { count = 0, loaded = 0, nearest = math.huge, raw = entity.Name }
+            groups[key] = g
+            table.insert(order, key)
+        end
+        g.count = g.count + 1
+        if part then g.loaded = g.loaded + 1 end
+        if dist >= 0 and dist < g.nearest then g.nearest = dist end
+    end
+
+    for _, child in ipairs(liveFolder:GetChildren()) do
+        if child:IsA("Model") then
+            add(child, "Live")
+        elseif child:IsA("Folder") then
+            for _, sub in ipairs(child:GetChildren()) do
+                if sub:IsA("Model") then add(sub, "Live/" .. child.Name) end
+            end
+        end
+    end
+
+    -- كائنات فيها Humanoid خارج Live (يمكن وحوش مخزنة في مكان ثاني)
+    for _, h in ipairs(workspace:GetDescendants()) do
+        if h:IsA("Humanoid") then
+            local m = h.Parent
+            if m and m:IsA("Model") and not m:IsDescendantOf(liveFolder) then
+                add(m, "workspace/" .. (m.Parent and m.Parent.Name or "?"))
+            end
+        end
+    end
+
+    local lines = {}
+    for _, key in ipairs(order) do
+        local g = groups[key]
+        local near = g.nearest == math.huge and "?" or (g.nearest .. "m")
+        local line = string.format("%s  x%d  محمّل=%d/%d  أقرب=%s  (الاسم الخام: %s)", key, g.count, g.loaded, g.count, near, g.raw)
+        print("[GameHub][Mob] " .. line)
+        table.insert(lines, line)
+    end
+    return lines
+end
+
+----------------------------------------------------------------------
+-- 1. Farm
+----------------------------------------------------------------------
+safeBuild("Farm", function()
+    local ToggleFarm = Tabs.Farm:AddToggle("FarmToggle", {
+        Title = "تشغيل الأوتو فارم (Auto Farm)",
+        Default = false
+    })
+
+    ToggleFarm:OnChanged(function()
+        isFarming = Fluent.Options.FarmToggle.Value
+        farmPlatform.CanCollide = isFarming
+        if not isFarming then
+            farmPlatform.CFrame = CFrame.new(0, -500, 0)
+        end
+    end)
+
+    local DropdownTarget = Tabs.Farm:AddDropdown("TargetDropdown", {
+        Title = "اختيار الهدف (Mob Target)",
+        Values = getMobsList(),
+        Multi = false,
+        Default = 1
+    })
+    DropdownTarget:OnChanged(function(Value)
+        currentTarget = Value or "Nearest"
+    end)
+
+    Tabs.Farm:AddButton({
+        Title = "تحديث الوحوش (Refresh Mobs)",
+        Callback = function()
+            DropdownTarget:SetValues(getMobsList())
+            notify("Mobs Refreshed", "تم تحديث قائمة الوحوش")
+        end
+    })
+
+    Tabs.Farm:AddButton({
+        Title = "كشف أسماء الوحوش (تشخيص)",
+        Callback = function()
+            local ok, lines = pcall(dumpMobs)
+            if not ok then notify("Error", tostring(lines), 6) return end
+            local short = {}
+            for i = 1, math.min(#lines, 6) do table.insert(short, lines[i]) end
+            notify("الوحوش (" .. #lines .. " نوع) - التفاصيل في F9",
+                #short > 0 and table.concat(short, "\n") or "ما فيه وحوش قريبة", 10)
+        end
+    })
+
+    local DropdownMode = Tabs.Farm:AddDropdown("ModeDropdown", {
+        Title = "جهة التمركز",
+        Values = {"Top (أعلى)", "Behind (خلف)", "Front (أمام)"},
+        Multi = false,
+        Default = 1
+    })
+    DropdownMode:OnChanged(function(Value)
+        if Value:find("Behind") then farmMode = "Behind"
+        elseif Value:find("Front") then farmMode = "Front"
+        else farmMode = "Top" end
+    end)
+
+    local SliderDist = Tabs.Farm:AddSlider("DistSlider", {
+        Title = "المسافة عن الهدف",
+        Default = 5, Min = 1, Max = 15, Rounding = 0
+    })
+    SliderDist:OnChanged(function(Value) farmDistance = Value end)
+
+    local ToggleHitbox = Tabs.Farm:AddToggle("HitboxToggle", {
+        Title = "تكبير هت بوكس الوحوش (Hitbox)",
+        Default = false
+    })
+    ToggleHitbox:OnChanged(function()
+        hitboxEnabled = Fluent.Options.HitboxToggle.Value
+        if not hitboxEnabled then pcall(restoreHitbox) end
+    end)
+
+    local SliderHitbox = Tabs.Farm:AddSlider("HitboxSize", {
+        Title = "حجم الهت بوكس",
+        Default = 15, Min = 3, Max = 50, Rounding = 0
+    })
+    SliderHitbox:OnChanged(function(Value) hitboxSize = Value end)
+
+    local SliderHitboxRange = Tabs.Farm:AddSlider("HitboxRange", {
+        Title = "نطاق الهت بوكس والجلب (متر)",
+        Default = 60, Min = 20, Max = 150, Rounding = 0
+    })
+    SliderHitboxRange:OnChanged(function(Value) hitboxRange = Value end)
+
+    local ToggleBring = Tabs.Farm:AddToggle("BringToggle", {
+        Title = "جلب الوحوش أمامك (Bring Mobs)",
+        Default = false
+    })
+    ToggleBring:OnChanged(function()
+        bringEnabled = Fluent.Options.BringToggle.Value
+        if bringEnabled then
+            pcall(function() sethiddenproperty(player, "SimulationRadius", 1e9) end)
+            pcall(function() sethiddenproperty(player, "MaximumSimulationRadius", 1e9) end)
+            notify("Bring", "قف مكانك: الوحوش القريبة تنجلب لك والفارم ما يحركك", 5)
+        end
+    end)
+
+    local SliderBring = Tabs.Farm:AddSlider("BringDistance", {
+        Title = "مسافة الوحش أمامك",
+        Default = 4, Min = 2, Max = 10, Rounding = 0
+    })
+    SliderBring:OnChanged(function(Value) bringDistance = Value end)
+
+    local SliderBringCount = Tabs.Farm:AddSlider("BringCount", {
+        Title = "عدد الوحوش المجلوبة",
+        Default = 10, Min = 1, Max = 30, Rounding = 0
+    })
+    SliderBringCount:OnChanged(function(Value) bringCount = Value end)
+end)
+
+----------------------------------------------------------------------
+-- 2. Teleport
+----------------------------------------------------------------------
+safeBuild("Teleport", function()
+    Tabs.Teleport:AddSection("الانتقال إلى اللاعبين")
+
+    local DropdownPlayers = Tabs.Teleport:AddDropdown("PlayerDropdown", {
+        Title = "اختر لاعباً",
+        Values = getPlayersList(),
+        Multi = false,
+        Default = 1
+    })
+    DropdownPlayers:OnChanged(function(Value) selectedPlayer = Value end)
+
+    Tabs.Teleport:AddButton({
+        Title = "تحديث قائمة اللاعبين",
+        Callback = function()
+            DropdownPlayers:SetValues(getPlayersList())
+            notify("Players Refreshed", "تم تحديث قائمة اللاعبين")
+        end
+    })
+
+    Tabs.Teleport:AddButton({
+        Title = "انتقال إلى اللاعب المختار",
+        Callback = function()
+            if not selectedPlayer or selectedPlayer == "لا يوجد لاعبين آخرين" then return end
+            local targetPlr = Players:FindFirstChild(selectedPlayer)
+            local targetChar = targetPlr and targetPlr.Character
+            local targetRoot = targetChar and (targetChar:FindFirstChild("HumanoidRootPart") or targetChar.PrimaryPart)
+            local myChar = player.Character
+            if targetRoot and myChar then
+                myChar:PivotTo(targetRoot.CFrame * CFrame.new(0, 3, 2))
+                notify("Teleport", "تم الانتقال إلى: " .. selectedPlayer)
+            end
+        end
+    })
+
+    Tabs.Teleport:AddSection("الانتقال إلى الجزر")
+
+    local islands = getIslandsNames()
+    selectedIsland = islands[1]
+    local DropdownIslands = Tabs.Teleport:AddDropdown("IslandDropdown", {
+        Title = "اختر جزيرة",
+        Values = islands,
+        Multi = false,
+        Default = 1
+    })
+    DropdownIslands:OnChanged(function(Value) selectedIsland = Value end)
+
+    Tabs.Teleport:AddButton({
+        Title = "انتقال إلى الجزيرة",
+        Callback = function()
+            local pos = selectedIsland and islandLocations[selectedIsland]
+            local myChar = player.Character
+            if pos and myChar then
+                myChar:PivotTo(CFrame.new(pos))
+                notify("Teleport", "تم الانتقال إلى: " .. selectedIsland, 3)
+            end
+        end
+    })
+end)
+
+----------------------------------------------------------------------
+-- 3. Chests
+----------------------------------------------------------------------
+safeBuild("Chests", function()
+    -- القائمة تبدأ فاضية، والتحديث بالزر (تجنب مسح ثقيل وقت التشغيل)
+    local DropdownChests = Tabs.Chests:AddDropdown("ChestDropdown", {
+        Title = "اختر صندوقاً",
+        Values = {"اضغط تحديث أولاً"},
+        Multi = false,
+        Default = 1
+    })
+    DropdownChests:OnChanged(function(Value) selectedChestName = Value end)
+
+    Tabs.Chests:AddButton({
+        Title = "تحديث الصناديق (Refresh Chests)",
+        Callback = function()
+            local ok, list = pcall(refreshChestList)
+            DropdownChests:SetValues(ok and list or {"لا توجد صناديق متاحة"})
+            if not ok then warn("[GameHub] " .. tostring(list)) end
+            notify("Chests", ok and "تم تحديث الصناديق" or "فشل التحديث، شوف F9")
+        end
+    })
+
+    Tabs.Chests:AddInput("ChestKeyword", {
+        Title = "كلمة البحث عن الصناديق",
+        Default = "chest",
+        Placeholder = "chest",
+        Numeric = false,
+        Finished = true,
+        Callback = function(Value)
+            if Value and #Value > 0 then
+                chestKeyword = string.lower(Value)
+                notify("Chests", "كلمة البحث: " .. chestKeyword)
+            end
+        end
+    })
+
+    local SliderHold = Tabs.Chests:AddSlider("ChestHold", {
+        Title = "مدة الضغط على الصندوق (ثواني)",
+        Default = 1.5, Min = 0.2, Max = 5, Rounding = 1
+    })
+    SliderHold:OnChanged(function(v) chestHoldTime = v end)
+
+    Tabs.Chests:AddButton({
+        Title = "كشف أسماء النتائج (للتشخيص)",
+        Callback = function()
+            local ok, chests = pcall(getRealChests)
+            if not ok then notify("Error", tostring(chests), 6) return end
+            local counts, order = {}, {}
+            for _, c in ipairs(chests) do
+                local key = c.model.ClassName .. ": " .. c.baseName
+                if not counts[key] then counts[key] = 0 table.insert(order, key) end
+                counts[key] = counts[key] + 1
+            end
+            local lines = {}
+            for _, k in ipairs(order) do
+                local line = k .. " x" .. counts[k]
+                print("[GameHub] " .. line)
+                if #lines < 6 then table.insert(lines, line) end
+            end
+            notify("النتائج (" .. #order .. " نوع)", #lines > 0 and table.concat(lines, "\n") or "لا شيء", 8)
+        end
+    })
+
+    Tabs.Chests:AddButton({
+        Title = "انتقال وفتح الصندوق المختار",
+        Callback = function()
+            local c = selectedChestName and chestMap[selectedChestName]
+            if not c then
+                notify("Chests", "حدّث القائمة واختر صندوق أولاً")
+                return
+            end
+            local exists, looted = openChest(c)
+            if not exists then
+                notify("Chest", "الصندوق ما عاد موجود، حدّث القائمة")
+            elseif looted then
+                notify("Chest", "تم فتح الصندوق وجمع الغنائم")
+            else
+                notify("Chest", "وصلت للصندوق لكن ما ظهرت نافذة الغنائم", 4)
+            end
+        end
+    })
+
+    local ToggleChestFarm = Tabs.Chests:AddToggle("AutoChestToggle", {
+        Title = "جمع الصناديق تلقائياً",
+        Default = false
+    })
+
+    ToggleChestFarm:OnChanged(function()
+        isCollectingChests = Fluent.Options.AutoChestToggle.Value
+        if not isCollectingChests then return end
+        visitedChests = {}
+
+        task.spawn(function()
+            while alive and isCollectingChests do
+                -- مسح واحد للخريطة، ثم نمر على النتائج بالترتيب
+                local ok, chests = pcall(getRealChests)
+                local queue = {}
+                if ok then
+                    for _, c in ipairs(chests) do
+                        if not visitedChests[c.model] then table.insert(queue, c) end
+                    end
+                end
+
+                if #queue == 0 then
+                    notify("الصناديق", "ما بقي صناديق جديدة", 3)
+                    isCollectingChests = false
+                    pcall(function() ToggleChestFarm:SetValue(false) end)
+                    break
+                end
+
+                for _, c in ipairs(queue) do
+                    if not (alive and isCollectingChests) then break end
+                    visitedChests[c.model] = true
+                    if c.part and c.part.Parent then
+                        openChest(c)
+                        task.wait(0.5)
+                    end
+                end
+            end
+        end)
+    end)
+end)
+
+----------------------------------------------------------------------
+-- 4. Weapons
+----------------------------------------------------------------------
+safeBuild("Weapons", function()
+    local weapons = getWeaponsList()
+    selectedWeapon = weapons[1]
+
+    local DropdownWeapons = Tabs.Inventory:AddDropdown("WeaponDropdown", {
+        Title = "السلاح المجهز تلقائياً",
+        Values = weapons,
+        Multi = false,
+        Default = 1
+    })
+    DropdownWeapons:OnChanged(function(Value) selectedWeapon = Value end)
+
+    Tabs.Inventory:AddButton({
+        Title = "تحديث الحقيبة",
+        Callback = function()
+            DropdownWeapons:SetValues(getWeaponsList())
+            notify("Inventory", "تم تحديث الأسلحة")
+        end
+    })
+end)
+
+----------------------------------------------------------------------
+-- 5. Misc
+----------------------------------------------------------------------
+safeBuild("Misc", function()
+    local ToggleNoFog = Tabs.Misc:AddToggle("NoFogToggle", {
+        Title = "إزالة الضباب (Clear Fog)",
+        Default = false
+    })
+
+    local oldFogEnd, oldShadows = Lighting.FogEnd, Lighting.GlobalShadows
+    ToggleNoFog:OnChanged(function()
+        if Fluent.Options.NoFogToggle.Value then
+            oldFogEnd, oldShadows = Lighting.FogEnd, Lighting.GlobalShadows
+            Lighting.FogEnd = 100000
+            Lighting.GlobalShadows = false
+        else
+            Lighting.FogEnd = oldFogEnd
+            Lighting.GlobalShadows = oldShadows
+        end
+    end)
+
+    local ToggleWaterWalk = Tabs.Misc:AddToggle("WaterWalkToggle", {
+        Title = "المشي فوق الماء (Water Walk)",
+        Default = false
+    })
+    ToggleWaterWalk:OnChanged(function()
+        waterWalkEnabled = Fluent.Options.WaterWalkToggle.Value
+    end)
+end)
+
+----------------------------------------------------------------------
+-- حلقات التشغيل
+----------------------------------------------------------------------
+local function getTarget()
+    local char = player.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+    local myPos = myRoot.Position
+
+    local nearestPart, minDist = nil, math.huge
+    local want = string.lower(currentTarget)
+
+    for _, entity in ipairs(liveFolder:GetChildren()) do
+        if entity:IsA("Model") and entity ~= char and not Players:GetPlayerFromCharacter(entity) then
+            if currentTarget == "Nearest" or cleanMobName(entity.Name) == currentTarget
+                or string.find(string.lower(entity.Name), want, 1, true) then
+                local hum = entity:FindFirstChildOfClass("Humanoid")
+                local part = entity.PrimaryPart or entity:FindFirstChild("Root")
+                    or entity:FindFirstChild("HumanoidRootPart") or entity:FindFirstChild("Torso")
+                if part and (not hum or hum.Health > 0) then
+                    local d = (myPos - part.Position).Magnitude
+                    if d < minDist then
+                        minDist = d
+                        nearestPart = part
+                    end
+                end
+            end
+        end
+    end
+    return nearestPart
+end
+
+-- لو الفارم شغال وما فيه هدف: ننتقل للجزيرة المناسبة عشان الوحش ينحمّل (Streaming)، وإلا ننبّه
+task.spawn(function()
+    local lastWarn, lastHop = 0, 0
+    while alive do
+        task.wait(2)
+        if isFarming and not getTarget() then
+            local hintName = mobIslandHint[currentTarget]
+            local pos = hintName and islandLocations[hintName]
+            local char = player.Character
+            local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+            local farFromIsland = myRoot and pos and (myRoot.Position - pos).Magnitude > 300
+            if farFromIsland and os.clock() - lastHop > 12 then
+                lastHop = os.clock()
+                char:PivotTo(CFrame.new(pos))
+                notify("الفارم", "انتقلت إلى " .. hintName .. " لتحميل: " .. currentTarget, 4)
+                task.wait(3)
+            elseif os.clock() - lastWarn > 10 then
+                lastWarn = os.clock()
+                notify("الفارم", "ما لقيت هدف: " .. currentTarget .. "\nقرّب من منطقة الوحوش ثم اضغط تحديث الوحوش", 5)
+            end
+        end
+    end
+end)
+
+-- المشي فوق الماء
+table.insert(connections, RunService.Heartbeat:Connect(function()
+    if not waterWalkEnabled then return end
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {char, farmPlatform}
+
+    local ray = workspace:Raycast(root.Position, Vector3.new(0, -10, 0), rayParams)
+    if ray and ray.Instance then
+        local isWater = string.lower(ray.Instance.Name):find("water") or ray.Instance.Material == Enum.Material.Water
+        if isWater and root.Position.Y < ray.Position.Y + 3 then
+            root.CFrame = CFrame.new(root.Position.X, ray.Position.Y + 3.5, root.Position.Z)
+            local v = root.AssemblyLinearVelocity
+            root.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
+        end
+    end
+end))
+
+-- جلب الوحوش أمامك (يأثر على السيرفر فقط لو تملك فيزياء الوحش)
+local function matchesTarget(entity)
+    if currentTarget == "Nearest" then return true end
+    return cleanMobName(entity.Name) == currentTarget
+        or string.find(string.lower(entity.Name), string.lower(currentTarget), 1, true) ~= nil
+end
+
+local lastOwnerWarn = 0
+table.insert(connections, RunService.Heartbeat:Connect(function()
+    if not bringEnabled then return end
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local cands = {}
+    for _, entity in ipairs(liveFolder:GetChildren()) do
+        if entity:IsA("Model") and entity ~= char and not Players:GetPlayerFromCharacter(entity)
+            and matchesTarget(entity) then
+            local part = getMobRoot(entity)
+            local hum = entity:FindFirstChildOfClass("Humanoid")
+            if part and part:IsA("BasePart") and (not hum or hum.Health > 0) then
+                local d = (root.Position - part.Position).Magnitude
+                if d <= hitboxRange then
+                    table.insert(cands, { part = part, dist = d })
+                end
+            end
+        end
+    end
+
+    -- نجلب مجموعة: الأقرب أولاً وبحد أقصى العدد المحدد
+    table.sort(cands, function(a, b) return a.dist < b.dist end)
+    while #cands > bringCount do table.remove(cands) end
+
+    local owned = 0
+    for i, c in ipairs(cands) do
+        c.part.CFrame = root.CFrame * CFrame.new((((i - 1) % 5) - 2) * 1.2, 0, -bringDistance - math.floor((i - 1) / 5) * 1.2)
+        c.part.AssemblyLinearVelocity = Vector3.zero
+        if isnetworkowner and isnetworkowner(c.part) then owned = owned + 1 end
+    end
+
+    if isnetworkowner and #cands > 0 and owned == 0 and os.clock() - lastOwnerWarn > 8 then
+        lastOwnerWarn = os.clock()
+        notify("Bring", "ما تملك فيزياء هالوحوش، الجلب يتغير عندك بس ولا يأثر على السيرفر", 6)
+    end
+end))
+
+-- التموضع أثناء الفارم
+table.insert(connections, RunService.Heartbeat:Connect(function()
+    if not isFarming or bringEnabled then return end
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local target = getTarget()
+    if not target then return end
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    local tPos = target.Position
+    local desiredPos = tPos + Vector3.new(0, farmDistance, 0)
+    if farmMode == "Behind" then
+        desiredPos = tPos - target.CFrame.LookVector * farmDistance
+    elseif farmMode == "Front" then
+        desiredPos = tPos + target.CFrame.LookVector * farmDistance
+    end
+
+    char:PivotTo(CFrame.new(desiredPos, tPos))
+    farmPlatform.CFrame = CFrame.new(desiredPos - Vector3.new(0, 3.2, 0))
+end))
+
+-- الضرب وتجهيز السلاح
+task.spawn(function()
+    while alive do
+        task.wait(0.1)
+        if isFarming then
+            local char = player.Character
+            if char then
+                local backpack = player:FindFirstChild("Backpack")
+                local weapon = char:FindFirstChild(selectedWeapon) or (backpack and backpack:FindFirstChild(selectedWeapon))
+                if weapon and weapon:IsA("Tool") and weapon.Parent ~= char then
+                    weapon.Parent = char
+                end
+
+                local mainScript = char:FindFirstChild("MainCharacterScript")
+                local inputRemote = mainScript and mainScript:FindFirstChild("Input")
+                if inputRemote then
+                    pcall(function()
+                        inputRemote:FireServer("MouseButton1", true)
+                        task.wait(0.04)
+                        inputRemote:FireServer("MouseButton1", false)
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+Window:SelectTab(1)
+notify("Game Hub Pro", "تم تشغيل السكربت بنجاح!", 4)
