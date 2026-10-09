@@ -1,0 +1,662 @@
+-- ==============================================================================
+--    Anime Mysterious: Complete Zero-Lag Hub (Crafting & Full Evolution)
+-- ==============================================================================
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local LP = Players.LocalPlayer
+local PG = LP:WaitForChild("PlayerGui")
+
+local TARGET_FILE = "AM_AutoFarm_Target.json"
+local STORY_PLACE_ID = 97246719761307
+
+-- دوال حفظ واسترجاع المهمة
+local function saveTarget(data)
+    if writefile then
+        writefile(TARGET_FILE, HttpService:JSONEncode(data))
+    end
+end
+
+local function getSavedTarget()
+    if isfile and isfile(TARGET_FILE) then
+        local ok, data = pcall(function()
+            return HttpService:JSONDecode(readfile(TARGET_FILE))
+        end)
+        if ok and type(data) == "table" then return data end
+    end
+    return nil
+end
+
+local function clearSavedTarget()
+    if delfile and isfile and isfile(TARGET_FILE) then
+        delfile(TARGET_FILE)
+    end
+end
+
+-- 1. قراءة الـ Replica لمرة واحدة فقط
+local playerData = nil
+for _, obj in pairs(getgc(true)) do
+    if type(obj) == "table" then
+        local okData, dataTbl = pcall(function() return rawget(obj, "Data") end)
+        if okData and type(dataTbl) == "table" and rawget(dataTbl, "ItemInventory") then
+            playerData = dataTbl
+            break
+        end
+    end
+end
+
+local function getOwnedItemCount(itemId)
+    if playerData and playerData.ItemInventory then
+        return playerData.ItemInventory[itemId] or 0
+    end
+    return 0
+end
+
+local function getBagUnits()
+    local bag = {}
+    if playerData and playerData.Inventory and type(playerData.Inventory) == "table" then
+        for slotId, unitInfo in pairs(playerData.Inventory) do
+            if type(unitInfo) == "table" then
+                local uName = unitInfo.Name or unitInfo.Id or unitInfo.UnitId
+                if uName then
+                    table.insert(bag, {
+                        Slot = slotId,
+                        Name = tostring(uName),
+                        Level = tonumber(unitInfo.Level or unitInfo.Lv) or 1
+                    })
+                end
+            elseif type(unitInfo) == "string" then
+                table.insert(bag, { Slot = slotId, Name = unitInfo, Level = 1 })
+            end
+        end
+    end
+    return bag
+end
+
+-- كشف البيئة بأمان
+local Remotes = RS:WaitForChild("Remotes", 5)
+local isInLobby = (Remotes and Remotes:FindFirstChild("UpdateLobbySettings") ~= nil)
+
+local ItemDatabase = nil
+pcall(function() ItemDatabase = require(RS.Modules.ItemDatabase) end)
+
+local function getItemDisplayName(id)
+    if ItemDatabase and ItemDatabase.GetItem then
+        local it = ItemDatabase.GetItem(id)
+        if it and it.Name then return it.Name end
+    end
+    return tostring(id)
+end
+
+-- دالة مرنة لفك متطلبات القطع من الموديول
+local function extractRequirements(data)
+    local items = {}
+    local cost = 15000
+
+    if type(data) ~= "table" then return items, cost end
+
+    cost = tonumber(data.Price or data.Cost or data.Yen or data.Gold or 15000) or 15000
+
+    local rawItems = data["Require Items"] or data.RequireItems or data["Require_Items"] 
+                  or data.ItemRequirement or data.Requirements or data.Items
+
+    if not rawItems then
+        for k, v in pairs(data) do
+            if type(v) == "table" and (tostring(k):lower():find("item") or tostring(k):lower():find("require")) then
+                rawItems = v
+                break
+            end
+        end
+    end
+
+    if not rawItems then rawItems = data end
+
+    if type(rawItems) == "table" then
+        for k, v in pairs(rawItems) do
+            if type(v) == "table" then
+                local id = v.Id or v.ID or v.Name or v.Item or v[1]
+                local amt = v.Amount or v.Count or v.Quantity or v[2] or 1
+                if id then
+                    table.insert(items, { Id = tostring(id), Amount = tonumber(amt) or 1 })
+                else
+                    for subId, subAmt in pairs(v) do
+                        if tonumber(subAmt) then
+                            table.insert(items, { Id = tostring(subId), Amount = tonumber(subAmt) })
+                        end
+                    end
+                end
+            elseif type(v) == "number" then
+                table.insert(items, { Id = tostring(k), Amount = v })
+            elseif type(v) == "string" then
+                local iName, iAmt = v:match("^(.-)%s*:%s*(%d+)")
+                if iName and iAmt then
+                    table.insert(items, { Id = iName, Amount = tonumber(iAmt) or 1 })
+                else
+                    table.insert(items, { Id = v, Amount = 1 })
+                end
+            end
+        end
+    end
+
+    return items, cost
+end
+
+-- 2. سحب جميع وصفات التطوير من مجلد Requirements
+local unitEvolutionRecipes = {}
+
+local function loadAllEvolutionRecipes()
+    local reqFolder = RS:FindFirstChild("Requirements", true)
+    local targetModules = {}
+
+    if reqFolder then
+        for _, child in ipairs(reqFolder:GetChildren()) do
+            if child:IsA("ModuleScript") then
+                table.insert(targetModules, child)
+            end
+        end
+    end
+
+    if #targetModules == 0 then
+        for _, desc in ipairs(RS:GetDescendants()) do
+            if desc:IsA("ModuleScript") and desc.Name:find("_Awakened") and not desc:GetFullName():find("UnitData") then
+                table.insert(targetModules, desc)
+            end
+        end
+    end
+
+    for _, mod in ipairs(targetModules) do
+        local ok, data = pcall(require, mod)
+        if ok and type(data) == "table" then
+            local items, cost = extractRequirements(data)
+            local baseName = mod.Name:gsub("_Awakened", ""):gsub("_evo", "")
+            
+            local dispName = baseName
+            pcall(function()
+                local uMod = RS:FindFirstChild(mod.Name, true)
+                if uMod and uMod:IsA("ModuleScript") and uMod ~= mod then
+                    local uData = require(uMod)
+                    if uData and (uData.DisplayName or uData.Name) then
+                        dispName = uData.DisplayName or uData.Name
+                    end
+                end
+            end)
+
+            unitEvolutionRecipes[mod.Name] = {
+                Key = mod.Name,
+                BaseUnit = baseName,
+                DisplayName = dispName,
+                Cost = cost,
+                Requirements = items
+            }
+        end
+    end
+end
+loadAllEvolutionRecipes()
+
+-- 3. موديولات اللوبي والدروبات
+local itemDropIndex = {}
+local CraftingConfig = nil
+local EvolutionRecipes = nil
+
+if isInLobby then
+    pcall(function() CraftingConfig = require(RS.Modules.CraftingModule.CraftingConfig) end)
+    pcall(function() EvolutionRecipes = require(RS.Modules.CraftingModule.CraftingConfig.EvolutionRecipes) end)
+
+    local okMapCfg, MapConfig = pcall(function()
+        local pm = RS.Modules:FindFirstChild("PlayingModule")
+        return pm and require(pm:FindFirstChild("MapConfig"))
+    end)
+
+    local mapModulesByName = {}
+    if okMapCfg and type(MapConfig) == "table" then
+        for _, mapInfo in pairs(MapConfig) do
+            if type(mapInfo) == "table" and mapInfo.MapToCreate then
+                mapModulesByName[mapInfo.MapToCreate] = mapInfo
+            end
+        end
+    end
+
+    local mapStageRewardsFolder = nil
+    pcall(function()
+        mapStageRewardsFolder = RS.Modules.PlayingModule.MapConfig:FindFirstChild("MapStageReward")
+    end)
+
+    if mapStageRewardsFolder then
+        for _, rewardMod in ipairs(mapStageRewardsFolder:GetChildren()) do
+            local ok, stagesData = pcall(require, rewardMod)
+            local mapInfo = mapModulesByName[rewardMod.Name]
+            if ok and type(stagesData) == "table" and mapInfo then
+                for actNumber, stageDetails in pairs(stagesData) do
+                    if type(stageDetails) == "table" and stageDetails.Rewards and stageDetails.Rewards.Items then
+                        for _, rewardItem in ipairs(stageDetails.Rewards.Items) do
+                            itemDropIndex[rewardItem.Id] = itemDropIndex[rewardItem.Id] or {}
+                            table.insert(itemDropIndex[rewardItem.Id], {
+                                MapInfo = mapInfo,
+                                Act = actNumber,
+                                Rewards = stageDetails.Rewards,
+                                Chance = rewardItem.Chance or 0,
+                                Difficulties = rewardItem.Difficulty or {"Normal", "Hard", "Nightmare"}
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- دالة التيليبورت
+local function teleportToStage(stageDropData, chosenDiff)
+    if not isInLobby then return end
+    local UpdateLobbySettings = Remotes:FindFirstChild("UpdateLobbySettings")
+    local RequestJoinLobby = Remotes:FindFirstChild("RequestJoinLobby")
+    local TeleportRequest = Remotes:FindFirstChild("TeleportRequest")
+
+    if RequestJoinLobby then pcall(function() RequestJoinLobby:InvokeServer("Create") end) end
+    task.wait(0.12)
+    if UpdateLobbySettings then
+        UpdateLobbySettings:FireServer(
+            stageDropData.MapInfo.Name,
+            tonumber(stageDropData.Act) or stageDropData.Act,
+            stageDropData.Rewards,
+            chosenDiff,
+            stageDropData.MapInfo.MapToCreate,
+            stageDropData.MapInfo.Mode or "Story"
+        )
+    end
+    task.wait(0.12)
+    if TeleportRequest then
+        TeleportRequest:FireServer(
+            STORY_PLACE_ID,
+            stageDropData.MapInfo.Mode or "Story",
+            stageDropData.MapInfo.MapToCreate,
+            tonumber(stageDropData.Act) or stageDropData.Act,
+            chosenDiff
+        )
+    end
+end
+
+local function findDropsForItem(itemId)
+    if itemDropIndex[itemId] then return itemDropIndex[itemId] end
+    local lower = tostring(itemId):lower():gsub("%s+", "")
+    for k, v in pairs(itemDropIndex) do
+        if tostring(k):lower():gsub("%s+", "") == lower or tostring(k):lower():find(lower, 1, true) or lower:find(tostring(k):lower(), 1, true) then
+            return v
+        end
+    end
+    return {}
+end
+
+-- دالة بدء الفارم المتتالي
+local function processFarmingTarget(targetData)
+    local nextMissing = nil
+
+    for _, req in ipairs(targetData.Requirements) do
+        local reqId = req.Id
+        local needed = req.Amount or 1
+        local owned = getOwnedItemCount(reqId)
+        if owned < needed then
+            nextMissing = { Id = reqId, Amount = needed, Name = getItemDisplayName(reqId) }
+            break
+        end
+    end
+
+    if not nextMissing then
+        print("🎉 اكتملت جميع المتطلبات بالكامل!")
+        clearSavedTarget()
+        return false
+    end
+
+    targetData.CurrentItem = nextMissing
+    saveTarget(targetData)
+
+    if not isInLobby then
+        print("ℹ️ تم حفظ الهدف، سيتم نقلك تلقائياً فور إنهاء المرحلة والعودة للوبي.")
+        return true
+    end
+
+    local drops = findDropsForItem(nextMissing.Id)
+    if #drops == 0 then
+        warn("⚠️ لم يتم العثور على مرحلة تسقط: " .. nextMissing.Name)
+        return false
+    end
+
+    local bestStage, bestDiff = drops[1], "Normal"
+    local highestChance = -1
+    for _, drop in ipairs(drops) do
+        for _, diff in ipairs(drop.Difficulties) do
+            local chance = tonumber(drop.Chance) or 0
+            if chance > highestChance then
+                highestChance = chance
+                bestStage = drop
+                bestDiff = diff
+            end
+        end
+    end
+
+    print(string.format("🚀 التوجه لفرم: %s [%s] في %s (نسبة السقوط: %s%%)", nextMissing.Name, bestDiff, bestStage.MapInfo.Name, tostring(highestChance)))
+    task.wait(0.5)
+    teleportToStage(bestStage, bestDiff)
+    return true
+end
+
+-- استئناف الهدف تلقائياً باللوبي
+if isInLobby then
+    local activeTarget = getSavedTarget()
+    if activeTarget then
+        task.spawn(function()
+            task.wait(1.5)
+            processFarmingTarget(activeTarget)
+        end)
+    end
+end
+
+-- 4. نظام المتابعة داخل الستوري
+local currentFarmingItemName = "لا يوجد هدف مسجل"
+local currentFarmingProgress = "0 / 0"
+
+if not isInLobby then
+    local targetData = getSavedTarget()
+    if targetData and targetData.CurrentItem then
+        local targetItemId = targetData.CurrentItem.Id
+        local targetNeeded = targetData.CurrentItem.Amount
+        local targetName = targetData.CurrentItem.Name or targetItemId
+        currentFarmingItemName = targetName
+
+        local initialHave = getOwnedItemCount(targetItemId)
+        currentFarmingProgress = string.format("%d / %d", initialHave, targetNeeded)
+        print(string.format("🎯 الهدف الحالي: %s (مطلوب: %d)", targetName, targetNeeded))
+        print(string.format("📦 [بداية الجولة] القطعة: %s | معك حالياً: %d / %d", targetName, initialHave, targetNeeded))
+
+        task.spawn(function()
+            task.wait(2)
+            local autoPlay = PG:FindFirstChild("Automatic Play", true)
+            if autoPlay and autoPlay:IsA("GuiButton") then
+                firesignal(autoPlay.MouseButton1Click)
+            end
+        end)
+
+        task.spawn(function()
+            local lastLoggedCount = initialHave
+            while task.wait(1.5) do
+                local currentHave = getOwnedItemCount(targetItemId)
+                currentFarmingProgress = string.format("%d / %d", currentHave, targetNeeded)
+
+                if currentHave ~= lastLoggedCount then
+                    print(string.format("📦 [تحديث الفارم] القطعة: %s | وصل العدد: %d / %d (+%d جديدة!)", 
+                        targetName, currentHave, targetNeeded, currentHave - lastLoggedCount))
+                    lastLoggedCount = currentHave
+                end
+
+                local returnBtn = nil
+                for _, btn in ipairs(PG:GetDescendants()) do
+                    if btn:IsA("TextButton") and btn.Text:lower():find("return") and btn.Visible then
+                        returnBtn = btn
+                        break
+                    end
+                end
+
+                if returnBtn then
+                    print(string.format("🏁 نهاية المرحلة! القطعة: %s | الحصيلة: %d / %d", targetName, currentHave, targetNeeded))
+                    if currentHave >= targetNeeded then
+                        print(string.format("🎉 [اكتملت القطعة] %s وصلت للحد المطلوب (%d/%d)! العودة للوبي...", targetName, currentHave, targetNeeded))
+                        firesignal(returnBtn.MouseButton1Click)
+                        task.wait(1)
+                        pcall(function() TeleportService:Teleport(STORY_PLACE_ID, LP) end)
+                        break
+                    else
+                        print(string.format("🔄 لم تكتمل بعد (%d/%d)، إعادة المرحلة...", currentHave, targetNeeded))
+                        local retryRemote = Remotes:FindFirstChild("RetryGame") or Remotes:FindFirstChild("MatchmakingAction")
+                        if retryRemote then
+                            pcall(function() retryRemote:FireServer() end)
+                        else
+                            firesignal(returnBtn.MouseButton1Click)
+                        end
+                        break
+                    end
+                end
+            end
+        end)
+    end
+end
+
+-- ==============================================================================
+--                   5. واجهة المستخدم السريعة (WindUI)
+-- ==============================================================================
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+local Window = WindUI:CreateWindow({
+    Title = "Anime Mysterious Hub",
+    Icon = "sparkles",
+    Author = isInLobby and "Lobby Hub" or "Story Mode Active",
+    Folder = "AnimeMysterious",
+    Size = UDim2.fromOffset(630, 490),
+    Transparent = true,
+    Theme = "Dark",
+    ToggleKey = Enum.KeyCode.RightShift
+})
+
+-- زر شاشة دائري عائم للماوس
+pcall(function()
+    local oldGui = LP.PlayerGui:FindFirstChild("AM_ToggleFloating")
+    if oldGui then oldGui:Destroy() end
+
+    local toggleGui = Instance.new("ScreenGui")
+    toggleGui.Name = "AM_ToggleFloating"
+    toggleGui.ResetOnSpawn = false
+    toggleGui.Parent = LP:WaitForChild("PlayerGui")
+
+    local toggleBtn = Instance.new("ImageButton", toggleGui)
+    toggleBtn.Size = UDim2.new(0, 42, 0, 42)
+    toggleBtn.Position = UDim2.new(0.015, 0, 0.45, 0)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    toggleBtn.Image = "rbxassetid://10734887729"
+    toggleBtn.Active = true
+    toggleBtn.Draggable = true
+
+    local stroke = Instance.new("UIStroke", toggleBtn)
+    stroke.Color = Color3.fromRGB(99, 102, 241)
+    stroke.Thickness = 1.5
+
+    Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(1, 0)
+
+    toggleBtn.MouseButton1Click:Connect(function()
+        Window:Toggle()
+    end)
+end)
+
+if not isInLobby then
+    local LiveTab = Window:Tab({ Title = "مراقبة الستوري", Icon = "swords" })
+    LiveTab:Section({ Title = "حالة الفارم المباشرة" })
+    LiveTab:Paragraph({ Title = "🎯 القطعة المستهدفة:", Desc = currentFarmingItemName })
+    LiveTab:Paragraph({ Title = "📊 الحصيلة الحالية:", Desc = currentFarmingProgress })
+    LiveTab:Button({
+        Title = "🚪 العودة للوبي يدوياً",
+        Desc = "الخروج فوراً إلى اللوبي الرئيسي",
+        Callback = function()
+            pcall(function() TeleportService:Teleport(STORY_PLACE_ID, LP) end)
+        end
+    })
+end
+
+local CraftTab = Window:Tab({ Title = "الكرافتينغ", Icon = "hammer" })
+local EvoTab = Window:Tab({ Title = "تطوير الشخصيات", Icon = "dna" })
+local SettingsTab = Window:Tab({ Title = "الإعدادات", Icon = "settings" })
+
+-- ========================== 1. تبويب الكرافتينغ (مع البحث الفوري) ==========================
+local craftButtonsList = {}
+
+CraftTab:Input({
+    Title = "🔍 بحث سريع في الكرافتينغ",
+    Placeholder = "اكتب اسم السلاح أو القطعة للتصفية...",
+    Callback = function(text)
+        text = (text or ""):lower():gsub("^%s*(.-)%s*$", "%1")
+        for _, entry in ipairs(craftButtonsList) do
+            if entry.Btn and entry.Btn.ElementFrame then
+                if text == "" or entry.Name:lower():find(text, 1, true) then
+                    entry.Btn.ElementFrame.Visible = true
+                else
+                    entry.Btn.ElementFrame.Visible = false
+                end
+            end
+        end
+    end
+})
+
+CraftTab:Section({ Title = "صناعة الأسلحة والعتاد" })
+
+if CraftingConfig and CraftingConfig.Recipes then
+    for _, recipeGroup in pairs(CraftingConfig.Recipes) do
+        for _, recipe in pairs(recipeGroup) do
+            if recipe.Result and recipe.Result.Id then
+                local targetId = recipe.Result.Id
+                local targetName = getItemDisplayName(targetId)
+                local reqItems = recipe.Requirements and recipe.Requirements.Items or {}
+
+                local btn = CraftTab:Button({
+                    Title = "⚡ أوتو فارم: " .. targetName,
+                    Desc = "فرم تسلسلي لجميع القطع الناقصة حتى الاكتمال",
+                    Callback = function()
+                        processFarmingTarget({ Name = targetName, Requirements = reqItems })
+                    end
+                })
+                table.insert(craftButtonsList, { Name = targetName, Btn = btn })
+            end
+        end
+    end
+end
+
+if EvolutionRecipes then
+    CraftTab:Section({ Title = "قطع كرافت الإيفول (Evolution Shards)" })
+    for evoItemKey, evoItemData in pairs(EvolutionRecipes) do
+        local targetName = evoItemData.DisplayName or getItemDisplayName(evoItemKey)
+        local reqItems = evoItemData.ItemRequirement or (evoItemData.Requirements and evoItemData.Requirements.Items) or {}
+
+        local btn = CraftTab:Button({
+            Title = "⚡ كرافت قطعة: " .. targetName,
+            Desc = "صناعة أدوات التطوير بالتسلسل",
+            Callback = function()
+                processFarmingTarget({ Name = targetName, Requirements = reqItems })
+            end
+        })
+        table.insert(craftButtonsList, { Name = targetName, Btn = btn })
+    end
+end
+
+-- ========================== 2. تبويب تطوير الشخصيات (مع الشنطة والبحث) ==========================
+local evoButtonsList = {}
+
+EvoTab:Input({
+    Title = "🔍 بحث سريع عن شخصية",
+    Placeholder = "اكتب اسم الشخصية للتصفية...",
+    Callback = function(text)
+        text = (text or ""):lower():gsub("^%s*(.-)%s*$", "%1")
+        for _, entry in ipairs(evoButtonsList) do
+            if entry.Btn and entry.Btn.ElementFrame then
+                if text == "" or entry.Name:lower():find(text, 1, true) then
+                    entry.Btn.ElementFrame.Visible = true
+                else
+                    entry.Btn.ElementFrame.Visible = false
+                end
+            end
+        end
+    end
+})
+
+EvoTab:Section({ Title = "🟢 شخصيات في شنطتك ولها تطوير" })
+
+local bagUnits = getBagUnits()
+local matchedOwnedCount = 0
+
+local function checkMatch(bagName, recipe)
+    local b = bagName:lower()
+    local rBase = recipe.BaseUnit:lower()
+    local rDisp = recipe.DisplayName:lower()
+    local rKey = recipe.Key:lower()
+    return b:find(rBase, 1, true) or rBase:find(b, 1, true) 
+        or b:find(rDisp, 1, true) or rDisp:find(b, 1, true)
+        or b:find(rKey, 1, true) or rKey:find(b, 1, true)
+        or (b:find("saber") and rBase:find("gojo"))
+        or (b:find("gojo") and rBase:find("saber"))
+end
+
+for _, u in ipairs(bagUnits) do
+    local matchedRecipe = nil
+    for _, rData in pairs(unitEvolutionRecipes) do
+        if checkMatch(u.Name, rData) then
+            matchedRecipe = rData
+            break
+        end
+    end
+
+    if matchedRecipe then
+        matchedOwnedCount = matchedOwnedCount + 1
+        local btnTitle = string.format("🟢 %s (لفل %d) ➔ %s", matchedRecipe.DisplayName, u.Level, matchedRecipe.Key)
+        local btnDesc = string.format("السلوت: %s | تكلفة: %s ين | فرم متطلبات التطوير", tostring(u.Slot), tostring(matchedRecipe.Cost))
+
+        local btn = EvoTab:Button({
+            Title = btnTitle,
+            Desc = btnDesc,
+            Callback = function()
+                processFarmingTarget({ Name = matchedRecipe.DisplayName, Requirements = matchedRecipe.Requirements })
+            end
+        })
+        table.insert(evoButtonsList, { Name = matchedRecipe.DisplayName .. " " .. matchedRecipe.Key, Btn = btn })
+    end
+end
+
+if matchedOwnedCount == 0 then
+    EvoTab:Paragraph({
+        Title = "ℹ️ تنبيه الشنطة",
+        Desc = "الشخصيات المحددة غير مطابقة حالياً، يمكنك اختيار أي شخصية من القائمة العامة بالأسفل."
+    })
+end
+
+EvoTab:Section({ Title = "📋 جميع وصفات تطوير اللعبة" })
+
+local sortedRecipes = {}
+for _, evoData in pairs(unitEvolutionRecipes) do
+    local isOwned = false
+    for _, u in ipairs(bagUnits) do
+        if checkMatch(u.Name, evoData) then
+            isOwned = true
+            break
+        end
+    end
+    table.insert(sortedRecipes, { Data = evoData, Owned = isOwned })
+end
+
+table.sort(sortedRecipes, function(a, b)
+    if a.Owned and not b.Owned then return true end
+    if not a.Owned and b.Owned then return false end
+    return a.Data.DisplayName < b.Data.DisplayName
+end)
+
+for _, entry in ipairs(sortedRecipes) do
+    local evoData = entry.Data
+    local status = entry.Owned and "🟢 [مملوكة] " or "⚪ [غير مملوكة] "
+    local titleText = status .. string.format("%s ➔ %s", evoData.DisplayName, evoData.Key)
+    local descText = string.format("تكلفة: %s ين | قطع مطلوبة: %d | فرم تسلسلي", tostring(evoData.Cost), #evoData.Requirements)
+
+    local btn = EvoTab:Button({
+        Title = titleText,
+        Desc = descText,
+        Callback = function()
+            processFarmingTarget({ Name = evoData.DisplayName, Requirements = evoData.Requirements })
+        end
+    })
+    table.insert(evoButtonsList, { Name = evoData.DisplayName .. " " .. evoData.Key, Btn = btn })
+end
+
+-- ========================== 3. تبويب الإعدادات ==========================
+SettingsTab:Section({ Title = "التحكم والإيقاف" })
+SettingsTab:Button({
+    Title = "🛑 إيقاف الأوتو فارم ومسح الهدف",
+    Desc = "مسح المهمة الحالية وإيقاف التنقل التلقائي",
+    Callback = function()
+        clearSavedTarget()
+        WindUI:Notify({ Title = "تم الإيقاف", Content = "تم مسح هدف التجميع المحفوظ بنجاح.", Duration = 3 })
+    end
+})
