@@ -433,6 +433,111 @@ local function stopAllFarming()
     isSwitchingMode = false
 end
 
+-- ==================== إخفاء واجهات القتال ====================
+local HideKeywords = {"cutscene"} -- BattleUI ما نطفيه، نسكّره بضغط toggleBattleUI
+local HideExclude = {"pass", "rayfield", "leaderboard"}
+local hiddenGuis = {}
+
+local function shouldHideGui(gui)
+    if not gui:IsA("ScreenGui") then return false end
+    local n = gui.Name:lower()
+    for _, ex in ipairs(HideExclude) do
+        if n:find(ex, 1, true) then return false end
+    end
+    for _, kw in ipairs(HideKeywords) do
+        if n:find(kw, 1, true) then return true end
+    end
+    return false
+end
+
+-- ضغط الزر المحلي (ما يمر عبر ريموت)
+local function pressButton(btn)
+    if not btn then return false end
+    if getconnections then
+        for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+            local ok, conns = pcall(getconnections, sig)
+            if ok and conns and #conns > 0 then
+                for _, c in ipairs(conns) do
+                    pcall(function() c:Fire() end)
+                end
+                return true
+            end
+        end
+    end
+    if firesignal then
+        pcall(function() firesignal(btn.MouseButton1Click) end)
+        return true
+    end
+    return false
+end
+
+local function getBattleParts()
+    local pgui = player:FindFirstChild("PlayerGui")
+    local ui = pgui and pgui:FindFirstChild("BattleUI")
+    local container = ui and ui:FindFirstChild("battleContainer")
+    local toggle = ui and ui:FindFirstChild("toggleBattleUI")
+    return ui, container, toggle
+end
+
+local clickedForStart, clickTries, lastToggleClick = -1, 0, 0
+local function collapseBattleView()
+    local ui, container, toggle = getBattleParts()
+    if not (ui and container and toggle) then return end
+    if BattleStarts ~= clickedForStart then
+        clickedForStart = BattleStarts
+        clickTries = 0
+    end
+    if ui.Enabled and container.Visible and clickTries < 3
+        and os.clock() - lastToggleClick > 0.8 then
+        lastToggleClick = os.clock()
+        clickTries += 1
+        pressButton(toggle)
+    end
+end
+
+local Lighting = game:GetService("Lighting")
+local hiddenEffects = {}
+
+local function hideBlurEffects()
+    for _, parent in ipairs({Lighting, workspace.CurrentCamera}) do
+        if parent then
+            for _, e in ipairs(parent:GetChildren()) do
+                if (e:IsA("BlurEffect") or e:IsA("DepthOfFieldEffect")) and e.Enabled then
+                    e.Enabled = false
+                    hiddenEffects[e] = true
+                end
+            end
+        end
+    end
+end
+
+local function restoreBlurEffects()
+    for e in pairs(hiddenEffects) do
+        if e.Parent then pcall(function() e.Enabled = true end) end
+    end
+    hiddenEffects = {}
+end
+
+local function hideBattleGuis()
+    hideBlurEffects()
+    local pgui = player:FindFirstChild("PlayerGui")
+    if not pgui then return end
+    for _, gui in ipairs(pgui:GetChildren()) do
+        if shouldHideGui(gui) and gui.Enabled then
+            gui.Enabled = false
+            hiddenGuis[gui] = true
+        end
+    end
+end
+
+local function restoreBattleGuis()
+    for gui in pairs(hiddenGuis) do
+        if gui.Parent then pcall(function() gui.Enabled = true end) end
+    end
+    hiddenGuis = {}
+    restoreBlurEffects()
+end
+
 -- ==================== واجهة الفارم (Auto Farm) ====================
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
@@ -444,22 +549,75 @@ FarmTab:CreateToggle({
       DisableBattleAnimation = Value
       fastBattleToken += 1
       local myToken = fastBattleToken
-      local playerGui = player:WaitForChild("PlayerGui")
-
       if Value then
           task.spawn(function()
+              local lastSkip = 0
               while DisableBattleAnimation and fastBattleToken == myToken do
-                  local battleUI = playerGui:FindFirstChild("BattleUI")
-                  if battleUI and battleUI:IsA("ScreenGui") then battleUI.Enabled = false end
-                  local cutsceneUI = playerGui:FindFirstChild("PullCutsceneUI")
-                  if cutsceneUI and cutsceneUI:IsA("ScreenGui") then cutsceneUI.Enabled = false end
-                  if battleEvent then pcall(function() battleEvent:FireServer("Skip") end) end
-                  humanDelay(0.4, 0.7)
+                  hideBattleGuis()
+                  collapseBattleView()
+                  if os.clock() - lastSkip > 0.5 then
+                      lastSkip = os.clock()
+                      if battleEvent then pcall(function() battleEvent:FireServer("Skip") end) end
+                  end
+                  task.wait(0.1)
               end
-              local battleUI = playerGui:FindFirstChild("BattleUI")
-              if battleUI and battleUI:IsA("ScreenGui") then battleUI.Enabled = true end
+              restoreBattleGuis()
           end)
+      else
+          restoreBattleGuis()
       end
+   end,
+})
+
+FarmTab:CreateButton({
+   Name = "Test: اضغط toggleBattleUI الآن",
+   Callback = function()
+      local ui, container, toggle = getBattleParts()
+      print("[Test] BattleUI:", ui, "container.Visible:", container and container.Visible, "toggle:", toggle)
+      local ok = pressButton(toggle)
+      Rayfield:Notify({ Title = "Test", Content = ok and "تم الضغط" or "ما لقيت الزر أو ما فيه getconnections/firesignal", Duration = 3 })
+   end,
+})
+
+local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+
+FarmTab:CreateButton({
+   Name = "Debug: افحص الزر تحت الماوس (بعد 4 ثواني)",
+   Callback = function()
+      Rayfield:Notify({ Title = "Inspector", Content = "حط الماوس فوق الزر (X أو ✔) وانتظر 4 ثواني", Duration = 4 })
+      task.delay(4, function()
+          local pgui = player:FindFirstChild("PlayerGui")
+          if not pgui then return end
+          local pos = UIS:GetMouseLocation()
+          local inset = GuiService:GetGuiInset()
+          local objs = pgui:GetGuiObjectsAtPosition(pos.X, pos.Y - inset.Y)
+          print("===== GUI under mouse =====")
+          for i, o in ipairs(objs) do
+              local line = i .. " | " .. o:GetFullName() .. " | " .. o.ClassName
+              if o:IsA("GuiButton") and getconnections then
+                  local ok1, c1 = pcall(function() return #getconnections(o.MouseButton1Click) end)
+                  local ok2, c2 = pcall(function() return #getconnections(o.Activated) end)
+                  line = line .. " | Click=" .. tostring(ok1 and c1 or "?") .. " Activated=" .. tostring(ok2 and c2 or "?")
+              end
+              print(line)
+          end
+          Rayfield:Notify({ Title = "Inspector", Content = "تمت الطباعة في Console (F9): " .. #objs .. " عنصر", Duration = 4 })
+      end)
+   end,
+})
+
+FarmTab:CreateButton({
+   Name = "Debug: اطبع أسماء الواجهات (F9)",
+   Callback = function()
+      local pgui = player:FindFirstChild("PlayerGui")
+      if not pgui then return end
+      for _, gui in ipairs(pgui:GetChildren()) do
+          if gui:IsA("ScreenGui") then
+              print("[GUI]", gui.Name, "Enabled=", gui.Enabled)
+          end
+      end
+      Rayfield:Notify({ Title = "Debug", Content = "تمت الطباعة في Console (F9)", Duration = 3 })
    end,
 })
 
