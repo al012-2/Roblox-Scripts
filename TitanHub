@@ -778,7 +778,9 @@ local function runCustomBossFarm()
     end)
 end
 
-FarmTab:CreateDropdown({
+local BossTab = Window:CreateTab("Custom Boss", 4483362458)
+
+BossTab:CreateDropdown({
    Name = "Pick Bosses (اختيار البوسات)",
    Options = AllBossList,
    CurrentOption = {"cart_titan"},
@@ -796,7 +798,7 @@ FarmTab:CreateDropdown({
    end,
 })
 
-ModeToggles["custom"] = FarmTab:CreateToggle({
+ModeToggles["custom"] = BossTab:CreateToggle({
    Name = "Custom AutoBoss (البوسات المختارة فقط)",
    CurrentValue = false,
    Flag = "CustomAutoBoss",
