@@ -541,6 +541,8 @@ end
 -- ==================== واجهة الفارم (Auto Farm) ====================
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
+FarmTab:CreateSection("Battle Settings")
+
 FarmTab:CreateToggle({
    Name = "Fast Battle / Hide Battle UI",
    CurrentValue = false,
@@ -569,7 +571,12 @@ FarmTab:CreateToggle({
    end,
 })
 
-FarmTab:CreateButton({
+-- أدوات الـ Debug تُبنى في تبويب مستقل (يُستدعى في آخر الملف)
+local function buildDebugTab(DebugTab)
+
+DebugTab:CreateSection("Inspect / Test")
+
+DebugTab:CreateButton({
    Name = "Test: اضغط toggleBattleUI الآن",
    Callback = function()
       local ui, container, toggle = getBattleParts()
@@ -582,7 +589,7 @@ FarmTab:CreateButton({
 local UIS = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 
-FarmTab:CreateButton({
+DebugTab:CreateButton({
    Name = "Debug: افحص الزر تحت الماوس (بعد 4 ثواني)",
    Callback = function()
       Rayfield:Notify({ Title = "Inspector", Content = "حط الماوس فوق الزر (X أو ✔) وانتظر 4 ثواني", Duration = 4 })
@@ -607,7 +614,7 @@ FarmTab:CreateButton({
    end,
 })
 
-FarmTab:CreateButton({
+DebugTab:CreateButton({
    Name = "Debug: اطبع أسماء الواجهات (F9)",
    Callback = function()
       local pgui = player:FindFirstChild("PlayerGui")
@@ -621,12 +628,16 @@ FarmTab:CreateButton({
    end,
 })
 
+end -- buildDebugTab
+
 FarmTab:CreateToggle({
    Name = "Wait for battle end",
    CurrentValue = false,
    Flag = "WaitBattle",
    Callback = function(Value) WaitForBattle = Value end,
 })
+
+FarmTab:CreateSection("Difficulty")
 
 FarmTab:CreateToggle({
    Name = "Ladder: Normal > Hard > Extreme > Nightmare",
@@ -780,23 +791,7 @@ end
 
 local BossTab = Window:CreateTab("Custom Boss", 4483362458)
 
-BossTab:CreateDropdown({
-   Name = "Pick Bosses (اختيار البوسات)",
-   Options = AllBossList,
-   CurrentOption = {"cart_titan"},
-   MultipleOptions = true,
-   Flag = "PickBosses",
-   Callback = function(Options)
-      local list = type(Options) == "table" and Options or {Options}
-      local newSet = {}
-      for _, name in ipairs(list) do
-          if type(name) == "string" and BossWorldOf[name] then
-              newSet[name] = true
-          end
-      end
-      SelectedBosses = newSet
-   end,
-})
+BossTab:CreateSection("تشغيل / إيقاف")
 
 ModeToggles["custom"] = BossTab:CreateToggle({
    Name = "Custom AutoBoss (البوسات المختارة فقط)",
@@ -806,6 +801,41 @@ ModeToggles["custom"] = BossTab:CreateToggle({
       if Value then runCustomBossFarm() else stopMode("custom") end
    end,
 })
+
+BossTab:CreateSection("اختر البوسات حسب العالم")
+
+local WorldSelections = { ["1"] = { cart_titan = true } }
+
+local function rebuildSelectedBosses()
+    local set = {}
+    for _, sel in pairs(WorldSelections) do
+        for name in pairs(sel) do set[name] = true end
+    end
+    SelectedBosses = set
+end
+
+for _, worldKey in ipairs(WorldOrder) do
+    BossTab:CreateDropdown({
+       Name = WorldAreaNames[worldKey] or ("World " .. worldKey),
+       Options = BossHierarchy[worldKey],
+       CurrentOption = (worldKey == "1") and {"cart_titan"} or {},
+       MultipleOptions = true,
+       Flag = "PickBosses" .. worldKey,
+       Callback = function(Options)
+          local list = type(Options) == "table" and Options or {Options}
+          local sel = {}
+          for _, name in ipairs(list) do
+              if type(name) == "string" and BossWorldOf[name] == worldKey then
+                  sel[name] = true
+              end
+          end
+          WorldSelections[worldKey] = sel
+          rebuildSelectedBosses()
+       end,
+    })
+end
+
+FarmTab:CreateSection("Smart Farm (العوالم)")
 
 -- زر التدوير على كل العوالم بالتتابع
 ModeToggles["all"] = FarmTab:CreateToggle({
@@ -917,6 +947,9 @@ QuestTab:CreateToggle({
         end)
     end,
 })
+
+-- تبويب الـ Debug في الآخر
+buildDebugTab(Window:CreateTab("Debug", 4483362458))
 
 Rayfield:LoadConfiguration()
 
