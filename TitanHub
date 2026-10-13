@@ -6,8 +6,8 @@ end
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V30 (Auto Boss Replicator)",
-   LoadingTitle = "جاري تحميل محاكي الجيم باس ونظام الفارم...",
+   Name = "Titan RNG - Hub V32 (World Farm + Custom Boss)",
+   LoadingTitle = "جاري تحميل نظام فارم العوالم والرايد...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
 
@@ -15,15 +15,15 @@ local Players = game:GetService("Players")
 local Rep = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 
--- ==================== الحالة العامة ====================
+-- ==================== الحالة ====================
 local activeConnections = {}
 local ActiveMode = nil
 local ActiveWorldKey = nil
 local FarmToken = 0
-local customBossToken = 0
 local fastBattleToken = 0
 local autoQuestToken = 0
 local autoClaimToken = 0
+local autoTowerToken = 0
 local DisableBattleAnimation = false
 local WaitForBattle = false
 local LadderMode = true
@@ -33,16 +33,16 @@ local DiffList = {"Normal", "Hard", "Extreme", "Nightmare"}
 local ModeToggles = {}
 local isSwitchingMode = false
 local WorldOrder = {"1", "2", "3", "4", "5", "raid"}
-local SelectedCustomBosses = {}
+local SelectedBosses = { ["cart_titan"] = true } -- set: [bossName] = true (نفس الخيار الافتراضي في القائمة)
 
 getgenv().TitanLoaded = function()
     ActiveMode = nil
     ActiveWorldKey = nil
     FarmToken += 1
-    customBossToken += 1
     fastBattleToken += 1
     autoQuestToken += 1
     autoClaimToken += 1
+    autoTowerToken += 1
     DisableBattleAnimation = false
     for _, conn in ipairs(activeConnections) do
         pcall(function() conn:Disconnect() end)
@@ -51,11 +51,11 @@ getgenv().TitanLoaded = function()
     getgenv().TitanLoaded = nil
 end
 
--- ==================== فحص وجلب الريموتات ====================
+-- ==================== الريموتات ====================
 local function safeWaitForChild(parent, name, timeout)
     local obj = parent:FindFirstChild(name) or parent:WaitForChild(name, timeout or 5)
     if not obj then
-        warn("[Titan Hub] تعذر العثور على الريموت: " .. tostring(name))
+        warn("[Titan Hub] missing remote: " .. tostring(name))
     end
     return obj
 end
@@ -72,7 +72,7 @@ local claimQuestRemote = safeWaitForChild(Rep, "claimQuest", 5)
 local runInfTowerRemote = safeWaitForChild(Rep, "runInfTower", 5)
 local sendUIRemote = safeWaitForChild(Rep, "sendUI", 5)
 
--- ==================== بيانات البوسات والعوالم ====================
+-- ==================== البيانات ====================
 local BossHierarchy = {
    ["1"] = {"cart_titan", "armored_titan", "beast_titan", "warhammer_titan", "colossal_titan"},
    ["2"] = {"mist_executioner", "sand_warden", "surgeon", "serpent_sage", "crimson_crow"},
@@ -80,15 +80,6 @@ local BossHierarchy = {
    ["4"] = {"leopard_assassin", "mochi_man", "sand_warlord", "string_emperor", "red_dog", "dragon_emperor"},
    ["5"] = {"blood_brother", "blooming_wrath", "volcano_head", "deadbeat_dad", "kindness_spreader", "curse_tyrant"},
    ["raid"] = {"cleanup_kaiju", "kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"}
-}
-
-local AllAvailableBosses = {
-    "cart_titan", "armored_titan", "beast_titan", "warhammer_titan", "colossal_titan",
-    "mist_executioner", "sand_warden", "surgeon", "serpent_sage", "crimson_crow",
-    "dreamer", "insect_eater", "thread_demon", "moon_reaper", "worthy_fighter", "thriller_king",
-    "leopard_assassin", "mochi_man", "sand_warlord", "string_emperor", "red_dog", "dragon_emperor",
-    "blood_brother", "blooming_wrath", "volcano_head", "deadbeat_dad", "kindness_spreader", "curse_tyrant",
-    "cleanup_kaiju", "kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"
 }
 
 local WorldAreaNames = {
@@ -109,11 +100,15 @@ local NpcButtons = {
 
 local UnnamedFallback = { cart_titan = true }
 local BossWorldOf = {}
-for world, list in pairs(BossHierarchy) do
-    for _, b in ipairs(list) do BossWorldOf[b] = world end
+local AllBossList = {}
+for _, world in ipairs(WorldOrder) do
+    for _, b in ipairs(BossHierarchy[world]) do
+        BossWorldOf[b] = world
+        table.insert(AllBossList, b)
+    end
 end
 
--- ==================== دوال المساعدة ====================
+-- ==================== أدوات عامة ====================
 local function humanDelay(minSec, maxSec)
     task.wait(minSec + math.random() * (maxSec - minSec))
 end
@@ -140,27 +135,44 @@ local function norm(s)
     return (s:lower():gsub("[%s_%-]", ""))
 end
 
-local function isAlreadyInBattle()
-    local pgui = player:FindFirstChild("PlayerGui")
-    if not pgui then return false end
-    local battleUI = pgui:FindFirstChild("BattleUI")
-    if battleUI then
-        local label = battleUI:FindFirstChild("battleNotifierLabel", true)
-        if label and label.Visible then
-            return true
+-- ==================== التنقل الآمن بين العوالم عبر اللوبي ====================
+local function returnToLobby()
+    local char = getCharWithTimeout(5)
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    if teleportAreaRemote then
+        pcall(function() teleportAreaRemote:FireServer("Lobby") end)
+    end
+
+    local lobby = workspace:FindFirstChild("Lobby")
+    if lobby then
+        local lobbySpawn = lobby:FindFirstChildWhichIsA("SpawnLocation", true) or lobby:FindFirstChild("portals")
+        if lobbySpawn then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.CFrame = lobbySpawn.CFrame + Vector3.new(0, 4, 0)
+            task.wait(0.5)
         end
     end
-    return false
 end
 
--- ==================== النقل بين العوالم ====================
 local function forceTeleportToWorld(worldKey)
-    if worldKey == "raid" then return end
-
     local char = getCharWithTimeout(10)
     if not char then return end
     local root = char:WaitForChild("HumanoidRootPart", 5)
     if not root then return end
+
+    if worldKey == "raid" then
+        local raidFolder = workspace:FindFirstChild("KaijuRaid")
+        if raidFolder then
+            local raidPart = raidFolder:FindFirstChildWhichIsA("BasePart", true)
+            if raidPart then
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.CFrame = raidPart.CFrame + Vector3.new(0, 3, 0)
+            end
+        end
+        return
+    end
 
     local areaName = WorldAreaNames[tostring(worldKey)]
     if teleportAreaRemote then
@@ -171,6 +183,14 @@ local function forceTeleportToWorld(worldKey)
     local lobby = workspace:FindFirstChild("Lobby")
     local portals = lobby and lobby:FindFirstChild("portals")
     local portalFolder = portals and portals:FindFirstChild(tostring(worldKey))
+
+    if not portalFolder then
+        returnToLobby()
+        task.wait(0.5)
+        lobby = workspace:FindFirstChild("Lobby")
+        portals = lobby and lobby:FindFirstChild("portals")
+        portalFolder = portals and portals:FindFirstChild(tostring(worldKey))
+    end
 
     if portalFolder then
         local pModel = portalFolder:FindFirstChild("portalModel")
@@ -189,7 +209,7 @@ local function forceTeleportToWorld(worldKey)
                 task.wait(0.1)
                 firetouchinterest(root, triggerPart, 1)
             end
-            humanDelay(1.0, 1.5)
+            humanDelay(1.2, 1.6)
         end
     end
 end
@@ -235,7 +255,7 @@ local function findBossModel(bossName)
                             or (n ~= "" and want ~= "" and n:find(want, 1, true)) then
                             found = m
                             break
-                        elseif n == "" and UnnamedFallback[bossName] then
+                        elseif n == "" and UnnamedFallback[bossName] and BossWorldOf[bossName] == folder.Name then
                             unnamed = unnamed or m
                         end
                     end
@@ -284,7 +304,7 @@ local function isBossOnCooldown(bossName, difficulty)
     return false
 end
 
--- ==================== نظام القتال والانتقال ====================
+-- ==================== الحركة والقتال ====================
 local function teleportNear(targetPosition, attempt)
     local AttemptDistances = { {3, 4}, {2, 3}, {1, 2} }
     local range = AttemptDistances[attempt or 1] or AttemptDistances[1]
@@ -320,7 +340,6 @@ end
 
 local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait)
     shouldContinue = shouldContinue or function() return true end
-    if isAlreadyInBattle() then return false end
     if isBossOnCooldown(bossName, difficulty) then return false end
 
     local targetModel = findBossModel(bossName)
@@ -335,7 +354,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait)
     local startsBefore, endsBefore, resultsBefore = BattleStarts, BattleEnds, ResultCounter
 
     for attempt = 1, 3 do
-        if not shouldContinue() or isAlreadyInBattle() then return false end
+        if not shouldContinue() then return false end
 
         local pos = targetPart.Parent and targetPart.Position or targetModel:GetPivot().Position
         if not teleportNear(pos, attempt) then return false end
@@ -364,9 +383,9 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait)
 
     if WaitForBattle or forceWait then
         local t = os.clock()
-        while isAlreadyInBattle() and os.clock() - t < 180 do
+        while BattleEnds == endsBefore and os.clock() - t < 180 do
             if not shouldContinue() then break end
-            task.wait(0.5)
+            task.wait(0.2)
         end
     else
         humanDelay(0.3, 0.5)
@@ -374,107 +393,48 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait)
     return true
 end
 
-local SkipUntil = {}
+-- ==================== إدارة الأنماط ====================
+local function startMode(mode, loopFn)
+    ActiveMode = mode
+    ActiveWorldKey = mode
+    FarmToken += 1
+    local myToken = FarmToken
 
-local function attemptBoss(boss, diff, alive, worldKey)
-    local k = boss .. "|" .. diff
-    if SkipUntil[k] and os.clock() < SkipUntil[k] then return false end
-    if not recoverIfDead(worldKey, alive) then return false end
-    if isBossOnCooldown(boss, diff) then return false end
-
-    local function stillGoing() return alive() and isCharAlive() end
-
-    local fired = hitAndRunBoss(boss, diff, stillGoing, true)
-    if not alive() then return false end
-
-    if not fired then
-        if not isCharAlive() then return false end
-        SkipUntil[k] = os.clock() + 15
-        return false
+    isSwitchingMode = true
+    for m, tog in pairs(ModeToggles) do
+        if m ~= mode and tog then pcall(function() tog:Set(false) end) end
     end
-    if not isCharAlive() then return false end
+    isSwitchingMode = false
 
-    task.wait(0.8)
-    if isBossOnCooldown(boss, diff) then
-        SkipUntil[k] = os.clock() + math.max(LastBossCooldown - 5, 20)
-        return true
+    local function alive() return FarmToken == myToken and ActiveMode == mode end
+    task.spawn(function()
+        local ok, err = pcall(loopFn, alive)
+        if not ok then warn("farm loop error:", err) end
+    end)
+end
+
+local function stopMode(mode)
+    if isSwitchingMode then return end
+    if ActiveMode == mode then
+        ActiveMode = nil
+        ActiveWorldKey = nil
+        FarmToken += 1
     end
-
-    SkipUntil[k] = os.clock() + 45
-    return false
 end
 
 local function stopAllFarming()
     ActiveMode = nil
     ActiveWorldKey = nil
     FarmToken += 1
-    customBossToken += 1
+    isSwitchingMode = true
     for _, tog in pairs(ModeToggles) do
         if tog then pcall(function() tog:Set(false) end) end
     end
+    isSwitchingMode = false
 end
 
--- ==================== تبويب Auto Boss ومحاكاة الجيم باس ====================
-local FarmTab = Window:CreateTab("Auto Boss (Replicator)", 4483362458)
-
--- 1. اختيار البوسات يدوياً (Pick Bosses مثل الإعدادات الأصلية)
-FarmTab:CreateDropdown({
-   Name = "Pick Bosses (اختر البوسات المطلوبة)",
-   Options = AllAvailableBosses,
-   CurrentOption = {},
-   MultipleOptions = true,
-   Flag = "CustomPickedBosses",
-   Callback = function(Options)
-      SelectedCustomBosses = Options
-   end,
-})
-
--- 2. تشغيل الـ Auto Boss على البوسات المحددة (يحاكي الجيم باس تماماً ومجاناً)
-FarmTab:CreateToggle({
-   Name = "Custom Auto Boss (محاكي الجيم باس)",
-   CurrentValue = false,
-   Flag = "CustomAutoBossToggle",
-   Callback = function(Value)
-      customBossToken += 1
-      local myToken = customBossToken
-
-      if Value then
-          task.spawn(function()
-              while customBossToken == myToken do
-                  if #SelectedCustomBosses == 0 then
-                      task.wait(2)
-                  else
-                      for _, boss in ipairs(SelectedCustomBosses) do
-                          if customBossToken ~= myToken then break end
-
-                          local world = BossWorldOf[boss] or "1"
-                          if world ~= "raid" and ActiveWorldKey ~= world then
-                              forceTeleportToWorld(world)
-                              ActiveWorldKey = world
-                          end
-
-                          if not isAlreadyInBattle() and not isBossOnCooldown(boss, SelectedDifficulty) then
-                              attemptBoss(boss, SelectedDifficulty, function() return customBossToken == myToken end, world)
-                          end
-                          task.wait(0.6)
-                      end
-                  end
-                  task.wait(1.5)
-              end
-          end)
-      end
-   end,
-})
-
-FarmTab:CreateDropdown({
-   Name = "Default Difficulty",
-   Options = DiffList,
-   CurrentOption = {"Normal"},
-   Flag = "Difficulty",
-   Callback = function(Option)
-      SelectedDifficulty = type(Option) == "table" and Option[1] or Option
-   end,
-})
+-- ==================== واجهة الفارم (Auto Farm) ====================
+local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
 FarmTab:CreateToggle({
    Name = "Fast Battle / Hide Battle UI",
@@ -510,7 +470,207 @@ FarmTab:CreateToggle({
    Callback = function(Value) WaitForBattle = Value end,
 })
 
--- ==================== تبويب الرول والتاور (Multi-Battle) ====================
+FarmTab:CreateToggle({
+   Name = "Ladder: Normal > Hard > Extreme > Nightmare",
+   CurrentValue = true,
+   Flag = "Ladder",
+   Callback = function(Value) LadderMode = Value end,
+})
+
+FarmTab:CreateDropdown({
+   Name = "Max difficulty (Ladder)",
+   Options = DiffList,
+   CurrentOption = {"Nightmare"},
+   Flag = "MaxDiff",
+   Callback = function(Option)
+      MaxDifficulty = type(Option) == "table" and Option[1] or Option
+   end,
+})
+
+FarmTab:CreateDropdown({
+   Name = "Default Difficulty (No-Ladder)",
+   Options = DiffList,
+   CurrentOption = {"Normal"},
+   Flag = "Difficulty",
+   Callback = function(Option)
+      SelectedDifficulty = type(Option) == "table" and Option[1] or Option
+   end,
+})
+
+-- ==================== منطق الفارم والعوالم ====================
+local SkipUntil = {}
+
+local function attemptBoss(boss, diff, alive, worldKey)
+    local k = boss .. "|" .. diff
+    if SkipUntil[k] and os.clock() < SkipUntil[k] then return false end
+    if not recoverIfDead(worldKey, alive) then return false end
+    if isBossOnCooldown(boss, diff) then return false end
+
+    local function stillGoing() return alive() and isCharAlive() end
+
+    local fired = hitAndRunBoss(boss, diff, stillGoing, true)
+    if not alive() then return false end
+
+    if not fired then
+        if not isCharAlive() then return false end
+        SkipUntil[k] = os.clock() + 15
+        return false
+    end
+    if not isCharAlive() then return false end
+
+    task.wait(0.8)
+    if isBossOnCooldown(boss, diff) then
+        SkipUntil[k] = os.clock() + math.max(LastBossCooldown - 5, 20)
+        return true
+    end
+
+    SkipUntil[k] = os.clock() + 45
+    return false
+end
+
+local function diffsToRun()
+    if not LadderMode then return {SelectedDifficulty} end
+    local list = {}
+    for _, d in ipairs(DiffList) do
+        table.insert(list, d)
+        if d == MaxDifficulty then break end
+    end
+    return list
+end
+
+-- bossFilter (اختياري): جدول set لتحديد بوسات معينة فقط
+local function worldHasWork(worldKey, bossFilter)
+    for _, diff in ipairs(diffsToRun()) do
+        for _, boss in ipairs(BossHierarchy[worldKey]) do
+            if not bossFilter or bossFilter[boss] then
+                local s = SkipUntil[boss .. "|" .. diff]
+                if not s or os.clock() >= s then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function farmWorldOnce(worldKey, alive, bossFilter)
+    local didAny = false
+    for _, diff in ipairs(diffsToRun()) do
+        for _, boss in ipairs(BossHierarchy[worldKey]) do
+            if not alive() then return didAny end
+            if not bossFilter or bossFilter[boss] then
+                if attemptBoss(boss, diff, alive, worldKey) then didAny = true end
+            end
+        end
+    end
+    return didAny
+end
+
+local function runSmartWorldFarm(worldKey)
+    startMode(worldKey, function(alive)
+        forceTeleportToWorld(worldKey)
+        while alive() do
+            local didAny = farmWorldOnce(worldKey, alive)
+            task.wait(didAny and 0.5 or 3)
+        end
+    end)
+end
+
+local function runAllWorldsFarm()
+    startMode("all", function(alive)
+        while alive() do
+            local didAny = false
+            for _, worldKey in ipairs(WorldOrder) do
+                if not alive() then break end
+                if worldHasWork(worldKey) then
+                    forceTeleportToWorld(worldKey)
+                    if farmWorldOnce(worldKey, alive) then didAny = true end
+                end
+            end
+            task.wait(didAny and 0.5 or 3)
+        end
+    end)
+end
+
+-- ==================== الجديد: Custom AutoBoss (اختيار بوسات محددة) ====================
+local function hasSelectedBosses()
+    return next(SelectedBosses) ~= nil
+end
+
+local function runCustomBossFarm()
+    if not hasSelectedBosses() then
+        Rayfield:Notify({ Title = "Custom AutoBoss", Content = "اختر بوس واحد على الأقل من القائمة أولاً", Duration = 4 })
+        if ModeToggles["custom"] then
+            pcall(function() ModeToggles["custom"]:Set(false) end)
+        end
+        return
+    end
+
+    startMode("custom", function(alive)
+        while alive() do
+            local didAny = false
+            for _, worldKey in ipairs(WorldOrder) do
+                if not alive() then break end
+                -- القائمة تُقرأ في كل دورة، فتغيير الاختيار يسري مباشرة
+                if worldHasWork(worldKey, SelectedBosses) then
+                    forceTeleportToWorld(worldKey)
+                    if farmWorldOnce(worldKey, alive, SelectedBosses) then didAny = true end
+                end
+            end
+            task.wait(didAny and 0.5 or 3)
+        end
+    end)
+end
+
+FarmTab:CreateDropdown({
+   Name = "Pick Bosses (اختيار البوسات)",
+   Options = AllBossList,
+   CurrentOption = {"cart_titan"},
+   MultipleOptions = true,
+   Flag = "PickBosses",
+   Callback = function(Options)
+      local list = type(Options) == "table" and Options or {Options}
+      local newSet = {}
+      for _, name in ipairs(list) do
+          if type(name) == "string" and BossWorldOf[name] then
+              newSet[name] = true
+          end
+      end
+      SelectedBosses = newSet
+   end,
+})
+
+ModeToggles["custom"] = FarmTab:CreateToggle({
+   Name = "Custom AutoBoss (البوسات المختارة فقط)",
+   CurrentValue = false,
+   Flag = "CustomAutoBoss",
+   Callback = function(Value)
+      if Value then runCustomBossFarm() else stopMode("custom") end
+   end,
+})
+
+-- زر التدوير على كل العوالم بالتتابع
+ModeToggles["all"] = FarmTab:CreateToggle({
+   Name = "Smart Farm: ALL Worlds (rotate)",
+   CurrentValue = false,
+   Flag = "SmartFarmAll",
+   Callback = function(Value)
+      if Value then runAllWorldsFarm() else stopMode("all") end
+   end,
+})
+
+-- أزرار العوالم الفردية + الرايد
+for _, worldKey in ipairs(WorldOrder) do
+    local displayName = WorldAreaNames[worldKey] or ("World " .. worldKey)
+    ModeToggles[worldKey] = FarmTab:CreateToggle({
+       Name = "Smart Farm: " .. displayName,
+       CurrentValue = false,
+       Flag = "SmartFarm" .. worldKey,
+       Callback = function(Value)
+          if Value then runSmartWorldFarm(worldKey) else stopMode(worldKey) end
+       end,
+    })
+end
+
+-- ==================== تبويب الرول والتاور ====================
 local RollTab = Window:CreateTab("Roll & Tower", 4483362458)
 RollTab:CreateButton({ Name = "Toggle Auto Roll", Callback = function() if autoRollRemote then autoRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Toggle Quick Roll", Callback = function() if quickRollRemote then quickRollRemote:FireServer() end end })
@@ -518,15 +678,16 @@ RollTab:CreateButton({ Name = "Equip Best Cards", Callback = function() if equip
 RollTab:CreateButton({ Name = "Claim Daily Reward", Callback = function() if claimDailyRemote then claimDailyRemote:FireServer() end end })
 
 RollTab:CreateToggle({
-   Name = "Auto Run Infinite Tower (Multi-Battle)",
+   Name = "Auto Run Infinite Tower (Multi-Task)",
    CurrentValue = false,
    Flag = "AutoInfTowerMulti",
    Callback = function(Value)
-      local towerToken = FarmToken
+      autoTowerToken += 1
+      local towerToken = autoTowerToken
       if not Value then return end
       task.spawn(function()
-          while FarmToken == towerToken do
-              if runInfTowerRemote and not isAlreadyInBattle() then
+          while autoTowerToken == towerToken do
+              if runInfTowerRemote then
                   pcall(function() runInfTowerRemote:FireServer() end)
               end
               task.wait(15)
@@ -535,7 +696,7 @@ RollTab:CreateToggle({
    end,
 })
 
--- ==================== تبويب الـ NPCs ====================
+-- ==================== تبويب NPCs ====================
 local NpcTab = Window:CreateTab("NPCs", 4483362458)
 
 local function findNpc(npcName)
@@ -555,6 +716,7 @@ local function teleportToNpc(npcName)
         return
     end
     if not isCharAlive() then return end
+    stopAllFarming()
     local part = npc:FindFirstChild("HumanoidRootPart") or npc:FindFirstChildWhichIsA("BasePart", true)
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     if part and root then
@@ -570,7 +732,7 @@ for _, info in ipairs(NpcButtons) do
     })
 end
 
--- ==================== تبويب الكوستات الذكي ====================
+-- ==================== تبويب الكوستات ====================
 local QuestTab = Window:CreateTab("Quests", 4483362458)
 
 local function claimAll()
@@ -598,4 +760,4 @@ QuestTab:CreateToggle({
 
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V30", Content = "تم دمج محاكي Auto Boss وقائمة Pick Bosses بنجاح!", Duration = 5 })
+Rayfield:Notify({ Title = "Titan Hub V32", Content = "تمت إضافة Pick Bosses + Custom AutoBoss", Duration = 5 })
