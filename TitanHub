@@ -3,10 +3,171 @@ if getgenv().TitanLoaded then
     pcall(getgenv().TitanLoaded)
 end
 
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+-- ==================== واجهة Linoria (طبقة تحويل من أوامر Rayfield) ====================
+local repo = "https://raw.githubusercontent.com/mstudio45/LinoriaLib/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+local LOptions, LToggles = Library.Options, Library.Toggles
+
+local Rayfield = {}
+local LWindow
+local uiCounter = 0
+-- هذي ما تنحفظ ولا تتحمّل تلقائياً (عشان الفارم ما يشتغل لحاله عند الدخول)
+local ignoreIdx = {
+    "MenuKeybind", "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3",
+    "SmartFarm4", "SmartFarm5", "SmartFarmraid", "AutoInfTowerMulti", "AutoClaimQuests",
+    "FastBattle", "SpySettingChange",
+}
+
+local function nextIdx(flag)
+    if flag then return flag end
+    uiCounter += 1
+    local id = "_ui" .. uiCounter
+    table.insert(ignoreIdx, id)
+    return id
+end
+
+local TabClass = {}
+TabClass.__index = TabClass
+
+function TabClass:_newBox(title)
+    self._n += 1
+    local box
+    if self._n % 2 == 1 then
+        box = self._tab:AddLeftGroupbox(title)
+    else
+        box = self._tab:AddRightGroupbox(title)
+    end
+    self._cur = box
+    return box
+end
+
+function TabClass:_box()
+    return self._cur or self:_newBox(self._name)
+end
+
+function TabClass:CreateSection(title)
+    self:_newBox(title)
+end
+
+function TabClass:CreateButton(cfg)
+    self:_box():AddButton({
+        Text = cfg.Name,
+        Func = function() if cfg.Callback then cfg.Callback() end end,
+    })
+end
+
+function TabClass:CreateParagraph(cfg)
+    self:_box():AddLabel((cfg.Title and (cfg.Title .. "\n") or "") .. (cfg.Content or ""), true)
+end
+
+function TabClass:CreateToggle(cfg)
+    local idx = nextIdx(cfg.Flag)
+    self:_box():AddToggle(idx, {
+        Text = cfg.Name,
+        Default = cfg.CurrentValue or false,
+        Callback = function(v) if cfg.Callback then cfg.Callback(v) end end,
+    })
+    return {
+        Set = function(_, v)
+            local t = LToggles[idx]
+            if t then pcall(function() t:SetValue(v) end) end
+        end,
+    }
+end
+
+function TabClass:CreateDropdown(cfg)
+    local idx = nextIdx(cfg.Flag)
+    local values = cfg.Options
+    local multi = cfg.MultipleOptions == true
+    local init = cfg.CurrentOption or {}
+    local default
+    if not multi and init[1] then default = table.find(values, init[1]) end
+
+    self:_box():AddDropdown(idx, {
+        Values = values,
+        Default = default,
+        Multi = multi,
+        Text = cfg.Name,
+        Callback = function(v)
+            if not cfg.Callback then return end
+            if multi then
+                local list = {}
+                if type(v) == "table" then
+                    for _, name in ipairs(values) do
+                        if v[name] == true then table.insert(list, name) end
+                    end
+                end
+                cfg.Callback(list)
+            else
+                cfg.Callback({ v })
+            end
+        end,
+    })
+
+    local function setValue(list)
+        local d = LOptions[idx]
+        if not d then return end
+        if multi then
+            local map = {}
+            for _, name in ipairs(list) do map[name] = true end
+            pcall(function() d:SetValue(map) end)
+        elseif list[1] ~= nil then
+            pcall(function() d:SetValue(list[1]) end)
+        end
+    end
+
+    -- Linoria تختار أول عنصر تلقائياً في القوائم المتعددة، فنضبط القيمة دائماً (حتى لو فاضية)
+    if multi then setValue(init) end
+    return { Set = function(_, list) setValue(list or {}) end }
+end
+
+function Rayfield:CreateWindow(cfg)
+    LWindow = Library:CreateWindow({
+        Title = cfg.Name,
+        Center = true,
+        AutoShow = true,
+        Resizable = true,
+        ShowCustomCursor = false,
+        TabPadding = 8,
+        MenuFadeTime = 0.2,
+    })
+    local win = {}
+    function win:CreateTab(name)
+        return setmetatable({ _tab = LWindow:AddTab(name), _name = name, _n = 0 }, TabClass)
+    end
+    return win
+end
+
+function Rayfield:Notify(cfg)
+    Library:Notify((cfg.Title and (cfg.Title .. ": ") or "") .. (cfg.Content or ""), cfg.Duration or 4)
+end
+
+function Rayfield:Destroy()
+    pcall(function() Library:Unload() end)
+end
+
+function Rayfield:LoadConfiguration()
+    local settings = LWindow:AddTab("UI Settings")
+    local menu = settings:AddLeftGroupbox("Menu")
+    menu:AddButton("Unload", function() Library:Unload() end)
+    menu:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
+    Library.ToggleKeybind = LOptions.MenuKeybind
+
+    ThemeManager:SetLibrary(Library)
+    SaveManager:SetLibrary(Library)
+    SaveManager:IgnoreThemeSettings()
+    SaveManager:SetIgnoreIndexes(ignoreIdx)
+    ThemeManager:SetFolder("TitanRNG_Smart")
+    SaveManager:SetFolder("TitanRNG_Smart")
+    SaveManager:BuildConfigSection(settings)
+    ThemeManager:ApplyToTab(settings)
+    pcall(function() SaveManager:LoadAutoloadConfig() end)
+end
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V32 (World Farm + Custom Boss)",
+   Name = "Titan RNG - Hub V34",
    LoadingTitle = "جاري تحميل نظام فارم العوالم والرايد...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
@@ -33,7 +194,6 @@ local DiffList = {"Normal", "Hard", "Extreme", "Nightmare"}
 local ModeToggles = {}
 local isSwitchingMode = false
 local WorldOrder = {"1", "2", "3", "4", "5", "raid"}
-local SelectedBosses = { ["cart_titan"] = true } -- set: [bossName] = true (نفس الخيار الافتراضي في القائمة)
 
 getgenv().TitanLoaded = function()
     ActiveMode = nil
@@ -589,12 +749,12 @@ local function buildDebugTab(DebugTab)
 DebugTab:CreateSection("Inspect / Test")
 
 DebugTab:CreateButton({
-   Name = "Test: اضغط toggleBattleUI الآن",
+   Name = "Test: press toggleBattleUI",
    Callback = function()
       local ui, container, toggle = getBattleParts()
       print("[Test] BattleUI:", ui, "container.Visible:", container and container.Visible, "toggle:", toggle)
       local ok = pressButton(toggle)
-      Rayfield:Notify({ Title = "Test", Content = ok and "تم الضغط" or "ما لقيت الزر أو ما فيه getconnections/firesignal", Duration = 3 })
+      Rayfield:Notify({ Title = "Test", Content = ok and "Pressed" or "Button not found or no getconnections/firesignal", Duration = 3 })
    end,
 })
 
@@ -602,9 +762,9 @@ local UIS = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 
 DebugTab:CreateButton({
-   Name = "Debug: افحص الزر تحت الماوس (بعد 4 ثواني)",
+   Name = "Inspect: button under mouse (4s delay)",
    Callback = function()
-      Rayfield:Notify({ Title = "Inspector", Content = "حط الماوس فوق الزر (X أو ✔) وانتظر 4 ثواني", Duration = 4 })
+      Rayfield:Notify({ Title = "Inspector", Content = "Hover the button and wait 4 seconds", Duration = 4 })
       task.delay(4, function()
           local pgui = player:FindFirstChild("PlayerGui")
           if not pgui then return end
@@ -621,13 +781,13 @@ DebugTab:CreateButton({
               end
               print(line)
           end
-          Rayfield:Notify({ Title = "Inspector", Content = "تمت الطباعة في Console (F9): " .. #objs .. " عنصر", Duration = 4 })
+          Rayfield:Notify({ Title = "Inspector", Content = "Printed to Console (F9): " .. #objs .. " items", Duration = 4 })
       end)
    end,
 })
 
 DebugTab:CreateButton({
-   Name = "Debug: اطبع أسماء الواجهات (F9)",
+   Name = "Print GUI names (F9)",
    Callback = function()
       local pgui = player:FindFirstChild("PlayerGui")
       if not pgui then return end
@@ -636,22 +796,22 @@ DebugTab:CreateButton({
               print("[GUI]", gui.Name, "Enabled=", gui.Enabled)
           end
       end
-      Rayfield:Notify({ Title = "Debug", Content = "تمت الطباعة في Console (F9)", Duration = 3 })
+      Rayfield:Notify({ Title = "Debug", Content = "Printed to Console (F9)", Duration = 3 })
    end,
 })
 
-DebugTab:CreateSection("Auto Boss الأصلي (settingChange)")
+DebugTab:CreateSection("Native Auto Boss (settingChange)")
 
 local spyOn = false
 DebugTab:CreateToggle({
-   Name = "سجّل settingChange / autoBossFight في F9",
+   Name = "Log settingChange / autoBossFight (F9)",
    CurrentValue = false,
    Flag = "SpySettingChange",
    Callback = function(Value)
       spyOn = Value
       if not Value then return end
       if not (hookmetamethod and getnamecallmethod) then
-          Rayfield:Notify({ Title = "Spy", Content = "المنفّذ ما يدعم hookmetamethod", Duration = 4 })
+          Rayfield:Notify({ Title = "Spy", Content = "Executor lacks hookmetamethod", Duration = 4 })
           return
       end
       if getgenv().TitanSpyHooked then return end
@@ -667,7 +827,7 @@ DebugTab:CreateToggle({
           end
           return oldNc(self, ...)
       end)
-      Rayfield:Notify({ Title = "Spy", Content = "شغّل Auto Boss من واجهة اللعبة وشوف F9", Duration = 5 })
+      Rayfield:Notify({ Title = "Spy", Content = "Start Auto Boss in-game and watch F9", Duration = 5 })
    end,
 })
 
@@ -802,14 +962,48 @@ local function runAllWorldsFarm()
     end)
 end
 
--- ==================== الجديد: Custom AutoBoss (اختيار بوسات محددة) ====================
+-- ==================== Custom AutoBoss: صعوبة مستقلة لكل بوس ====================
+-- BossDiffs[boss] = { Normal = true, Hard = true, ... }  (فاضي = ما يُفارم)
+local DiffSet = { Normal = true, Hard = true, Extreme = true, Nightmare = true }
+local BossDiffs = { cart_titan = { Normal = true } }
+
 local function hasSelectedBosses()
-    return next(SelectedBosses) ~= nil
+    for _, list in pairs(BossHierarchy) do
+        for _, boss in ipairs(list) do
+            if BossDiffs[boss] and next(BossDiffs[boss]) ~= nil then return true end
+        end
+    end
+    return false
+end
+
+local function customWorldHasWork(worldKey)
+    for _, diff in ipairs(DiffList) do
+        for _, boss in ipairs(BossHierarchy[worldKey]) do
+            if BossDiffs[boss] and BossDiffs[boss][diff] then
+                local s = SkipUntil[boss .. "|" .. diff]
+                if not s or os.clock() >= s then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function customFarmWorldOnce(worldKey, alive)
+    local didAny = false
+    for _, diff in ipairs(DiffList) do
+        for _, boss in ipairs(BossHierarchy[worldKey]) do
+            if not alive() then return didAny end
+            if BossDiffs[boss] and BossDiffs[boss][diff] then
+                if attemptBoss(boss, diff, alive, worldKey) then didAny = true end
+            end
+        end
+    end
+    return didAny
 end
 
 local function runCustomBossFarm()
     if not hasSelectedBosses() then
-        Rayfield:Notify({ Title = "Custom AutoBoss", Content = "اختر بوس واحد على الأقل من القائمة أولاً", Duration = 4 })
+        Rayfield:Notify({ Title = "Custom AutoBoss", Content = "Pick at least one boss difficulty first", Duration = 4 })
         if ModeToggles["custom"] then
             pcall(function() ModeToggles["custom"]:Set(false) end)
         end
@@ -821,10 +1015,10 @@ local function runCustomBossFarm()
             local didAny = false
             for _, worldKey in ipairs(WorldOrder) do
                 if not alive() then break end
-                -- القائمة تُقرأ في كل دورة، فتغيير الاختيار يسري مباشرة
-                if worldHasWork(worldKey, SelectedBosses) then
+                -- الاختيارات تُقرأ في كل دورة، فتغييرها يسري مباشرة
+                if customWorldHasWork(worldKey) then
                     forceTeleportToWorld(worldKey)
-                    if farmWorldOnce(worldKey, alive, SelectedBosses) then didAny = true end
+                    if customFarmWorldOnce(worldKey, alive) then didAny = true end
                 end
             end
             task.wait(didAny and 0.5 or 3)
@@ -832,12 +1026,41 @@ local function runCustomBossFarm()
     end)
 end
 
+-- ==================== تبويب Custom Boss (مضغوط: 1 + 6 + 4 عناصر) ====================
+local WorldShort = { ["1"] = "SHI", ["2"] = "LEAF", ["3"] = "INF", ["4"] = "MAR", ["5"] = "SHIB", ["raid"] = "RAID" }
+
+local function titleCase(id)
+    local t = id:gsub("_", " ")
+    t = t:gsub("(%a)([%w]*)", function(a, rest) return a:upper() .. rest end)
+    return t
+end
+
+local BossLabels, LabelToBoss = {}, {}
+for _, worldKey in ipairs(WorldOrder) do
+    for _, boss in ipairs(BossHierarchy[worldKey]) do
+        local label = WorldShort[worldKey] .. " - " .. (BossDisplayName[boss] or titleCase(boss))
+        table.insert(BossLabels, label)
+        LabelToBoss[label] = boss
+    end
+end
+
+local DiffDropdowns = {}
+
+local function labelsForDiff(diff)
+    local out = {}
+    for _, label in ipairs(BossLabels) do
+        local boss = LabelToBoss[label]
+        if BossDiffs[boss] and BossDiffs[boss][diff] then table.insert(out, label) end
+    end
+    return out
+end
+
 local BossTab = Window:CreateTab("Custom Boss", 4483362458)
 
-BossTab:CreateSection("تشغيل / إيقاف")
+BossTab:CreateSection("Control")
 
 ModeToggles["custom"] = BossTab:CreateToggle({
-   Name = "Custom AutoBoss (البوسات المختارة فقط)",
+   Name = "Custom AutoBoss",
    CurrentValue = false,
    Flag = "CustomAutoBoss",
    Callback = function(Value)
@@ -845,40 +1068,66 @@ ModeToggles["custom"] = BossTab:CreateToggle({
    end,
 })
 
-BossTab:CreateSection("اختر البوسات حسب العالم")
+BossTab:CreateParagraph({
+   Title = "How it works",
+   Content = "Quick setup fills every boss of a world, from Normal up to the level you pick. Then use Fine tune to add or remove single bosses per difficulty.",
+})
 
-local WorldSelections = { ["1"] = { cart_titan = true } }
-
-local function rebuildSelectedBosses()
-    local set = {}
-    for _, sel in pairs(WorldSelections) do
-        for name in pairs(sel) do set[name] = true end
-    end
-    SelectedBosses = set
-end
+BossTab:CreateSection("Quick setup (Normal up to...)")
 
 for _, worldKey in ipairs(WorldOrder) do
+    local worldName = WorldAreaNames[worldKey] or ("World " .. worldKey)
     BossTab:CreateDropdown({
-       Name = WorldAreaNames[worldKey] or ("World " .. worldKey),
-       Options = BossHierarchy[worldKey],
-       CurrentOption = (worldKey == "1") and {"cart_titan"} or {},
-       MultipleOptions = true,
-       Flag = "PickBosses" .. worldKey,
-       Callback = function(Options)
-          local list = type(Options) == "table" and Options or {Options}
-          local sel = {}
-          for _, name in ipairs(list) do
-              if type(name) == "string" and BossWorldOf[name] == worldKey then
-                  sel[name] = true
+       Name = worldName,
+       Options = {"-", "Clear", "Normal", "Hard", "Extreme", "Nightmare"},
+       CurrentOption = {"-"},
+       MultipleOptions = false,
+       Callback = function(Option)
+          local choice = type(Option) == "table" and Option[1] or Option
+          if choice == "-" or choice == nil then return end
+          for _, boss in ipairs(BossHierarchy[worldKey]) do
+              local set = {}
+              if choice ~= "Clear" then
+                  for _, d in ipairs(DiffList) do
+                      set[d] = true
+                      if d == choice then break end
+                  end
               end
+              BossDiffs[boss] = set
           end
-          WorldSelections[worldKey] = sel
-          rebuildSelectedBosses()
+          for _, diff in ipairs(DiffList) do
+              local dd = DiffDropdowns[diff]
+              if dd then pcall(function() dd:Set(labelsForDiff(diff)) end) end
+          end
        end,
     })
 end
 
-FarmTab:CreateSection("Smart Farm (العوالم)")
+BossTab:CreateSection("Fine tune (bosses per difficulty)")
+
+for _, diff in ipairs(DiffList) do
+    DiffDropdowns[diff] = BossTab:CreateDropdown({
+       Name = diff,
+       Options = BossLabels,
+       CurrentOption = labelsForDiff(diff),
+       MultipleOptions = true,
+       Flag = "CustomBosses_" .. diff,
+       Callback = function(Options)
+          local list = type(Options) == "table" and Options or {Options}
+          local chosen = {}
+          for _, label in ipairs(list) do
+              local boss = LabelToBoss[label]
+              if boss then chosen[boss] = true end
+          end
+          for _, boss in ipairs(AllBossList) do
+              BossDiffs[boss] = BossDiffs[boss] or {}
+              BossDiffs[boss][diff] = chosen[boss] or nil
+          end
+       end,
+    })
+end
+
+FarmTab:CreateSection("Smart Farm (Worlds)")
 
 -- زر التدوير على كل العوالم بالتتابع
 ModeToggles["all"] = FarmTab:CreateToggle({
@@ -945,7 +1194,7 @@ end
 local function teleportToNpc(npcName)
     local npc = findNpc(npcName)
     if not npc then
-        Rayfield:Notify({ Title = "NPC", Content = "تعذر العثور على: " .. npcName, Duration = 4 })
+        Rayfield:Notify({ Title = "NPC", Content = "Not found: " .. npcName, Duration = 4 })
         return
     end
     if not isCharAlive() then return end
@@ -960,7 +1209,7 @@ end
 
 for _, info in ipairs(NpcButtons) do
     NpcTab:CreateButton({
-        Name = "الانتقال إلى: " .. info.label,
+        Name = "Go to: " .. info.label,
         Callback = function() teleportToNpc(info.name) end,
     })
 end
@@ -975,7 +1224,7 @@ end
 QuestTab:CreateButton({ Name = "Claim All Rewards Now", Callback = claimAll })
 
 QuestTab:CreateToggle({
-    Name = "Auto Claim Quests (كل 20 ثانية)",
+    Name = "Auto Claim Quests (every 20s)",
     CurrentValue = false,
     Flag = "AutoClaimQuests",
     Callback = function(Value)
@@ -996,4 +1245,4 @@ buildDebugTab(Window:CreateTab("Debug", 4483362458))
 
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V32", Content = "تمت إضافة Pick Bosses + Custom AutoBoss", Duration = 5 })
+Rayfield:Notify({ Title = "Titan Hub V34", Content = "Loaded (Linoria UI, Custom Boss)", Duration = 5 })
