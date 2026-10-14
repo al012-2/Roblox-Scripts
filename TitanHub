@@ -183,10 +183,11 @@ local function forceTeleportToWorld(worldKey)
         return
     end
 
-    local areaName = WorldAreaNames[tostring(worldKey)]
-    if teleportAreaRemote then
-        pcall(function() teleportAreaRemote:FireServer(areaName) end)
-        pcall(function() teleportAreaRemote:FireServer(tostring(worldKey)) end)
+    -- الصيغة الحقيقية من Cobalt: teleportToArea:FireServer(<رقم العالم>, nil)
+    local areaIndex = tonumber(worldKey)
+    if teleportAreaRemote and areaIndex then
+        pcall(function() teleportAreaRemote:FireServer(areaIndex, nil) end)
+        humanDelay(0.6, 0.9)
     end
 
     local lobby = workspace:FindFirstChild("Lobby")
