@@ -180,7 +180,7 @@ function Rayfield:LoadConfiguration()
 end
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V36 (Secret Boss + Raid Walk + Auto Rejoin)",
+   Name = "Titan RNG - Hub V37 (Secret Boss + Raid Walk + Auto Rejoin)",
    LoadingTitle = "Loading system...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
@@ -1772,6 +1772,310 @@ do
     })
 end
 
+-- ==================== Roll Goal + Weather Wait tab ====================
+do
+    table.insert(ignoreIdx, "RollGoalWeather")
+
+    local RollGoalText = "10K"
+    local RollGoalWeathers = {}          -- set of normalized weather names
+    local RollGoalKeepRolling = true
+    local rollGoalToken = 0
+    local rollGoalToggle
+
+    -- "10K" / "1.5M" / "5000" -> number
+    local function parseAmount(s)
+        s = tostring(s or ""):gsub(",", ""):gsub("%s", "")
+        local num, suf = s:match("^([%d%.]+)([KkMmBb]?)$")
+        num = tonumber(num)
+        if not num then return nil end
+        local mult = ({ k = 1e3, m = 1e6, b = 1e9 })[suf:lower()] or 1
+        return num * mult
+    end
+
+    local function isShown(obj)
+        local cur = obj
+        while cur and cur ~= game do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+            cur = cur.Parent
+        end
+        return true
+    end
+
+    -- Weather names come straight from ReplicatedStorage.weatherEffects
+    local WeatherNames = {}
+    local WeatherSet = {}
+    do
+        local folder = Rep:FindFirstChild("weatherEffects")
+        local skip = { possible = true, skyboxes = true }
+        if folder then
+            for _, c in ipairs(folder:GetChildren()) do
+                if not skip[c.Name:lower()] then table.insert(WeatherNames, c.Name) end
+            end
+        end
+        if #WeatherNames == 0 then
+            WeatherNames = {
+                "Arcane", "Aurora", "Awakened", "Doodle", "Eclipse", "Galactic", "Glitch", "Goofy",
+                "Hailstorm", "Ice Age", "Light Rain", "Mashup", "Monsoon", "Sandstorm", "Snowfall",
+                "Thunderstorm", "Windy",
+            }
+        end
+        table.sort(WeatherNames)
+        for _, n in ipairs(WeatherNames) do WeatherSet[norm(n)] = true end
+    end
+
+    -- Roll! button
+    local rollBtn
+    local function findRollButton()
+        if rollBtn and rollBtn.Parent and isShown(rollBtn) then return rollBtn end
+        rollBtn = nil
+        local pgui = player:FindFirstChild("PlayerGui")
+        if not pgui then return nil end
+        for _, d in ipairs(pgui:GetDescendants()) do
+            if d:IsA("TextButton") and d.Text == "Roll!" and isShown(d) then
+                rollBtn = d
+                break
+            elseif d:IsA("TextLabel") and d.Text == "Roll!" and isShown(d) then
+                local b = d:FindFirstAncestorWhichIsA("GuiButton")
+                if b then
+                    rollBtn = b
+                    break
+                end
+            end
+        end
+        return rollBtn
+    end
+
+    -- Roll through the game's remote (fast); fall back to clicking the Roll! button
+    local rollRemote = Rep:FindFirstChild("RollRequest")
+    local function doRoll()
+        if rollRemote then
+            pcall(function() rollRemote:FireServer() end)
+        else
+            local btn = findRollButton()
+            if btn then pressButton(btn) end
+        end
+    end
+
+    -- Roll progress bar text (e.g. "5.82K/10K"): the matching label right above the Roll! button
+    local function parseProgressText(t)
+        local a, as, b, bs = tostring(t):match("^%s*([%d%.,]+)%s*([KkMmBb]?)%s*/%s*([%d%.,]+)%s*([KkMmBb]?)%s*$")
+        if not a then return nil end
+        local cur = parseAmount(a .. as)
+        local max = parseAmount(b .. bs)
+        if not cur or not max then return nil end
+        if cur == 1 and as == "" then return nil end -- rarity labels like 1/2.2M
+        return cur, max
+    end
+
+    local progLabel, lastProgScan, lastCur, lastMax = nil, 0, nil, nil
+    local function findProgressLabel()
+        if progLabel and progLabel.Parent then return progLabel end
+        progLabel = nil
+        if os.clock() - lastProgScan < 2 then return nil end
+        lastProgScan = os.clock()
+        local btn = findRollButton()
+        local pgui = player:FindFirstChild("PlayerGui")
+        if not (btn and pgui) then return nil end
+        local bx = btn.AbsolutePosition.X + btn.AbsoluteSize.X / 2
+        local by = btn.AbsolutePosition.Y
+        local best, bestDist
+        for _, d in ipairs(pgui:GetDescendants()) do
+            if d:IsA("TextLabel") and parseProgressText(d.Text) and isShown(d) then
+                local cx = d.AbsolutePosition.X + d.AbsoluteSize.X / 2
+                local cy = d.AbsolutePosition.Y + d.AbsoluteSize.Y / 2
+                if cy < by and math.abs(cx - bx) < 400 then
+                    local dist = by - cy
+                    if not bestDist or dist < bestDist then best, bestDist = d, dist end
+                end
+            end
+        end
+        progLabel = best
+        return progLabel
+    end
+
+    local function readProgress()
+        local lbl = findProgressLabel()
+        if lbl then
+            local cur, max = parseProgressText(lbl.Text)
+            if cur then lastCur, lastMax = cur, max end
+        end
+        return lastCur, lastMax
+    end
+
+    -- Current weather. From weatherHandlerClient: the panel has nameLabel (weather name) next to
+    -- durationLabel ("Ends in: 197s"), so find the duration label first, then the name beside it.
+    local weatherLabel, lastWeatherScan = nil, 0
+    local function readWeatherPanel(pgui)
+        for _, d in ipairs(pgui:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text:match("^Ends in: %d+s$") and isShown(d) then
+                local container = d.Parent
+                for _ = 1, 4 do
+                    if not container then break end
+                    local fallback
+                    for _, c in ipairs(container:GetDescendants()) do
+                        if c:IsA("TextLabel") and WeatherSet[norm(c.Text)] then
+                            if c.Name == "nameLabel" then return c end
+                            fallback = fallback or c
+                        end
+                    end
+                    if fallback then return fallback end
+                    container = container.Parent
+                end
+            end
+        end
+        return nil
+    end
+
+    local function currentWeather()
+        if weatherLabel and weatherLabel.Parent and isShown(weatherLabel) and WeatherSet[norm(weatherLabel.Text)] then
+            return weatherLabel.Text
+        end
+        weatherLabel = nil
+        if os.clock() - lastWeatherScan < 1 then return nil end
+        lastWeatherScan = os.clock()
+        local pgui = player:FindFirstChild("PlayerGui")
+        if not pgui then return nil end
+        weatherLabel = readWeatherPanel(pgui)
+        if not weatherLabel then
+            for _, d in ipairs(pgui:GetDescendants()) do
+                if d:IsA("TextLabel") and WeatherSet[norm(d.Text)] and isShown(d) then
+                    weatherLabel = d
+                    break
+                end
+            end
+        end
+        return weatherLabel and weatherLabel.Text or nil
+    end
+
+    -- Mashup = "every weather at once", so it counts as any selected weather
+    local function weatherMatches(w)
+        if not w then return false end
+        local n = norm(w)
+        if RollGoalWeathers[n] then return true end
+        return n == "mashup" and next(RollGoalWeathers) ~= nil
+    end
+
+    local function stopRollGoal(reason)
+        if reason then Rayfield:Notify({ Title = "Roll Goal", Content = reason, Duration = 5 }) end
+        if rollGoalToggle then rollGoalToggle:Set(false) end
+    end
+
+    local function runRollGoal(token)
+        local target = parseAmount(RollGoalText)
+        if not target then
+            stopRollGoal("Invalid target. Use a number like 10K, 5000 or 1.5M")
+            return
+        end
+        local goalReached = false
+        local missingSince = nil
+
+        while rollGoalToken == token do
+            local cur = readProgress()
+
+            if cur == nil then
+                missingSince = missingSince or os.clock()
+                if os.clock() - missingSince > 6 and not goalReached then
+                    stopRollGoal("Roll bar (like 5.82K/10K) not found on screen")
+                    return
+                end
+            else
+                missingSince = nil
+                if not goalReached and cur >= target then
+                    goalReached = true
+                    Rayfield:Notify({ Title = "Roll Goal", Content = "Reached " .. RollGoalText .. ", stopped rolling", Duration = 4 })
+                end
+            end
+
+            if not goalReached then
+                doRoll()
+                task.wait(0.2)
+            elseif next(RollGoalWeathers) == nil then
+                stopRollGoal("Goal reached, no weather selected: stopped")
+                return
+            else
+                local w = currentWeather()
+                if weatherMatches(w) then
+                    if RollGoalKeepRolling then
+                        doRoll()
+                    end
+                    task.wait(0.2)
+                else
+                    task.wait(0.5)
+                end
+            end
+        end
+    end
+
+    local RollGoalTab = Window:CreateTab("Roll Goal", 4483362458)
+
+    RollGoalTab:CreateSection("Roll until goal, then wait for weather")
+
+    RollGoalTab:CreateInput({
+        Name = "Target roll progress (10K, 5000, 1.5M)",
+        Default = "10K",
+        Placeholder = "10K",
+        Flag = "RollGoalTarget",
+        Callback = function(v)
+            if v and v ~= "" then RollGoalText = v end
+        end,
+    })
+
+    RollGoalTab:CreateDropdown({
+        Name = "Wait for weather (weatherEffects)",
+        Options = WeatherNames,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "RollGoalWeathers",
+        Callback = function(list)
+            RollGoalWeathers = {}
+            for _, n in ipairs(list) do RollGoalWeathers[norm(n)] = true end
+        end,
+    })
+
+    RollGoalTab:CreateToggle({
+        Name = "Keep rolling while that weather is active",
+        CurrentValue = true,
+        Flag = "RollGoalKeepRolling",
+        Callback = function(v) RollGoalKeepRolling = v end,
+    })
+
+    rollGoalToggle = RollGoalTab:CreateToggle({
+        Name = "Start: Roll > Goal > Wait for weather",
+        CurrentValue = false,
+        Flag = "RollGoalWeather",
+        Callback = function(Value)
+            rollGoalToken += 1
+            local myToken = rollGoalToken
+            if not Value then return end
+            task.spawn(function()
+                local ok, err = pcall(runRollGoal, myToken)
+                if not ok then warn("roll goal error:", err) end
+            end)
+        end,
+    })
+
+    RollGoalTab:CreateSection("Debug")
+
+    RollGoalTab:CreateButton({
+        Name = "Show detected roll bar + weather",
+        Callback = function()
+            progLabel, weatherLabel = nil, nil
+            lastProgScan, lastWeatherScan = 0, 0
+            local cur, max = readProgress()
+            local w = currentWeather()
+            print("[RollGoal] bar:", progLabel and progLabel:GetFullName() or "not found", "| value:", cur, "/", max)
+            print("[RollGoal] weather:", weatherLabel and weatherLabel:GetFullName() or "not found", "|", w)
+            Rayfield:Notify({
+                Title = "Roll Goal",
+                Content = "Bar: " .. tostring(cur) .. "/" .. tostring(max) .. " | Weather: " .. tostring(w) .. " (path in F9)",
+                Duration = 6,
+            })
+        end,
+    })
+end
+
+
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V36", Content = "Loaded (Secret Boss + Raid Walk + Smart Auto Rejoin)", Duration = 5 })
+Rayfield:Notify({ Title = "Titan Hub V37", Content = "Loaded (Secret Boss + Raid Walk + Smart Auto Rejoin)", Duration = 5 })
