@@ -180,7 +180,7 @@ function Rayfield:LoadConfiguration()
 end
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V37 (Natural Raid Walk + Smart Rejoin)",
+   Name = "Titan RNG - Hub V35 (Raid Walk + Auto Rejoin)",
    LoadingTitle = "Loading system...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
@@ -210,10 +210,12 @@ local DiffList = {"Normal", "Hard", "Extreme", "Nightmare"}
 local ModeToggles = {}
 local isSwitchingMode = false
 
+-- Regular worlds are separated from the raid
 local WorldOrder = {"1", "2", "3", "4", "5"}
 local AllWorldsAndRaid = {"1", "2", "3", "4", "5", "raid"}
 
--- Raid-specific settings (مفعل بالمشي الطبيعي حصراً)
+-- Raid-specific settings
+local RaidWalkMode = true
 local RaidDifficultyLadder = true
 local RaidSingleDiff = "Normal"
 local RaidMaxDiff = "Nightmare"
@@ -366,9 +368,8 @@ local function nearWorldBosses(worldKey)
     if not root then return false end
     if worldKey == "raid" then
         local raidFolder = workspace:FindFirstChild("KaijuRaid")
-        local bosses = raidFolder and raidFolder:FindFirstChild("Bosses")
-        if not bosses then return false end
-        for _, m in ipairs(bosses:GetChildren()) do
+        if not raidFolder then return false end
+        for _, m in ipairs(raidFolder:GetDescendants()) do
             if m:IsA("Model") then
                 local ok, pos = pcall(function() return m:GetPivot().Position end)
                 if ok and (pos - root.Position).Magnitude < 600 then return true end
@@ -394,6 +395,7 @@ local function forceTeleportToWorld(worldKey)
     local root = char:WaitForChild("HumanoidRootPart", 5)
     if not root then return end
 
+    -- If we are already near the world's bosses, don't teleport again
     if nearWorldBosses(worldKey) then
         lastTpWorld, lastTpChar = worldKey, char
         return
@@ -408,9 +410,7 @@ local function forceTeleportToWorld(worldKey)
         end
         local raidFolder = workspace:FindFirstChild("KaijuRaid")
         if raidFolder then
-            local bossesFolder = raidFolder:FindFirstChild("Bosses")
-            local raidPart = (bossesFolder and bossesFolder:FindFirstChildWhichIsA("BasePart", true))
-                or raidFolder:FindFirstChildWhichIsA("BasePart", true)
+            local raidPart = raidFolder:FindFirstChildWhichIsA("BasePart", true)
             if raidPart then
                 root.AssemblyLinearVelocity = Vector3.zero
                 root.CFrame = raidPart.CFrame + Vector3.new(0, 3, 0)
@@ -495,7 +495,7 @@ local BossCache, MissUntil = {}, {}
 local function findBossModel(bossName)
     local key = bossName:lower()
     local cached = BossCache[key]
-    if cached and cached.Parent and cached.Parent ~= workspace and cached:IsDescendantOf(workspace) then
+    if cached and cached.Parent and cached:IsDescendantOf(workspace) then
         return cached
     end
     BossCache[key] = nil
@@ -506,28 +506,18 @@ local function findBossModel(bossName)
     local want2 = BossDisplayName[bossName] and norm(BossDisplayName[bossName]) or nil
     local found
 
-    local kaijuRaid = workspace:FindFirstChild("KaijuRaid")
-    local raidBossesFolder = kaijuRaid and kaijuRaid:FindFirstChild("Bosses")
-    if raidBossesFolder then
-        for _, m in ipairs(raidBossesFolder:GetChildren()) do
-            if m:IsA("Model") then
-                local n = norm(m.Name)
-                if m:GetAttribute("bossId") == bossName
-                    or n == want
-                    or (want2 and n == want2)
-                    or (n ~= "" and want ~= "" and n:find(want, 1, true)) then
-                    found = m
-                    break
-                end
-            end
-        end
-    end
-
-    if not found then
-        local bossNpcs = workspace:FindFirstChild("bossNpcs")
-        if bossNpcs then
+    local searchRoots = { workspace:FindFirstChild("bossNpcs"), workspace:FindFirstChild("KaijuRaid") }
+    for _, root in ipairs(searchRoots) do
+        if root then
             local unnamed
-            for _, folder in ipairs(bossNpcs:GetChildren()) do
+            for _, folder in ipairs(root:GetChildren()) do
+                if folder:IsA("Model") then
+                    local n = norm(folder.Name)
+                    if folder:GetAttribute("bossId") == bossName or n == want or (want2 and n == want2) then
+                        found = folder
+                        break
+                    end
+                end
                 for _, m in ipairs(folder:GetChildren()) do
                     if m:IsA("Model") then
                         local n = norm(m.Name)
@@ -544,15 +534,24 @@ local function findBossModel(bossName)
                 end
                 if found then break end
             end
+            if found then break end
             found = found or unnamed
         end
     end
 
-    if found then
-        BossCache[key] = found
-    else
-        MissUntil[key] = os.clock() + 4
+    if not found then
+        local npcsFolder = workspace:FindFirstChild("npcs")
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model")
+                and not (npcsFolder and obj:IsDescendantOf(npcsFolder))
+                and (norm(obj.Name) == want or (want2 and norm(obj.Name) == want2)) then
+                found = obj
+                break
+            end
+        end
     end
+
+    if found then BossCache[key] = found else MissUntil[key] = os.clock() + 5 end
     return found
 end
 
@@ -577,7 +576,7 @@ local function isBossOnCooldown(bossName, difficulty)
     return false
 end
 
--- ==================== Movement (Teleport for worlds 1-5, Natural Walk for Raid) ====================
+-- ==================== Movement (teleport + natural walking for raid) ====================
 local function groundAt(x, y, z, ignore)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
@@ -623,7 +622,7 @@ local function teleportNear(targetPosition, attempt, bossModel)
     return true
 end
 
--- ديران مشي طبيعي خاص بالرايد (بدون تليبورت نهائياً لعدم لفت الأنظار)
+-- Walk to the boss naturally (no instant teleport)
 local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
     local char = player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -633,10 +632,12 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
     local destination = getSafeSpotNearBoss(targetPosition, attempt, bossModel)
     local distToTarget = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(destination.X, 0, destination.Z)).Magnitude
 
+    -- Already close to the boss, no need to walk
     if distToTarget <= 7 then
         return true
     end
 
+    -- Try computing a safe path with PathfindingService to avoid walls and obstacles
     local path = PathfindingService:CreatePath({
         AgentRadius = 2,
         AgentHeight = 5,
@@ -666,6 +667,7 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
             end
         end
     else
+        -- If the path is open, walk directly with MoveTo
         local walkStart = os.clock()
         local lastPos = root.Position
         local lastCheck = os.clock()
@@ -676,6 +678,7 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
             if horizDist <= 6.5 then
                 break
             end
+            -- Auto-jump if the character gets stuck on a small obstacle while walking
             if os.clock() - lastCheck > 1.2 then
                 if (root.Position - lastPos).Magnitude < 1.5 then
                     hum.Jump = true
@@ -921,6 +924,7 @@ end
 local VirtualUser = game:GetService("VirtualUser")
 local AntiAfk = true
 
+-- Disable the game's AfkRejoinClient script so it doesn't kick you after 2 minutes
 local function disableGameAfkScript()
     local pScripts = player:FindFirstChild("PlayerScripts")
     local afkScript = pScripts and pScripts:FindFirstChild("AfkRejoinClient")
@@ -938,6 +942,7 @@ table.insert(activeConnections, player.Idled:Connect(function()
     end)
 end))
 
+-- Extract the private server link code from a URL
 local function extractLinkCode(url)
     if type(url) ~= "string" then return nil end
     local code = url:match("privateServerLinkCode=([%w_%-]+)")
@@ -946,8 +951,8 @@ local function extractLinkCode(url)
     return code
 end
 
-local rejoining = false
-local qotQueued = false
+local rejoining = false      -- prevents stacking loops
+local qotQueued = false      -- prevents duplicate queue_on_teleport calls
 local rejoinAttempt = 0
 
 local function queueReload()
@@ -963,11 +968,13 @@ local function executeRejoin()
     rejoinAttempt += 1
     queueReload()
 
+    -- 1) Official game rejoin remote (first attempt only)
     if rejoinAttempt == 1 and requestRejoinRemote then
         pcall(function() requestRejoinRemote:FireServer() end)
         task.wait(1.5)
     end
 
+    -- 2) First attempt: same server; afterwards: same place
     if rejoinAttempt == 1 and game.JobId ~= "" then
         pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
@@ -979,13 +986,15 @@ local function executeRejoin()
     end
 end
 
+-- If the teleport itself fails, fall back to the backup method instead of waiting blindly
 table.insert(activeConnections, TeleportService.TeleportInitFailed:Connect(function()
     if rejoinAttempt == 1 then rejoinAttempt = 2 end
 end))
 
+-- Disconnect monitor: only one loop at a time
 table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function()
     if not AutoReconnectEnabled or rejoining then return end
-    if GuiService:GetErrorMessage() == "" then return end
+    if GuiService:GetErrorMessage() == "" then return end -- ignore the message being cleared
 
     rejoining = true
     rejoinAttempt = 0
@@ -1189,7 +1198,7 @@ for _, worldKey in ipairs(WorldOrder) do
     })
 end
 
--- ==================== Dedicated Kaiju Raid tab (مشى طبيعي تلقائي حصراً) ====================
+-- ==================== Dedicated Kaiju Raid tab ====================
 local RaidTab = Window:CreateTab("Kaiju Raid", 4483362458)
 
 local function raidDiffsToRun()
@@ -1211,8 +1220,7 @@ local function runKaijuRaidFarm()
                 for _, boss in ipairs(BossHierarchy["raid"]) do
                     if not alive() then break end
                     if SelectedRaidBosses[boss] then
-                        -- دائمًا استخدام المشي الطبيعي (true) لبوسات الرايد لتجنب الشبهات
-                        if attemptBoss(boss, diff, alive, "raid", true) then
+                        if attemptBoss(boss, diff, alive, "raid", RaidWalkMode) then
                             didAny = true
                         end
                     end
@@ -1226,11 +1234,20 @@ end
 RaidTab:CreateSection("Raid Control")
 
 ModeToggles["raid_farm"] = RaidTab:CreateToggle({
-    Name = "Start Kaiju Raid Farm (مشي طبيعي تلقائي)",
+    Name = "Start Kaiju Raid Farm",
     CurrentValue = false,
     Flag = "RaidAutoFarm",
     Callback = function(Value)
         if Value then runKaijuRaidFarm() else stopMode("raid_farm") end
+    end,
+})
+
+RaidTab:CreateToggle({
+    Name = "Walk to Bosses (natural walking, no teleport)",
+    CurrentValue = true,
+    Flag = "RaidWalkMode",
+    Callback = function(Value)
+        RaidWalkMode = Value
     end,
 })
 
@@ -1367,7 +1384,7 @@ end
 
 local function customFarmWorldOnce(worldKey, alive)
     local didAny = false
-    local useWalk = (worldKey == "raid") and true or false
+    local useWalk = (worldKey == "raid") and RaidWalkMode or false
     for _, diff in ipairs(DiffList) do
         for _, boss in ipairs(BossHierarchy[worldKey]) do
             if not alive() then return didAny end
@@ -1588,4 +1605,4 @@ QuestTab:CreateToggle({
 
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V37", Content = "Loaded (Natural Raid Walk + Smart Rejoin)", Duration = 5 })
+Rayfield:Notify({ Title = "Titan Hub V35", Content = "Loaded (Raid Walk Mode + Smart Auto Rejoin)", Duration = 5 })
