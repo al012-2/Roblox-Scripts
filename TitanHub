@@ -325,6 +325,25 @@ local function returnToLobby()
     end
 end
 
+-- آخر عالم انتقلنا له (بنفس الشخصية)، عشان ما نعيد الانتقال وإحنا فيه
+local lastTpWorld, lastTpChar = nil, nil
+
+-- هل بوسات هذا العالم قريبة من الشخصية؟ (يعني وصلنا)
+local function nearWorldBosses(worldKey)
+    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    local folder = workspace:FindFirstChild("bossNpcs")
+    folder = folder and folder:FindFirstChild(tostring(worldKey))
+    if not folder then return true end -- ما نقدر نتحقق، نعتمد على الحركة فقط
+    for _, m in ipairs(folder:GetChildren()) do
+        if m:IsA("Model") then
+            local ok, pos = pcall(function() return m:GetPivot().Position end)
+            if ok and (pos - root.Position).Magnitude < 500 then return true end
+        end
+    end
+    return false
+end
+
 local function forceTeleportToWorld(worldKey)
     local char = getCharWithTimeout(10)
     if not char then return end
@@ -343,11 +362,30 @@ local function forceTeleportToWorld(worldKey)
         return
     end
 
-    -- الصيغة الحقيقية من Cobalt: teleportToArea:FireServer(<رقم العالم>, nil)
+    -- إذا إحنا فيه أصلاً (نفس الشخصية) ما نعيد الانتقال
+    if lastTpWorld == worldKey and lastTpChar == char then return end
+
+    -- الانتقال المباشر بالريموت (نفس زر Teleport في اللعبة): teleportToArea:FireServer(<رقم العالم>, nil)
+    -- ننتظر الوصول (بوسات العالم قريبة) ثم نكمل للبوس مباشرة، وإذا فشل مرتين نجرب البوابات
     local areaIndex = tonumber(worldKey)
+    local startPos = root.Position
     if teleportAreaRemote and areaIndex then
-        pcall(function() teleportAreaRemote:FireServer(areaIndex, nil) end)
-        humanDelay(0.6, 0.9)
+        for _ = 1, 2 do
+            pcall(function() teleportAreaRemote:FireServer(areaIndex, nil) end)
+            local t = os.clock()
+            while os.clock() - t < 5 do
+                task.wait(0.25)
+                local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if r and nearWorldBosses(worldKey) then
+                    local moved = (r.Position - startPos).Magnitude >= 25
+                    if moved or os.clock() - t >= 2 then
+                        task.wait(0.5) -- مهلة قصيرة لاستقرار الشخصية
+                        lastTpWorld, lastTpChar = worldKey, player.Character
+                        return
+                    end
+                end
+            end
+        end
     end
 
     local lobby = workspace:FindFirstChild("Lobby")
@@ -477,16 +515,52 @@ local function isBossOnCooldown(bossName, difficulty)
 end
 
 -- ==================== الحركة والقتال ====================
-local function teleportNear(targetPosition, attempt)
-    local AttemptDistances = { {3, 4}, {2, 3}, {1, 2} }
+-- أول سطح تحت نقطة معيّنة (نتجاهل الشخصية وجسم البوس)
+local function groundAt(x, y, z, ignore)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = ignore
+    params.RespectCanCollide = true -- يتجاهل الأجزاء الوهمية/الشفافة (طقس، مطر، حواجز)
+    return workspace:Raycast(Vector3.new(x, y + 8, z), Vector3.new(0, -200, 0), params)
+end
+
+-- ينقلك جنب البوس على نفس أرضيته (مو فوق طوبة أو مبنى)
+local function teleportNear(targetPosition, attempt, bossModel)
+    local AttemptDistances = { {4, 6}, {3, 5}, {2, 3} }
     local range = AttemptDistances[attempt or 1] or AttemptDistances[1]
-    local angle = math.random() * math.pi * 2
-    local dist = range[1] + math.random() * (range[2] - range[1])
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return false end
+
+    local ignore = { char }
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl.Character then table.insert(ignore, pl.Character) end
+    end
+    if bossModel then table.insert(ignore, bossModel) end
+
+    local base = groundAt(targetPosition.X, targetPosition.Y, targetPosition.Z, ignore)
+    local groundY = base and base.Position.Y or targetPosition.Y
+    groundY = math.min(groundY, targetPosition.Y) -- الأرضية ما تكون فوق البوس
+
+    local spot
+    for _ = 1, 10 do
+        local angle = math.random() * math.pi * 2
+        local dist = range[1] + math.random() * (range[2] - range[1])
+        local x = targetPosition.X + math.cos(angle) * dist
+        local z = targetPosition.Z + math.sin(angle) * dist
+        local hit = groundAt(x, groundY, z, ignore)
+        -- نقبل فقط نقطة على نفس مستوى أرضية البوس
+        if hit and math.abs(hit.Position.Y - groundY) <= 3 then
+            spot = hit.Position + Vector3.new(0, 3.5, 0)
+            break
+        end
+    end
+    if not spot then
+        spot = Vector3.new(targetPosition.X + range[1], groundY + 3.5, targetPosition.Z)
+    end
+
     root.AssemblyLinearVelocity = Vector3.zero
-    root.CFrame = CFrame.new(targetPosition + Vector3.new(math.cos(angle) * dist, 2.5, math.sin(angle) * dist))
+    root.CFrame = CFrame.new(spot)
     return true
 end
 
@@ -529,7 +603,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait)
         if not shouldContinue() then return false end
 
         local pos = targetPart.Parent and targetPart.Position or targetModel:GetPivot().Position
-        if not teleportNear(pos, attempt) then return false end
+        if not teleportNear(pos, attempt, targetModel) then return false end
 
         task.wait(0.45 + attempt * 0.15)
         if not shouldContinue() then return false end
@@ -569,6 +643,7 @@ end
 local function startMode(mode, loopFn)
     ActiveMode = mode
     ActiveWorldKey = mode
+    lastTpWorld = nil -- أول ما نبدأ فارم جديد نتأكد من الانتقال من جديد
     FarmToken += 1
     local myToken = FarmToken
 
