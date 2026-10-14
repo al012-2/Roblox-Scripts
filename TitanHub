@@ -16,7 +16,7 @@ local uiCounter = 0
 
 local ignoreIdx = {
     "MenuKeybind", "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3",
-    "SmartFarm4", "SmartFarm5", "RaidAutoFarm", "AutoInfTowerMulti", "AutoClaimQuests",
+    "SmartFarm4", "SmartFarm5", "SmartFarmsecret", "RaidAutoFarm", "AutoInfTowerMulti", "AutoClaimQuests",
     "FastBattle", "SpySettingChange",
 }
 
@@ -180,7 +180,7 @@ function Rayfield:LoadConfiguration()
 end
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V35 (Raid Walk + Auto Rejoin)",
+   Name = "Titan RNG - Hub V36 (Secret Boss + Raid Walk + Auto Rejoin)",
    LoadingTitle = "Loading system...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
@@ -210,9 +210,9 @@ local DiffList = {"Normal", "Hard", "Extreme", "Nightmare"}
 local ModeToggles = {}
 local isSwitchingMode = false
 
--- Regular worlds are separated from the raid
-local WorldOrder = {"1", "2", "3", "4", "5"}
-local AllWorldsAndRaid = {"1", "2", "3", "4", "5", "raid"}
+-- Regular worlds (+ secret bosses) are separated from the raid
+local WorldOrder = {"1", "2", "3", "4", "5", "secret"}
+local AllWorldsAndRaid = {"1", "2", "3", "4", "5", "raid", "secret"}
 
 -- Raid-specific settings
 local RaidWalkMode = true
@@ -276,7 +276,8 @@ local BossHierarchy = {
    ["3"] = {"dreamer", "insect_eater", "thread_demon", "moon_reaper", "worthy_fighter", "thriller_king"},
    ["4"] = {"leopard_assassin", "mochi_man", "sand_warlord", "string_emperor", "red_dog", "dragon_emperor"},
    ["5"] = {"blood_brother", "blooming_wrath", "volcano_head", "deadbeat_dad", "kindness_spreader", "curse_tyrant"},
-   ["raid"] = {"kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"}
+   ["raid"] = {"kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"},
+   ["secret"] = {"crimson_phantom"},
 }
 
 local BossDisplayName = {
@@ -285,6 +286,7 @@ local BossDisplayName = {
     mina_ashiro = "Artillery Captain",
     soshiro_hoshina = "Blade Vice Captain",
     kikoru_shinomiya = "Axe Prodigy",
+    crimson_phantom = "Crimson Phantom",
 }
 
 local WorldAreaNames = {
@@ -293,7 +295,8 @@ local WorldAreaNames = {
     ["3"] = "Infinity Castle",
     ["4"] = "Marineford",
     ["5"] = "Shibuya Station",
-    ["raid"] = "Kaiju Raid"
+    ["raid"] = "Kaiju Raid",
+    ["secret"] = "Secret Bosses",
 }
 
 local NpcButtons = {
@@ -363,6 +366,13 @@ end
 
 local lastTpWorld, lastTpChar = nil, nil
 
+-- Returns the first Model inside bossNpcs.secretBosses (the real boss, not a preview)
+local function getSecretBossModel()
+    local bn = workspace:FindFirstChild("bossNpcs")
+    local sf = bn and bn:FindFirstChild("secretBosses")
+    return sf and sf:FindFirstChildWhichIsA("Model") or nil
+end
+
 local function nearWorldBosses(worldKey)
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     if not root then return false end
@@ -373,6 +383,18 @@ local function nearWorldBosses(worldKey)
             if m:IsA("Model") then
                 local ok, pos = pcall(function() return m:GetPivot().Position end)
                 if ok and (pos - root.Position).Magnitude < 600 then return true end
+            end
+        end
+        return false
+    end
+    if worldKey == "secret" then
+        local bn = workspace:FindFirstChild("bossNpcs")
+        local sf = bn and bn:FindFirstChild("secretBosses")
+        if not sf then return false end
+        for _, m in ipairs(sf:GetChildren()) do
+            if m:IsA("Model") then
+                local ok, pos = pcall(function() return m:GetPivot().Position end)
+                if ok and (pos - root.Position).Magnitude < 150 then return true end
             end
         end
         return false
@@ -398,6 +420,34 @@ local function forceTeleportToWorld(worldKey)
     -- If we are already near the world's bosses, don't teleport again
     if nearWorldBosses(worldKey) then
         lastTpWorld, lastTpChar = worldKey, char
+        return
+    end
+
+    if worldKey == "secret" then
+        local m = getSecretBossModel()
+        -- Fallback (StreamingEnabled): go to the secret room first so the boss model loads
+        if not m then
+            local lobby = workspace:FindFirstChild("Lobby")
+            local cave = lobby and lobby:FindFirstChild("HiddenCave")
+            local plat = cave and cave:FindFirstChild("FutureBossPlatform", true)
+            if plat then
+                local ok, cf = pcall(function() return plat:GetPivot() end)
+                if ok then
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.CFrame = cf + Vector3.new(0, 5, 0)
+                    task.wait(1.5)
+                end
+            end
+            m = getSecretBossModel()
+        end
+        if m then
+            local ok, cf = pcall(function() return m:GetPivot() end)
+            if ok then
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.CFrame = cf * CFrame.new(0, 0, 8) + Vector3.new(0, 3, 0)
+                task.wait(1)
+            end
+        end
         return
     end
 
@@ -1175,10 +1225,10 @@ local function runAllWorldsFarm()
     end)
 end
 
-FarmTab:CreateSection("Smart Farm (Worlds 1-5)")
+FarmTab:CreateSection("Smart Farm (Worlds 1-5 + Secret)")
 
 ModeToggles["all"] = FarmTab:CreateToggle({
-   Name = "Smart Farm: ALL Worlds (1-5 Rotate)",
+   Name = "Smart Farm: ALL Worlds (Rotate)",
    CurrentValue = false,
    Flag = "SmartFarmAll",
    Callback = function(Value)
@@ -1420,7 +1470,7 @@ local function runCustomBossFarm()
     end)
 end
 
-local WorldShort = { ["1"] = "SHI", ["2"] = "LEAF", ["3"] = "INF", ["4"] = "MAR", ["5"] = "SHIB", ["raid"] = "RAID" }
+local WorldShort = { ["1"] = "SHI", ["2"] = "LEAF", ["3"] = "INF", ["4"] = "MAR", ["5"] = "SHIB", ["raid"] = "RAID", ["secret"] = "SECRET" }
 
 local function titleCase(id)
     local t = id:gsub("_", " ")
@@ -1724,4 +1774,4 @@ end
 
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V35", Content = "Loaded (Raid Walk Mode + Smart Auto Rejoin)", Duration = 5 })
+Rayfield:Notify({ Title = "Titan Hub V36", Content = "Loaded (Secret Boss + Raid Walk + Smart Auto Rejoin)", Duration = 5 })
