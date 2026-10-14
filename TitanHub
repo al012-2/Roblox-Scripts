@@ -785,6 +785,17 @@ local function restoreBattleGuis()
     restoreBlurEffects()
 end
 
+-- ==================== Anti AFK (يمنع الطرد بسبب الخمول بعد 20 دقيقة) ====================
+local VirtualUser = game:GetService("VirtualUser")
+local AntiAfk = true
+table.insert(activeConnections, player.Idled:Connect(function()
+    if not AntiAfk then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end))
+
 -- ==================== واجهة الفارم (Auto Farm) ====================
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
@@ -907,6 +918,13 @@ DebugTab:CreateToggle({
 })
 
 end -- buildDebugTab
+
+FarmTab:CreateToggle({
+   Name = "Anti AFK",
+   CurrentValue = true,
+   Flag = "AntiAfk",
+   Callback = function(Value) AntiAfk = Value end,
+})
 
 FarmTab:CreateToggle({
    Name = "Wait for battle end",
