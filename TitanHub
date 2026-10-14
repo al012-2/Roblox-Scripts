@@ -79,7 +79,16 @@ local BossHierarchy = {
    ["3"] = {"dreamer", "insect_eater", "thread_demon", "moon_reaper", "worthy_fighter", "thriller_king"},
    ["4"] = {"leopard_assassin", "mochi_man", "sand_warlord", "string_emperor", "red_dog", "dragon_emperor"},
    ["5"] = {"blood_brother", "blooming_wrath", "volcano_head", "deadbeat_dad", "kindness_spreader", "curse_tyrant"},
-   ["raid"] = {"cleanup_kaiju", "kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"}
+   ["raid"] = {"kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"}
+}
+
+-- أسماء العرض الحقيقية من autoBossClient (الـ id مختلف عن اسم الموديل في هذي الحالات)
+local BossDisplayName = {
+    kaiju_no_8 = "Cleanup Kaiju",
+    gen_narumi = "Gamer Captain",
+    mina_ashiro = "Artillery Captain",
+    soshiro_hoshina = "Blade Vice Captain",
+    kikoru_shinomiya = "Axe Prodigy",
 }
 
 local WorldAreaNames = {
@@ -240,6 +249,7 @@ local function findBossModel(bossName)
     if MissUntil[key] and os.clock() < MissUntil[key] then return nil end
 
     local want = norm(bossName)
+    local want2 = BossDisplayName[bossName] and norm(BossDisplayName[bossName]) or nil
     local found
 
     local searchRoots = { workspace:FindFirstChild("bossNpcs"), workspace:FindFirstChild("KaijuRaid") }
@@ -252,6 +262,7 @@ local function findBossModel(bossName)
                         local n = norm(m.Name)
                         if m:GetAttribute("bossId") == bossName
                             or n == want
+                            or (want2 and n == want2)
                             or (n ~= "" and want ~= "" and n:find(want, 1, true)) then
                             found = m
                             break
@@ -272,7 +283,7 @@ local function findBossModel(bossName)
         for _, obj in ipairs(workspace:GetDescendants()) do
             if obj:IsA("Model")
                 and not (npcsFolder and obj:IsDescendantOf(npcsFolder))
-                and norm(obj.Name) == want then
+                and (norm(obj.Name) == want or (want2 and norm(obj.Name) == want2)) then
                 found = obj
                 break
             end
@@ -625,6 +636,37 @@ DebugTab:CreateButton({
           end
       end
       Rayfield:Notify({ Title = "Debug", Content = "تمت الطباعة في Console (F9)", Duration = 3 })
+   end,
+})
+
+DebugTab:CreateSection("Auto Boss الأصلي (settingChange)")
+
+local spyOn = false
+DebugTab:CreateToggle({
+   Name = "سجّل settingChange / autoBossFight في F9",
+   CurrentValue = false,
+   Flag = "SpySettingChange",
+   Callback = function(Value)
+      spyOn = Value
+      if not Value then return end
+      if not (hookmetamethod and getnamecallmethod) then
+          Rayfield:Notify({ Title = "Spy", Content = "المنفّذ ما يدعم hookmetamethod", Duration = 4 })
+          return
+      end
+      if getgenv().TitanSpyHooked then return end
+      getgenv().TitanSpyHooked = true
+      local oldNc
+      oldNc = hookmetamethod(game, "__namecall", function(self, ...)
+          if spyOn and getnamecallmethod() == "FireServer"
+              and typeof(self) == "Instance" and self.Name == "settingChange" then
+              local args = {...}
+              local out = {}
+              for i, v in ipairs(args) do out[i] = tostring(v) .. "(" .. typeof(v) .. ")" end
+              print("[settingChange]", table.concat(out, " , "))
+          end
+          return oldNc(self, ...)
+      end)
+      Rayfield:Notify({ Title = "Spy", Content = "شغّل Auto Boss من واجهة اللعبة وشوف F9", Duration = 5 })
    end,
 })
 
