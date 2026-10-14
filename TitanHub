@@ -1603,6 +1603,125 @@ QuestTab:CreateToggle({
     end,
 })
 
+-- ==================== Raid Shop tab ====================
+do
+    local ShopItems = {
+        "Battle Potion I", "Battle Potion II", "Battle Potion III", "Battle Potion IV",
+        "Boss Potion",
+        "Luck Potion I", "Luck Potion II", "Luck Potion III", "Luck Potion IV",
+        "Raid Potion", "Skill Tree Reset",
+        "Speed Potion I", "Speed Potion II", "Speed Potion III", "Speed Potion IV",
+        "Weather Reroll",
+    }
+    local ShopSelected = {}
+    local autoShopToken = 0
+
+    local function getShopFrame()
+        local pgui = player:FindFirstChild("PlayerGui")
+        local npc = pgui and pgui:FindFirstChild("NpcInteraction")
+        return npc and npc:FindFirstChild("RaidShopFrame")
+    end
+
+    local function findCell(shop, itemName)
+        local want = "potions:" .. itemName
+        for _, d in ipairs(shop:GetDescendants()) do
+            if d.Name == want then return d end
+        end
+        return nil
+    end
+
+    local function findBuyButton(cell)
+        local fallback
+        for _, d in ipairs(cell:GetDescendants()) do
+            if d:IsA("TextButton") then
+                if tostring(d.Text):upper():find("BUY", 1, true) then return d end
+                fallback = fallback or d
+            elseif d:IsA("ImageButton") then
+                fallback = fallback or d
+            end
+        end
+        return fallback
+    end
+
+    local function readStock(cell)
+        for _, d in ipairs(cell:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local left = tostring(d.Text):match("(%d+)%s*/%s*%d+%s*[Ll][Ee][Ff][Tt]")
+                if left then return tonumber(left) end
+            end
+        end
+        return nil
+    end
+
+    local function buyItem(shop, itemName)
+        local cell = findCell(shop, itemName)
+        if not cell then return 0 end
+        local btn = findBuyButton(cell)
+        if not btn then return 0 end
+        local bought = 0
+        for _ = 1, 10 do
+            local before = readStock(cell)
+            if before ~= nil and before <= 0 then break end
+            if not pressButton(btn) then break end
+            task.wait(0.5)
+            local after = readStock(cell)
+            if before ~= nil and after ~= nil and after >= before then break end -- no stock change (not enough currency)
+            bought += 1
+            if before == nil then break end
+        end
+        return bought
+    end
+
+    local function buySelected(silent)
+        local shop = getShopFrame()
+        if not shop then
+            if not silent then Rayfield:Notify({ Title = "Raid Shop", Content = "RaidShopFrame not found", Duration = 4 }) end
+            return
+        end
+        local total = 0
+        for _, name in ipairs(ShopItems) do
+            if ShopSelected[name] then total += buyItem(shop, name) end
+        end
+        if not silent or total > 0 then
+            Rayfield:Notify({ Title = "Raid Shop", Content = "Bought " .. total .. " item(s)", Duration = 4 })
+        end
+    end
+
+    local ShopTab = Window:CreateTab("Raid Shop", 4483362458)
+
+    ShopTab:CreateSection("Items to buy")
+    ShopTab:CreateDropdown({
+        Name = "Select items",
+        Options = ShopItems,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "RaidShopItems",
+        Callback = function(list)
+            ShopSelected = {}
+            for _, n in ipairs(list) do ShopSelected[n] = true end
+        end,
+    })
+
+    ShopTab:CreateSection("Actions")
+    ShopTab:CreateButton({ Name = "Buy selected now", Callback = function() task.spawn(buySelected, false) end })
+    ShopTab:CreateToggle({
+        Name = "Auto Buy (checks every 30s)",
+        CurrentValue = false,
+        Flag = "RaidShopAutoBuy",
+        Callback = function(Value)
+            autoShopToken += 1
+            local myToken = autoShopToken
+            if not Value then return end
+            task.spawn(function()
+                while autoShopToken == myToken do
+                    pcall(buySelected, true)
+                    task.wait(30)
+                end
+            end)
+        end,
+    })
+end
+
 Rayfield:LoadConfiguration()
 
 Rayfield:Notify({ Title = "Titan Hub V35", Content = "Loaded (Raid Walk Mode + Smart Auto Rejoin)", Duration = 5 })
