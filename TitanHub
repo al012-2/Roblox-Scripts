@@ -1807,9 +1807,24 @@ do
         for _, n in ipairs(WeatherNames) do WeatherSet[norm(n)] = true end
     end
 
+    local function brief(v)
+        if type(v) == "table" then
+            local t, n = {}, 0
+            for k, x in pairs(v) do
+                n += 1
+                if n > 8 then break end
+                t[#t + 1] = tostring(k) .. "=" .. tostring(x)
+            end
+            return "{" .. table.concat(t, ", ") .. "}"
+        end
+        return tostring(v)
+    end
+
+    local LastWeatherArgs = "(none received yet)"
     local weatherRemote = Rep:FindFirstChild("weatherUpdate")
     if weatherRemote then
         table.insert(activeConnections, weatherRemote.OnClientEvent:Connect(function(a, b)
+            LastWeatherArgs = brief(a) .. " | " .. brief(b)
             local cand
             if type(a) == "string" then cand = a
             elseif type(a) == "table" then cand = a.weather or a.Weather or a.name or a.Name or a.type or a[1]
@@ -1820,6 +1835,26 @@ do
                 elseif WeatherSet[n] then ActiveServerWeather, ActiveServerWeatherAt = cand, os.clock() end
             elseif a == nil then
                 ActiveServerWeather = nil
+            end
+        end))
+    end
+
+    -- Server-side pity count: the server sends rollProgress with every roll result
+    local ServerProgress, ServerMax, ServerProgressAt, ServerRollInfo = nil, nil, 0, nil
+    local rollResultRemote = Rep:FindFirstChild("rollResult")
+    if rollResultRemote then
+        table.insert(activeConnections, rollResultRemote.OnClientEvent:Connect(function(...)
+            for i = 1, select("#", ...) do
+                local v = select(i, ...)
+                if type(v) == "table" and type(v.rollProgress) == "number" then
+                    ServerProgress, ServerProgressAt, ServerRollInfo = v.rollProgress, os.clock(), v
+                    for k, x in pairs(v) do
+                        local kl = tostring(k):lower()
+                        if type(x) == "number" and kl:find("max") and (kl:find("progress") or kl:find("pity")) then
+                            ServerMax = x
+                        end
+                    end
+                end
             end
         end))
     end
@@ -1897,13 +1932,23 @@ do
         return best
     end
 
-    -- returns cur, max, approx(bool)
+    -- returns cur, max, approx(bool). Server value (rollResult) first, screen only as a fallback.
     local function readProgress()
+        local tcur, tmax
         local lbl = getProgressLabel()
-        if lbl and isShown(lbl) then
-            local cur, max = parseProgressText(lbl.Text)
-            if cur then lastMax = max return cur, max, false end
+        if lbl and isShown(lbl) then tcur, tmax = parseProgressText(lbl.Text) end
+
+        if ServerProgress ~= nil then
+            -- safety net: if the screen clearly disagrees and no roll arrived for a while, trust the screen
+            if tcur and math.abs(tcur - ServerProgress) > 100 and os.clock() - ServerProgressAt > 3 then
+                ServerProgress, ServerProgressAt = tcur, os.clock()
+            end
+            if ServerMax then lastMax = ServerMax end
+            return ServerProgress, ServerMax or lastMax, false
         end
+
+        if tcur then lastMax = tmax return tcur, tmax, false end
+
         local fill = findFill()
         if fill then
             local pw = fill.Parent.AbsoluteSize.X
@@ -1953,6 +1998,7 @@ do
 
     local function runPity(token)
         local missingSince, notifiedFull, spendRolls, spending, lastCur, nearSince = nil, false, 0, false, nil, nil
+        local lastApprox, spentAt = false, 0
 
         while pityToken == token do
             local cur, max, approx = readProgress()
@@ -1977,16 +2023,18 @@ do
                 end
                 local w = currentWeather()
 
-                if not full and not spending and lastCur and lastCur > max * 0.5 and cur < lastCur * 0.5 then
+                -- only trust exact text readings (the fill bar animates), and ignore the seconds right after a spend
+                if not full and not spending and not approx and not lastApprox and os.clock() - spentAt > 8
+                    and lastCur and lastCur > max * 0.5 and cur < lastCur * 0.5 then
                     Rayfield:Notify({ Title = "Pity Roll", Content = "Bar reset without holding at full - the x10,000 may have fired during filling. Tell Claude.", Duration = 8 })
                 end
-                lastCur = cur
+                lastCur, lastApprox = cur, approx
 
                 if waitExact then
                     task.wait(0.25)
                 elseif not full then
                     if spending then
-                        spending, spendRolls = false, 0
+                        spending, spendRolls, spentAt = false, 0, os.clock()
                         Rayfield:Notify({ Title = "Pity Roll", Content = "Pity used! Filling it again...", Duration = 4 })
                     end
                     notifiedFull = false
@@ -2110,6 +2158,92 @@ do
     })
 
     PityTab:CreateButton({
+        Name = "Find pity data source (does 6 rolls)",
+        Callback = function()
+            task.spawn(function()
+                local function snap()
+                    local t = {}
+                    local function add(path, v)
+                        local n = tonumber(v)
+                        if not n and type(v) == "string" then n = parseAmount(v) end
+                        if n then t[path] = n end
+                    end
+                    local function scan(o, label)
+                        for k, v in pairs(o:GetAttributes()) do add(label .. "@" .. k, v) end
+                    end
+                    scan(player, "player")
+                    scan(Rep, "Rep")
+                    scan(workspace, "workspace")
+                    for _, root in ipairs({ player, Rep }) do
+                        for _, d in ipairs(root:GetDescendants()) do
+                            if d:IsA("ValueBase") then add(d:GetFullName(), d.Value) end
+                            scan(d, d:GetFullName())
+                        end
+                    end
+                    return t
+                end
+
+                local function show(...)
+                    local parts = {}
+                    for i = 1, select("#", ...) do
+                        local v = select(i, ...)
+                        if type(v) == "table" then
+                            local items, n = {}, 0
+                            for k, x in pairs(v) do
+                                n += 1
+                                if n > 6 then items[#items + 1] = "..." break end
+                                items[#items + 1] = tostring(k) .. "=" .. tostring(x)
+                            end
+                            parts[#parts + 1] = "{" .. table.concat(items, ", ") .. "}"
+                        else
+                            parts[#parts + 1] = tostring(v)
+                        end
+                    end
+                    return table.concat(parts, " | "):sub(1, 200)
+                end
+
+                local before = readProgress()
+                local a = snap()
+                local log, conns = {}, {}
+                for _, d in ipairs(Rep:GetDescendants()) do
+                    if d:IsA("RemoteEvent") then
+                        table.insert(conns, d.OnClientEvent:Connect(function(...)
+                            log[#log + 1] = d.Name .. ": " .. show(...)
+                        end))
+                    end
+                end
+
+                for _ = 1, 6 do doRoll() task.wait(0.4) end
+                task.wait(1.2)
+
+                for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+                local b = snap()
+                local after = readProgress()
+
+                local out = { "bar before/after (screen): " .. tostring(before) .. " -> " .. tostring(after), "", "=== numbers that INCREASED in data ===" }
+                for path, nb in pairs(b) do
+                    local na = a[path]
+                    if na and nb > na then out[#out + 1] = path .. ": " .. na .. " -> " .. nb end
+                end
+                out[#out + 1] = ""
+                out[#out + 1] = "=== RemoteEvents received from the server while rolling ==="
+                local seen = 0
+                for _, l in ipairs(log) do
+                    seen += 1
+                    if seen > 60 then break end
+                    out[#out + 1] = l
+                end
+
+                local text = table.concat(out, "\n")
+                local copy = setclipboard or toclipboard
+                if copy then pcall(copy, text) end
+                print(text)
+                Rayfield:Notify({ Title = "Pity Roll", Content = "Done. Copied to clipboard - paste it in the chat.", Duration = 6 })
+            end)
+        end,
+    })
+
+    PityTab:CreateButton({
         Name = "Show detected bar + weather",
         Callback = function()
             progLabel, weatherLabel, rollBtn, fillObj = nil, nil, nil, nil
@@ -2129,9 +2263,14 @@ do
             local w = currentWeather()
             print("[Pity] bar:", cur, "/", max, approx and "(from fill)" or "(from text)")
             print("[Pity] weather:", w, "| matches:", weatherMatches(w))
+            print("[Pity] server rollProgress:", ServerProgress, "| server max:", ServerMax)
+            if ServerRollInfo then
+                for k, v in pairs(ServerRollInfo) do print("[Pity] rollResult." .. tostring(k), "=", brief(v)) end
+            end
+            print("[Pity] last weatherUpdate args:", LastWeatherArgs)
             Rayfield:Notify({
                 Title = "Pity Roll",
-                Content = "Bar: " .. tostring(cur and math.floor(cur)) .. "/" .. tostring(max) .. (approx and " (fill)" or "") .. " | Weather: " .. tostring(w),
+                Content = "Bar: " .. tostring(cur and math.floor(cur)) .. "/" .. tostring(max) .. (approx and " (fill)" or "") .. (ServerProgress and " [server]" or " [screen]") .. " | Weather: " .. tostring(w),
                 Duration = 6,
             })
         end,
