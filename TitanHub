@@ -1,5 +1,13 @@
 -- ==================== Roll Goal + Weather Wait tab (fixed) ====================
 do
+    -- لو شغّلته لحاله (بدون Titan Hub) ننشئ Rayfield و Window بنفسنا
+    local Rayfield = Rayfield or loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+    local Window = Window or Rayfield:CreateWindow({
+        Name = "Roll Goal",
+        LoadingTitle = "Roll Goal",
+        ConfigurationSaving = { Enabled = false },
+    })
+
     -- احتياطات: لو المتغيرات هذي مو معرّفة قبل البلوك ما يطيح السكربت
     local Rep = Rep or game:GetService("ReplicatedStorage")
     local player = player or game:GetService("Players").LocalPlayer
