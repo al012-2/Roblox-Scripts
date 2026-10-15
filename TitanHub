@@ -1731,6 +1731,26 @@ do
         return nil
     end
 
+    -- green fill of the pity bar: search the whole roll area, not only the button
+    local fillObj
+    local function findFill()
+        if fillObj and fillObj.Parent and fillObj.Parent:IsA("GuiObject") then return fillObj end
+        fillObj = nil
+        local main = getMain()
+        local ok, area = pcall(function() return main.Bottom.rollButtons end)
+        if not (ok and area) then return nil end
+        local best
+        for _, d in ipairs(area:GetDescendants()) do
+            if d:IsA("GuiObject") and d.Parent and d.Parent:IsA("GuiObject") then
+                local n = d.Name:lower()
+                if n == "progressfill" then best = d break end
+                if not best and n:find("fill") then best = d end
+            end
+        end
+        fillObj = best
+        return best
+    end
+
     -- returns cur, max, approx(bool)
     local function readProgress()
         local lbl = getProgressLabel()
@@ -1738,15 +1758,11 @@ do
             local cur, max = parseProgressText(lbl.Text)
             if cur then lastMax = max return cur, max, false end
         end
-        local btn = findRollButton()
-        if btn then
-            for _, d in ipairs(btn:GetDescendants()) do
-                if d.Name == "progressFill" and d:IsA("GuiObject") and d.Parent and d.Parent:IsA("GuiObject") then
-                    local pw = d.Parent.AbsoluteSize.X
-                    if pw > 0 then
-                        return math.clamp(d.AbsoluteSize.X / pw, 0, 1) * lastMax, lastMax, true
-                    end
-                end
+        local fill = findFill()
+        if fill then
+            local pw = fill.Parent.AbsoluteSize.X
+            if pw > 0 then
+                return math.clamp(fill.AbsoluteSize.X / pw, 0, 1) * lastMax, lastMax, true
             end
         end
         return nil, nil, false
@@ -1790,7 +1806,7 @@ do
     end
 
     local function runPity(token)
-        local missingSince, notifiedFull, spendRolls, spending = nil, false, 0, false
+        local missingSince, notifiedFull, spendRolls, spending, lastCur = nil, false, 0, false, nil
 
         while pityToken == token do
             local cur, max, approx = readProgress()
@@ -1805,6 +1821,11 @@ do
                 missingSince = nil
                 local full = approx and cur >= max * 0.99 or cur >= max
                 local w = currentWeather()
+
+                if not full and not spending and lastCur and lastCur > max * 0.5 and cur < lastCur * 0.5 then
+                    Rayfield:Notify({ Title = "Pity Roll", Content = "Bar reset without holding at full - the x10,000 may have fired during filling. Tell Claude.", Duration = 8 })
+                end
+                lastCur = cur
 
                 if not full then
                     if spending then
@@ -1882,9 +1903,71 @@ do
     PityTab:CreateSection("Debug")
 
     PityTab:CreateButton({
+        Name = "Copy pity info (paste it to Claude)",
+        Callback = function()
+            local out = {}
+            local function line(d, depth)
+                local extra = {}
+                if d:IsA("TextLabel") or d:IsA("TextButton") then extra[#extra + 1] = "Text=" .. string.format("%q", d.Text) end
+                if d:IsA("ValueBase") then extra[#extra + 1] = "Value=" .. tostring(d.Value) end
+                if d:IsA("GuiObject") then extra[#extra + 1] = "Visible=" .. tostring(d.Visible) end
+                local ok, attrs = pcall(function() return d:GetAttributes() end)
+                if ok and attrs then for k, v in pairs(attrs) do extra[#extra + 1] = k .. "=" .. tostring(v) end end
+                out[#out + 1] = string.rep("  ", depth) .. "[" .. d.ClassName .. "] " .. d.Name .. (#extra > 0 and ("  -> " .. table.concat(extra, " | ")) or "")
+            end
+            local function walk(o, depth, maxd)
+                if depth > maxd or #out > 400 then return end
+                if not (o:IsA("UIStroke") or o:IsA("UICorner") or o:IsA("UIGradient") or o:IsA("UIListLayout") or o:IsA("UIPadding") or o:IsA("UIAspectRatioConstraint")) then
+                    line(o, depth)
+                end
+                for _, c in ipairs(o:GetChildren()) do walk(c, depth + 1, maxd) end
+            end
+
+            local pgui = player:FindFirstChild("PlayerGui")
+            out[#out + 1] = "=== nodes named *pity* (PlayerGui + ReplicatedStorage) ==="
+            for _, root in ipairs({ pgui, Rep }) do
+                if root then
+                    for _, d in ipairs(root:GetDescendants()) do
+                        if d.Name:lower():find("pity") then
+                            out[#out + 1] = "## " .. d:GetFullName()
+                            walk(d, 1, 4)
+                        end
+                    end
+                end
+            end
+            out[#out + 1] = "=== player attributes / leaderstats ==="
+            for k, v in pairs(player:GetAttributes()) do out[#out + 1] = k .. "=" .. tostring(v) end
+            out[#out + 1] = "=== ReplicatedStorage attributes ==="
+            for k, v in pairs(Rep:GetAttributes()) do
+                local sv = tostring(v)
+                out[#out + 1] = k .. "=" .. sv:sub(1, 120)
+            end
+
+            local text = table.concat(out, "\n")
+            local copy = setclipboard or toclipboard
+            if copy then pcall(copy, text) end
+            if writefile then pcall(writefile, "PityInfo.txt", text) end
+            print(text)
+            Rayfield:Notify({ Title = "Pity Roll", Content = "Copied " .. #out .. " lines. Paste it in the chat.", Duration = 6 })
+        end,
+    })
+
+    PityTab:CreateButton({
         Name = "Show detected bar + weather",
         Callback = function()
-            progLabel, weatherLabel, rollBtn = nil, nil, nil
+            progLabel, weatherLabel, rollBtn, fillObj = nil, nil, nil, nil
+            do
+                local main = getMain()
+                local ok, area = pcall(function() return main.Bottom.rollButtons end)
+                if ok and area then
+                    for _, d in ipairs(area:GetDescendants()) do
+                        if not (d:IsA("UIStroke") or d:IsA("UICorner")) then
+                            print("[Pity] tree:", d:GetFullName():gsub("^.-rollButtons", "rollButtons"), d.ClassName,
+                                (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text or "")
+                        end
+                    end
+                end
+            end
             local cur, max, approx = readProgress()
             local w = currentWeather()
             print("[Pity] bar:", cur, "/", max, approx and "(from fill)" or "(from text)")
