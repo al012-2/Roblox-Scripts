@@ -15,14 +15,12 @@ local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
 local LOptions, LToggles = Library.Options, Library.Toggles
 
 local Rayfield = {}
+Rayfield.Loading = false
 local LWindow
 local uiCounter = 0
 
-local ignoreIdx = {
-    "MenuKeybind", "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3",
-    "SmartFarm4", "SmartFarm5", "RaidAutoFarm", "AutoInfTowerMulti", "AutoClaimQuests",
-    "FastBattle", "SpySettingChange",
-}
+-- only the menu keybind is excluded now: farm / roll / pity toggles are saved in the config
+local ignoreIdx = { "MenuKeybind", "SpySettingChange" }
 
 local function nextIdx(flag)
     if flag then return flag end
@@ -184,12 +182,52 @@ function Rayfield:LoadConfiguration()
     SaveManager:SetFolder("TitanRNG_Smart")
     SaveManager:BuildConfigSection(settings)
     ThemeManager:ApplyToTab(settings)
+
+    -- ===== Auto Save =====
+    local auto = settings:AddRightGroupbox("Auto Save")
+    auto:AddToggle("AutoSaveCfg", { Text = "Auto save config (every 5s)", Default = true })
+    auto:AddLabel("Saves farm / roll / pity state, so it resumes after a server change.", true)
+
+    local myTok = (getgenv().TitanSaveTok or 0) + 1
+    getgenv().TitanSaveTok = myTok
+
+    local function currentCfgName()
+        local n
+        pcall(function()
+            local p = "TitanRNG_Smart/settings/autoload.txt"
+            if isfile(p) then n = readfile(p) end
+        end)
+        if type(n) ~= "string" then return nil end
+        n = n:gsub("^%s+", ""):gsub("%s+$", "")
+        return n ~= "" and n or nil
+    end
+
+    task.spawn(function()
+        task.wait(8) -- let the autoload finish first, so defaults never overwrite the saved config
+        while getgenv().TitanSaveTok == myTok do
+            local t = LToggles.AutoSaveCfg
+            if t and t.Value and not Rayfield.Loading then
+                local name = currentCfgName()
+                if not name then
+                    name = "AutoSave"
+                    pcall(function() SaveManager:Save(name) end)
+                    pcall(function() SaveManager:SaveAutoloadConfig(name) end)
+                end
+                pcall(function() SaveManager:Save(name) end)
+            end
+            task.wait(5)
+        end
+    end)
+
+    -- ===== Load the autoload config =====
+    Rayfield.Loading = true
     pcall(function() SaveManager:LoadAutoloadConfig() end)
+    task.delay(2.5, function() Rayfield.Loading = false end)
 end
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V38 (Raid Remote Fix + Auto Rejoin + Pity Roll + Secret Bosses)",
-   LoadingTitle = "Loading system...",
+   Name = "Titan RNG Hub",
+   LoadingTitle = "Loading...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
 
@@ -247,6 +285,7 @@ getgenv().TitanLoaded = function()
     fastBattleToken += 1
     autoClaimToken += 1
     autoTowerToken += 1
+    getgenv().TitanSaveTok = (getgenv().TitanSaveTok or 0) + 1
     DisableBattleAnimation = false
     for _, conn in ipairs(activeConnections) do
         pcall(function() conn:Disconnect() end)
@@ -430,14 +469,11 @@ local function fireButton(btn)
 end
 
 -- find the world's button inside the game's Teleport menu and press it (FALLBACK only)
--- layout: teleportFrame.CollectionFrame.(scrollFrame | raidScrollFrame).tpContainer.tpFrame
---         each tpFrame has nameLabel ("Kaiju Raid") and buttonFrame.teleportButton ("Teleport")
 local function pressTeleportMenuButton(keyword, tabName)
     local pgui = player:FindFirstChild("PlayerGui")
     local ok, frame = pcall(function() return pgui.Inventory.InventoryFrame.teleportFrame end)
     if not (ok and frame) then return false end
 
-    -- switch to the right tab first (Areas / Raids) and give the menu time to build
     if tabName then
         local tabFrame = frame:FindFirstChild("tabFrame")
         local tab = tabFrame and tabFrame:FindFirstChild(tabName)
@@ -447,7 +483,6 @@ local function pressTeleportMenuButton(keyword, tabName)
         end
     end
 
-    -- search only inside the raid list when on the raids tab
     local collection = frame:FindFirstChild("CollectionFrame")
     local scope = (tabName == "raidsTab" and collection and collection:FindFirstChild("raidScrollFrame")) or frame
 
@@ -492,13 +527,12 @@ local function forceTeleportToWorld(worldKey)
         -- 1) the real arguments captured with the Spy (direct remote call, no GUI needed)
         if teleportAreaRemote then
             for _, args in ipairs({
-                { "Kaiju Raid", nil },   -- captured from the real Teleport button
-                { "raid", "kaiju" },     -- second captured variant
+                { "Kaiju Raid", nil },
+                { "raid", "kaiju" },
             }) do
                 pcall(function() teleportAreaRemote:FireServer(args[1], args[2]) end)
                 if arrived(6) then return end
 
-                -- the map may use a different folder name: if we moved far from the start, count it
                 local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
                 if r and (r.Position - startPos).Magnitude > 150 then
                     task.wait(1.5)
@@ -745,12 +779,10 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
     local destination = getSafeSpotNearBoss(targetPosition, attempt, bossModel)
     local distToTarget = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(destination.X, 0, destination.Z)).Magnitude
 
-    -- Already close to the boss, no need to walk
     if distToTarget <= 7 then
         return true
     end
 
-    -- Try computing a safe path with PathfindingService to avoid walls and obstacles
     local path = PathfindingService:CreatePath({
         AgentRadius = 2,
         AgentHeight = 5,
@@ -780,7 +812,6 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
             end
         end
     else
-        -- If the path is open, walk directly with MoveTo
         local walkStart = os.clock()
         local lastPos = root.Position
         local lastCheck = os.clock()
@@ -791,7 +822,6 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
             if horizDist <= 6.5 then
                 break
             end
-            -- Auto-jump if the character gets stuck on a small obstacle while walking
             if os.clock() - lastCheck > 1.2 then
                 if (root.Position - lastPos).Magnitude < 1.5 then
                     hum.Jump = true
@@ -900,6 +930,8 @@ local function startMode(mode, loopFn)
 
     local function alive() return FarmToken == myToken and ActiveMode == mode end
     task.spawn(function()
+        -- wait until the config finished loading (so difficulty / boss picks are applied first)
+        while alive() and Rayfield.Loading do task.wait(0.3) end
         -- do not start farming until the map is loaded
         local t0 = os.clock()
         while alive() and not (workspace:FindFirstChild("bossNpcs") or workspace:FindFirstChild("KaijuRaid")) and os.clock() - t0 < 120 do
@@ -933,7 +965,7 @@ end
 
 -- ==================== Hide battle UIs ====================
 local HideKeywords = {"cutscene"}
-local HideExclude = {"pass", "rayfield", "leaderboard"}
+local HideExclude = {"pass", "leaderboard"}
 local hiddenGuis = {}
 
 local function shouldHideGui(gui)
@@ -1081,6 +1113,11 @@ local function queueReload()
     end
 end
 
+-- re-run the script after ANY teleport / server change (not only auto rejoin)
+table.insert(activeConnections, player.OnTeleport:Connect(function()
+    queueReload()
+end))
+
 local function executeRejoin()
     rejoinAttempt += 1
     queueReload()
@@ -1146,6 +1183,56 @@ do
     stroke.Color = Color3.fromRGB(0, 140, 255)
     stroke.Thickness = 2
 
+    -- ===== OFF button: green = running, red = everything stopped =====
+    local GREEN, RED = Color3.fromRGB(40, 170, 70), Color3.fromRGB(200, 45, 45)
+    local offBtn = Instance.new("TextButton")
+    offBtn.Size = UDim2.fromOffset(46, 46)
+    offBtn.Position = btn.Position + UDim2.fromOffset(52, 0)
+    offBtn.BackgroundColor3 = GREEN
+    offBtn.BackgroundTransparency = 0.1
+    offBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    offBtn.Font = Enum.Font.GothamBold
+    offBtn.TextSize = 14
+    offBtn.Text = "OFF"
+    offBtn.AutoButtonColor = true
+    offBtn.Parent = gui
+    Instance.new("UICorner", offBtn).CornerRadius = UDim.new(1, 0)
+
+    local scriptStopped = false
+    local StopFlags = {
+        "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
+        "SmartFarm5", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
+        "AutoClaimQuests", "FastBattle",
+    }
+
+    local function stopEverything()
+        -- farm loops
+        stopAllFarming()
+        -- background loops (tower / quests / fast battle)
+        autoTowerToken += 1
+        autoClaimToken += 1
+        fastBattleToken += 1
+        DisableBattleAnimation = false
+        -- flip every related toggle off (this also stops pity roll and saves the OFF state)
+        for _, flag in ipairs(StopFlags) do
+            local t = LToggles[flag]
+            if t then pcall(function() t:SetValue(false) end) end
+        end
+        pcall(restoreBattleGuis)
+    end
+
+    table.insert(activeConnections, offBtn.MouseButton1Click:Connect(function()
+        scriptStopped = not scriptStopped
+        if scriptStopped then
+            offBtn.BackgroundColor3 = RED
+            stopEverything()
+            Rayfield:Notify({ Title = "Titan Hub", Content = "Everything stopped. Press again to re-arm.", Duration = 4 })
+        else
+            offBtn.BackgroundColor3 = GREEN
+            Rayfield:Notify({ Title = "Titan Hub", Content = "Re-armed. Turn on what you want.", Duration = 3 })
+        end
+    end))
+
     local parent
     if gethui then
         local ok, h = pcall(gethui)
@@ -1171,6 +1258,7 @@ do
             if d.Magnitude > 6 then moved = true end
             if moved then
                 btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+                offBtn.Position = btn.Position + UDim2.fromOffset(52, 0)
             end
         end
     end))
@@ -1206,7 +1294,6 @@ do
                 if not lastPos or (root.Position - lastPos).Magnitude > 1.5 then
                     lastPos, lastMove = root.Position, os.clock()
                 elseif os.clock() - lastMove > 2.5 and os.clock() - lastJump > 1.5 then
-                    -- standing still while a farm mode is running: jump to get unstuck
                     lastJump = os.clock()
                     pcall(function()
                         hum:ChangeState(Enum.HumanoidStateType.Jumping)
@@ -1460,7 +1547,6 @@ local function runKaijuRaidFarm()
     startMode("raid_farm", function(alive)
         while alive() do
             local didAny = false
-            -- (re)travel to the raid whenever we are not there (lobby, died, kicked out)
             if not nearWorldBosses("raid") then
                 forceTeleportToWorld("raid")
                 if not nearWorldBosses("raid") then
@@ -1661,7 +1747,8 @@ local function customFarmWorldOnce(worldKey, alive)
 end
 
 local function runCustomBossFarm()
-    if not hasSelectedBosses() then
+    -- while the config is still loading, the boss picks may not be applied yet
+    if not Rayfield.Loading and not hasSelectedBosses() then
         Rayfield:Notify({ Title = "Custom AutoBoss", Content = "Pick at least one boss difficulty first", Duration = 4 })
         if ModeToggles["custom"] then
             pcall(function() ModeToggles["custom"]:Set(false) end)
@@ -1870,8 +1957,6 @@ QuestTab:CreateToggle({
 
 -- ==================== Secret Bosses ====================
 do
-    table.insert(ignoreIdx, "SecretAutoBoss")
-
     local SecretSelected, SecretDiffs = {}, { Normal = true }
     local SecretNames, SecretIdOf = {}, {}
 
@@ -1895,7 +1980,6 @@ do
         end
     end
 
-    -- known ones first (in case the folder is not streamed in yet), then whatever is really there
     for _, n in ipairs({ "Crimson Phantom", "The Needle Hunter" }) do
         addSecret(n, (n:lower():gsub("%s+", "_")))
     end
@@ -1905,7 +1989,8 @@ do
     local function runSecret()
         local any = false
         for _, v in pairs(SecretSelected) do if v then any = true end end
-        if not any then
+        -- while the config is still loading, the picks may not be applied yet
+        if not any and not Rayfield.Loading then
             Rayfield:Notify({ Title = "Secret Bosses", Content = "Pick at least one secret boss first", Duration = 4 })
             if ModeToggles["secret"] then pcall(function() ModeToggles["secret"]:Set(false) end) end
             return
@@ -1974,10 +2059,8 @@ do
     })
 end
 
--- ==================== Pity Roll (reads WeatherPity_mythic attribute) ====================
+-- ==================== Pity Roll ====================
 do
-    table.insert(ignoreIdx, "RollPityStart")
-
     local MaxPity = 10000
     local ServerWeatherTimeout = 900
     local MaxSpendRolls = 25
@@ -2034,7 +2117,6 @@ do
         end
     end
 
-    -- values the server sends with every roll (rollResult, 3rd argument)
     local ServerProgress, ServerReady, ServerInterval = nil, false, 0.2
 
     local function parseAmount(s)
@@ -2049,14 +2131,11 @@ do
             for i = 1, select("#", ...) do
                 local v = select(i, ...)
                 if type(v) == "table" and type(v.rollProgress) == "number" then
-                    -- the game shows rollProgress % maxTierThreshold on the bar
                     local maxT = (type(v.maxTierThreshold) == "number" and v.maxTierThreshold > 0) and v.maxTierThreshold or MaxPity
                     ServerProgress = v.rollProgress % maxT
-                    -- pity ready = the bar label turns into the tier label ("100,000x Luck")
                     local lbl = type(v.activeTier) == "table" and tostring(v.activeTier.label or "") or ""
                     local mult = parseAmount(lbl:match("^%s*([%d%.,]+%s*[KkMmBb]?)%s*[xX]"))
                     ServerReady = mult ~= nil and mult >= 10000
-                    -- the game's own roll interval
                     if type(v.baseCooldown) == "number" and type(v.rollSpeed) == "number" and v.rollSpeed > 0 then
                         ServerInterval = math.max(v.baseCooldown / v.rollSpeed, 0.125)
                     end
@@ -2064,7 +2143,6 @@ do
             end
     end)
 
-    -- bar text like "8,787/10,000" (or "8.78K/10K" with Short Numbers on)
     local progLabel
     local function readBarText()
         if not (progLabel and progLabel.Parent) then
@@ -2077,7 +2155,6 @@ do
             end
         end
         if not progLabel then return nil end
-        -- when the pity is ready the label turns into "100,000x Luck"
         local txt = tostring(progLabel.Text)
         local mult = parseAmount(txt:match("^%s*([%d%.,]+%s*[KkMmBb]?)%s*[xX]"))
         if mult and mult >= 10000 then return MaxPity - 1 end
@@ -2087,7 +2164,6 @@ do
         return nil
     end
 
-    -- bar text first (exact, current), then the server value from the last roll
     local function getPity()
         local t = readBarText()
         if t then return t end
@@ -2107,7 +2183,7 @@ do
     end
 
     local function weatherMatches(w)
-        if next(PityWeathers) == nil then return true end   -- nothing selected = spend as soon as it's full
+        if next(PityWeathers) == nil then return true end
         if not w then return false end
         return PityWeathers[norm(w)] == true
     end
@@ -2118,21 +2194,24 @@ do
     end
 
     local function runPity(token)
+        -- wait for the config to finish loading (weather picks must be applied before spending pity)
+        while pityToken == token and Rayfield.Loading do task.wait(0.3) end
+
         local notifiedFull, spending, spendRolls, missingSince = false, false, 0, nil
 
         while pityToken == token do
             local cur = getPity()
             if cur == nil then
                 missingSince = missingSince or os.clock()
-                if os.clock() - missingSince > 8 then
+                -- after a server change the roll UI can take a while to appear
+                if os.clock() - missingSince > 30 then
                     stopPity("Pity bar value not found")
                     return
                 end
-                doRoll() -- a roll makes the server send rollProgress
+                doRoll()
                 task.wait(0.4)
             else
                 missingSince = nil
-                -- the pity is ready at 9999/10000: the NEXT roll is the boosted one
                 local full = cur >= MaxPity - 1
                 local w = currentWeather()
 
@@ -2223,4 +2302,7 @@ end
 
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V38", Content = "Loaded (Raid Remote Fix + Auto Rejoin + Pity Roll + Secret Bosses)", Duration = 5 })
+-- queue the script for the next server change right away (needs the Raw Script URL from the config)
+task.delay(3, queueReload)
+
+Rayfield:Notify({ Title = "Titan Hub", Content = "Loaded", Duration = 3 })
