@@ -1205,31 +1205,44 @@ do
         "AutoClaimQuests", "FastBattle",
     }
 
-    local function stopEverything()
-        -- farm loops
-        stopAllFarming()
-        -- background loops (tower / quests / fast battle)
+    -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
+    -- but the toggles themselves (and the saved config) are NOT touched.
+    local function runCallbacks(value)
+        for _, flag in ipairs(StopFlags) do
+            local t = LToggles[flag]
+            if t and t.Value and type(t.Callback) == "function" then
+                pcall(t.Callback, value)
+            end
+        end
+    end
+
+    local function pauseEverything()
+        runCallbacks(false)
+        -- make sure nothing keeps running even if a callback did not cover it
+        ActiveMode = nil
+        ActiveWorldKey = nil
+        FarmToken += 1
         autoTowerToken += 1
         autoClaimToken += 1
         fastBattleToken += 1
         DisableBattleAnimation = false
-        -- flip every related toggle off (this also stops pity roll and saves the OFF state)
-        for _, flag in ipairs(StopFlags) do
-            local t = LToggles[flag]
-            if t then pcall(function() t:SetValue(false) end) end
-        end
         pcall(restoreBattleGuis)
+    end
+
+    local function resumeEverything()
+        runCallbacks(true)
     end
 
     table.insert(activeConnections, offBtn.MouseButton1Click:Connect(function()
         scriptStopped = not scriptStopped
         if scriptStopped then
             offBtn.BackgroundColor3 = RED
-            stopEverything()
-            Rayfield:Notify({ Title = "Titan Hub", Content = "Everything stopped. Press again to re-arm.", Duration = 4 })
+            pauseEverything()
+            Rayfield:Notify({ Title = "Titan Hub", Content = "Paused. Your toggles and config are untouched.", Duration = 3 })
         else
             offBtn.BackgroundColor3 = GREEN
-            Rayfield:Notify({ Title = "Titan Hub", Content = "Re-armed. Turn on what you want.", Duration = 3 })
+            resumeEverything()
+            Rayfield:Notify({ Title = "Titan Hub", Content = "Resumed with your current toggles.", Duration = 3 })
         end
     end))
 
