@@ -339,7 +339,14 @@ local RemoteSlots = {
 for name, assign in pairs(RemoteSlots) do
     task.spawn(function()
         local obj = Rep:WaitForChild(name, 180)
-        if obj then assign(obj) else warn("[Titan Hub] missing remote: " .. name) end
+        if obj then
+            assign(obj)
+        else
+            warn("[Titan Hub] missing remote: " .. name)
+            pcall(function()
+                Rayfield:Notify({ Title = "Missing remote", Content = name, Duration = 6 })
+            end)
+        end
     end)
 end
 
@@ -493,6 +500,12 @@ local function fireButton(btn)
         return true
     end
     return false
+end
+
+-- single implementation: pressButton just adds the nil check
+local function pressButton(btn)
+    if not btn then return false end
+    return fireButton(btn)
 end
 
 -- find the world's button inside the game's Teleport menu and press it (FALLBACK only)
@@ -1021,26 +1034,6 @@ local function shouldHideGui(gui)
     return false
 end
 
-local function pressButton(btn)
-    if not btn then return false end
-    if getconnections then
-        for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
-            local ok, conns = pcall(getconnections, sig)
-            if ok and conns and #conns > 0 then
-                for _, c in ipairs(conns) do
-                    pcall(function() c:Fire() end)
-                end
-                return true
-            end
-        end
-    end
-    if firesignal then
-        pcall(function() firesignal(btn.MouseButton1Click) end)
-        return true
-    end
-    return false
-end
-
 local function getBattleParts()
     local pgui = player:FindFirstChild("PlayerGui")
     local ui = pgui and pgui:FindFirstChild("BattleUI")
@@ -1150,7 +1143,8 @@ local function queueReload()
     local qot = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if qot then
         qotQueued = true
-        pcall(qot, 'loadstring(game:HttpGet("' .. ScriptLoadURL .. '"))()')
+        -- %q escapes quotes / backslashes so the URL can never break out of the string
+        pcall(qot, ("loadstring(game:HttpGet(%q))()"):format(ScriptLoadURL))
     end
 end
 
@@ -1199,9 +1193,12 @@ table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function(
     rejoining = true
     rejoinAttempt = 0
     task.spawn(function()
-        while AutoReconnectEnabled and rejoining do
+        -- capped retries with a growing delay (no endless teleport spam)
+        local tries = 0
+        while AutoReconnectEnabled and rejoining and tries < 10 do
+            tries += 1
             executeRejoin()
-            task.wait(8)
+            task.wait(math.min(8 + tries * 4, 40))
         end
         rejoining = false
     end)
@@ -1488,7 +1485,8 @@ local function attemptBoss(boss, diff, alive, worldKey, useWalk)
 
     local function stillGoing() return alive() and isCharAlive() end
 
-    local fired = hitAndRunBoss(boss, diff, stillGoing, true, useWalk)
+    -- FIX: the "Wait for battle end" option is now passed through (was hard-coded to true)
+    local fired = hitAndRunBoss(boss, diff, stillGoing, WaitForBattle, useWalk)
     if not alive() then return false end
 
     if not fired then
@@ -2566,7 +2564,7 @@ end
         end,
     })
 
-    -- ===== NEW: end the tower when a chosen weather appears =====
+    -- ===== end the tower when a chosen weather appears =====
     TowerTab:CreateSection("End the tower on weather")
 
     local EndWeathers = { arcane = true, awakened = true }
@@ -2659,7 +2657,9 @@ end
             if not Value then return end
             task.spawn(function()
                 while autoTowerToken == towerToken do
-                    if runInfTowerRemote and not ActiveMode then
+                    -- FIX: removed "and not ActiveMode" so the tower runs together with a farm mode
+                    -- (the game allows 2 battles at once: 1 farm + 1 tower)
+                    if runInfTowerRemote then
                         pcall(function() runInfTowerRemote:FireServer() end)
                     end
                     task.wait(15)
