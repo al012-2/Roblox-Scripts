@@ -184,7 +184,7 @@ function Rayfield:LoadConfiguration()
 end
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V37 (Raid Walk + Auto Rejoin + Pity Roll + Secret Bosses)",
+   Name = "Titan RNG - Hub V38 (Raid Remote Fix + Auto Rejoin + Pity Roll + Secret Bosses)",
    LoadingTitle = "Loading system...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
@@ -393,6 +393,61 @@ local function nearWorldBosses(worldKey)
     return false
 end
 
+-- press a button the way a click would (runs the game's own handler)
+local function fireButton(btn)
+    if getconnections then
+        for _, sig in ipairs({ btn.Activated, btn.MouseButton1Click, btn.MouseButton1Down }) do
+            local ok, conns = pcall(getconnections, sig)
+            if ok and conns and #conns > 0 then
+                for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
+                return true
+            end
+        end
+    end
+    if firesignal then
+        pcall(function() firesignal(btn.MouseButton1Click) end)
+        pcall(function() firesignal(btn.Activated) end)
+        return true
+    end
+    return false
+end
+
+-- find the world's button inside the game's Teleport menu and press it (FALLBACK only)
+-- layout: teleportFrame.CollectionFrame.(scrollFrame | raidScrollFrame).tpContainer.tpFrame
+--         each tpFrame has nameLabel ("Kaiju Raid") and buttonFrame.teleportButton ("Teleport")
+local function pressTeleportMenuButton(keyword, tabName)
+    local pgui = player:FindFirstChild("PlayerGui")
+    local ok, frame = pcall(function() return pgui.Inventory.InventoryFrame.teleportFrame end)
+    if not (ok and frame) then return false end
+
+    -- switch to the right tab first (Areas / Raids) and give the menu time to build
+    if tabName then
+        local tabFrame = frame:FindFirstChild("tabFrame")
+        local tab = tabFrame and tabFrame:FindFirstChild(tabName)
+        if tab and tab:IsA("GuiButton") then
+            fireButton(tab)
+            task.wait(0.6)
+        end
+    end
+
+    -- search only inside the raid list when on the raids tab
+    local collection = frame:FindFirstChild("CollectionFrame")
+    local scope = (tabName == "raidsTab" and collection and collection:FindFirstChild("raidScrollFrame")) or frame
+
+    for _, d in ipairs(scope:GetDescendants()) do
+        if d.Name == "tpFrame" then
+            local nameLabel = d:FindFirstChild("nameLabel")
+            if nameLabel and nameLabel:IsA("TextLabel") and norm(nameLabel.Text):find(keyword, 1, true) then
+                local btn = d:FindFirstChild("teleportButton", true)
+                if btn and btn:IsA("GuiButton") and fireButton(btn) then return true end
+            end
+        end
+    end
+    return false
+end
+
+local lastRaidNotify = 0
+
 local function forceTeleportToWorld(worldKey)
     local char = getCharWithTimeout(10)
     if not char then return end
@@ -406,12 +461,39 @@ local function forceTeleportToWorld(worldKey)
     end
 
     if worldKey == "raid" then
-        if teleportAreaRemote then
-            pcall(function() teleportAreaRemote:FireServer("Kaiju Raid") end)
-            pcall(function() teleportAreaRemote:FireServer("raid") end)
-            task.wait(1.5)
-            if nearWorldBosses("raid") then return end
+        local startPos = root.Position
+
+        local function arrived(maxWait)
+            local t = os.clock()
+            repeat
+                if nearWorldBosses("raid") then return true end
+                task.wait(0.3)
+            until os.clock() - t >= maxWait
+            return false
         end
+
+        -- 1) the real arguments captured with the Spy (direct remote call, no GUI needed)
+        if teleportAreaRemote then
+            for _, args in ipairs({
+                { "Kaiju Raid", nil },   -- captured from the real Teleport button
+                { "raid", "kaiju" },     -- second captured variant
+            }) do
+                pcall(function() teleportAreaRemote:FireServer(args[1], args[2]) end)
+                if arrived(6) then return end
+
+                -- the map may use a different folder name: if we moved far from the start, count it
+                local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if r and (r.Position - startPos).Magnitude > 150 then
+                    task.wait(1.5)
+                    return
+                end
+            end
+        end
+
+        -- 2) fallback: press the Kaiju Raid button in the game's Teleport menu
+        if pressTeleportMenuButton("kaiju", "raidsTab") and arrived(6) then return end
+
+        -- 3) last resort: move to the raid map if it is loaded
         local raidFolder = workspace:FindFirstChild("KaijuRaid")
         if raidFolder then
             local raidPart = raidFolder:FindFirstChildWhichIsA("BasePart", true)
@@ -420,6 +502,11 @@ local function forceTeleportToWorld(worldKey)
                 root.CFrame = raidPart.CFrame + Vector3.new(0, 3, 0)
                 task.wait(1.0)
             end
+        end
+
+        if not nearWorldBosses("raid") and os.clock() - lastRaidNotify > 30 then
+            lastRaidNotify = os.clock()
+            Rayfield:Notify({ Title = "Raid", Content = "Could not reach the Kaiju Raid (maybe closed right now).", Duration = 6 })
         end
         return
     end
@@ -1010,6 +1097,105 @@ table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function(
     end)
 end))
 
+-- ==================== Floating hide/show button ====================
+do
+    local UIS = game:GetService("UserInputService")
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "TitanToggleBtn"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 999
+    gui.IgnoreGuiInset = true
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(46, 46)
+    btn.Position = UDim2.new(0.5, -23, 0, 8)
+    btn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    btn.BackgroundTransparency = 0.15
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 14
+    btn.Text = "HUB"
+    btn.AutoButtonColor = true
+    btn.Parent = gui
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
+    local stroke = Instance.new("UIStroke", btn)
+    stroke.Color = Color3.fromRGB(0, 140, 255)
+    stroke.Thickness = 2
+
+    local parent
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok then parent = h end
+    end
+    if not parent then
+        local ok = pcall(function() gui.Parent = game:GetService("CoreGui") end)
+        if ok and gui.Parent then parent = gui.Parent end
+    end
+    gui.Parent = parent or player:WaitForChild("PlayerGui")
+
+    -- tap = show/hide the menu, drag = move the button
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+    table.insert(activeConnections, btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, moved = true, false
+            dragStart, startPos = input.Position, btn.Position
+        end
+    end))
+    table.insert(activeConnections, UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end
+    end))
+    table.insert(activeConnections, UIS.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            if not moved then
+                local ok = pcall(function() Library:Toggle() end)
+                if not ok and Library.ToggleKeybind then
+                    warn("[Titan Hub] Library:Toggle() unavailable")
+                end
+            end
+        end
+    end))
+    table.insert(activeConnections, { Disconnect = function() pcall(function() gui:Destroy() end) end })
+end
+
+-- ==================== Anti-stuck auto jump ====================
+local AutoJump = true
+do
+    local jumpToken = 0
+    table.insert(activeConnections, { Disconnect = function() jumpToken += 1 end })
+    local myToken = jumpToken
+
+    task.spawn(function()
+        local lastPos, lastMove, lastJump = nil, os.clock(), 0
+        while jumpToken == myToken do
+            task.wait(0.4)
+            local char = player.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if AutoJump and ActiveMode and hum and root and hum.Health > 0 then
+                if not lastPos or (root.Position - lastPos).Magnitude > 1.5 then
+                    lastPos, lastMove = root.Position, os.clock()
+                elseif os.clock() - lastMove > 2.5 and os.clock() - lastJump > 1.5 then
+                    -- standing still while a farm mode is running: jump to get unstuck
+                    lastJump = os.clock()
+                    pcall(function()
+                        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+                        hum.Jump = true
+                    end)
+                end
+            else
+                lastPos, lastMove = nil, os.clock()
+            end
+        end
+    end)
+end
+
 -- ==================== Farm UI (Auto Farm) ====================
 local FarmTab = Window:CreateTab("Auto Farm", 4483362458)
 
@@ -1108,6 +1294,13 @@ FarmTab:CreateDropdown({
         local v = type(Option) == "table" and Option[1] or Option
         TravelViaMenu = (v ~= "Portals")
     end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto Jump when stuck",
+    CurrentValue = true,
+    Flag = "AutoJumpStuck",
+    Callback = function(Value) AutoJump = Value end,
 })
 
 -- ==================== Farm logic ====================
@@ -1241,9 +1434,16 @@ end
 
 local function runKaijuRaidFarm()
     startMode("raid_farm", function(alive)
-        forceTeleportToWorld("raid")
         while alive() do
             local didAny = false
+            -- (re)travel to the raid whenever we are not there (lobby, died, kicked out)
+            if not nearWorldBosses("raid") then
+                forceTeleportToWorld("raid")
+                if not nearWorldBosses("raid") then
+                    task.wait(5)
+                    continue
+                end
+            end
             for _, diff in ipairs(raidDiffsToRun()) do
                 for _, boss in ipairs(BossHierarchy["raid"]) do
                     if not alive() then break end
@@ -1276,6 +1476,16 @@ RaidTab:CreateToggle({
     Flag = "RaidWalkMode",
     Callback = function(Value)
         RaidWalkMode = Value
+    end,
+})
+
+RaidTab:CreateButton({
+    Name = "Teleport to Raid now",
+    Callback = function()
+        task.spawn(function()
+            forceTeleportToWorld("raid")
+            Rayfield:Notify({ Title = "Raid", Content = nearWorldBosses("raid") and "Arrived at the raid" or "Could not reach the raid", Duration = 4 })
+        end)
     end,
 })
 
@@ -1995,4 +2205,4 @@ end
 
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V37", Content = "Loaded (Raid Walk + Auto Rejoin + Pity Roll + Secret Bosses)", Duration = 5 })
+Rayfield:Notify({ Title = "Titan Hub V38", Content = "Loaded (Raid Remote Fix + Auto Rejoin + Pity Roll + Secret Bosses)", Duration = 5 })
