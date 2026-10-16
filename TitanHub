@@ -321,7 +321,7 @@ end
 -- ==================== Remotes ====================
 local challengeRemote, teleportAreaRemote, battleEvent, bossResultRemote
 local autoRollRemote, quickRollRemote, equipBestRemote, claimDailyRemote
-local claimQuestRemote, runInfTowerRemote
+local claimQuestRemote, runInfTowerRemote, useItemRemote
 
 -- resolved in the background, so the script can start before the game finished loading
 local RemoteSlots = {
@@ -335,6 +335,7 @@ local RemoteSlots = {
     claimDaily = function(o) claimDailyRemote = o end,
     claimQuest = function(o) claimQuestRemote = o end,
     runInfTower = function(o) runInfTowerRemote = o end,
+    useItem = function(o) useItemRemote = o end,
 }
 for name, assign in pairs(RemoteSlots) do
     task.spawn(function()
@@ -1192,6 +1193,9 @@ table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function(
 
     rejoining = true
     rejoinAttempt = 0
+    pcall(function()
+        Rayfield:Notify({ Title = "Rejoin", Content = "Disconnected: " .. msg:sub(1, 150) .. " - trying to rejoin", Duration = 5 })
+    end)
     task.spawn(function()
         -- capped retries with a growing delay (no endless teleport spam)
         local tries = 0
@@ -1249,6 +1253,7 @@ do
         "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
         "SmartFarm5", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
         "AutoClaimQuests", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
+        "AutoDrinkPotions", "DrinkOnWeather",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -2663,6 +2668,397 @@ end
                         pcall(function() runInfTowerRemote:FireServer() end)
                     end
                     task.wait(15)
+                end
+            end)
+        end,
+    })
+end)()
+
+-- ==================== Discord Webhook ====================
+-- The webhook URL is a SECRET: it is stored in its own file (TitanRNG_Smart/webhook.txt),
+-- never inside the shared config, and only real discord.com webhook URLs are accepted.
+-- own scope: adds no top-level locals
+;(function()
+    local HttpService = game:GetService("HttpService")
+    local WebTab = Window:CreateTab("Discord", 4483362458)
+
+    local FILE = "TitanRNG_Smart/webhook.txt"
+    local HOSTS = {
+        "https://discord.com/api/webhooks/",
+        "https://discordapp.com/api/webhooks/",
+        "https://canary.discord.com/api/webhooks/",
+        "https://ptb.discord.com/api/webhooks/",
+    }
+    local MIN_GAP = 2.5      -- seconds between messages (Discord rate limit)
+    local MAX_QUEUE = 20     -- oldest messages are dropped beyond this
+
+    local WebhookURL = ""
+    local Enabled = false
+    local NotifyBossResults = false
+    local MirrorTitles = {
+        ["Pity Roll"] = true, ["Infinity Tower"] = true, ["Rejoin"] = true,
+        ["Missing remote"] = true, ["Titan Hub"] = true,
+    }
+    local TitleOptions = {
+        "Pity Roll", "Infinity Tower", "Potions", "Raid", "Secret Bosses",
+        "Rejoin", "Missing remote", "Titan Hub",
+    }
+    local queue, sendToken = {}, 0
+    local reqFn = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
+
+    local function validUrl(u)
+        if type(u) ~= "string" then return false end
+        for _, h in ipairs(HOSTS) do
+            if u:sub(1, #h) == h and u:sub(#h + 1):match("^%d+/[%w_%-]+") then return true end
+        end
+        return false
+    end
+
+    -- load the saved URL (separate file, not part of the config)
+    pcall(function()
+        if isfile and isfile(FILE) then
+            local s = (tostring(readfile(FILE)):gsub("%s+", ""))
+            if validUrl(s) then WebhookURL = s end
+        end
+    end)
+
+    local function saveUrl(u)
+        pcall(function()
+            if makefolder and isfolder and not isfolder("TitanRNG_Smart") then makefolder("TitanRNG_Smart") end
+            if writefile then writefile(FILE, u) end
+        end)
+    end
+
+    -- returns ok, shouldRetry
+    local function post(payload)
+        if not reqFn then return false, false end
+        local ok, res = pcall(reqFn, {
+            Url = WebhookURL,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = HttpService:JSONEncode(payload),
+        })
+        if not ok or type(res) ~= "table" then return false, false end
+        local code = res.StatusCode or res.status_code
+        if code == 429 then
+            local wait = 3
+            pcall(function()
+                local d = HttpService:JSONDecode(res.Body)
+                if type(d.retry_after) == "number" then wait = d.retry_after end
+            end)
+            task.wait(math.min(wait, 30) + 0.5)
+            return false, true
+        end
+        return (type(code) == "number" and code >= 200 and code < 300), false
+    end
+
+    local function enqueue(title, text, color)
+        if not Enabled or WebhookURL == "" then return end
+        if #queue >= MAX_QUEUE then table.remove(queue, 1) end
+        table.insert(queue, {
+            allowed_mentions = { parse = {} }, -- game text can never ping @everyone
+            embeds = {{
+                title = tostring(title):sub(1, 200),
+                description = tostring(text):sub(1, 1800),
+                color = color or 0x3498DB,
+                footer = { text = player.Name .. " | Titan Hub" },
+                timestamp = DateTime.now():ToIsoDate(),
+            }},
+        })
+    end
+
+    local function startSender()
+        sendToken += 1
+        local my = sendToken
+        task.spawn(function()
+            while sendToken == my do
+                local item = queue[1]
+                if item then
+                    if Enabled and WebhookURL ~= "" then
+                        local ok, retry = post(item)
+                        if ok or not retry then table.remove(queue, 1) end
+                    else
+                        table.remove(queue, 1)
+                    end
+                    task.wait(MIN_GAP)
+                else
+                    task.wait(0.5)
+                end
+            end
+        end)
+    end
+    startSender()
+    table.insert(activeConnections, { Disconnect = function() sendToken += 1 end })
+
+    -- mirror the hub's own in-game notifications to Discord (only the titles you picked)
+    local origNotify = Rayfield.Notify
+    Rayfield.Notify = function(self, cfg)
+        origNotify(self, cfg)
+        pcall(function()
+            if type(cfg) == "table" and cfg.Title and MirrorTitles[cfg.Title] then
+                enqueue(cfg.Title, cfg.Content or "")
+            end
+        end)
+    end
+
+    -- boss win / loss messages (can be frequent, so it has its own toggle, off by default)
+    onRemoteEvent("bossResult", function(won, boss, diff, cd)
+        if not NotifyBossResults then return end
+        local name = BossDisplayName[boss] or tostring(boss)
+        enqueue(
+            won and "Boss won" or "Boss lost",
+            name .. " | " .. tostring(diff),
+            won and 0x2ECC71 or 0xE74C3C
+        )
+    end)
+
+    WebTab:CreateSection("Setup")
+
+    WebTab:CreateParagraph({
+        Title = "Keep the URL private",
+        Content = "Anyone with the webhook URL can post in your channel. It is saved in its own file, not in the config. Do not screenshot this field. If it leaks, delete the webhook in Discord.",
+    })
+
+    WebTab:CreateInput({
+        Name = "Webhook URL",
+        Default = WebhookURL,
+        Placeholder = "https://discord.com/api/webhooks/...",
+        Callback = function(v)
+            v = (tostring(v or ""):gsub("%s+", ""))
+            if v == "" then
+                WebhookURL = ""
+                saveUrl("")
+            elseif validUrl(v) then
+                WebhookURL = v
+                saveUrl(v)
+            else
+                WebhookURL = ""
+                if #v >= 40 then
+                    Rayfield:Notify({ Title = "Discord", Content = "Not a valid discord.com webhook URL", Duration = 4 })
+                end
+            end
+        end,
+    })
+
+    WebTab:CreateToggle({
+        Name = "Enable Discord notifications",
+        CurrentValue = false,
+        Flag = "WebhookEnabled",
+        Callback = function(v)
+            Enabled = v
+            if v and not reqFn then
+                Rayfield:Notify({ Title = "Discord", Content = "Your executor has no request function, messages cannot be sent", Duration = 6 })
+            end
+        end,
+    })
+
+    WebTab:CreateButton({
+        Name = "Send test message",
+        Callback = function()
+            if not Enabled then
+                Rayfield:Notify({ Title = "Discord", Content = "Enable the notifications first", Duration = 3 })
+            elseif WebhookURL == "" then
+                Rayfield:Notify({ Title = "Discord", Content = "Paste a valid webhook URL first", Duration = 3 })
+            else
+                enqueue("Test", "Titan Hub is connected to this channel.", 0x2ECC71)
+                Rayfield:Notify({ Title = "Discord", Content = "Test message queued", Duration = 3 })
+            end
+        end,
+    })
+
+    WebTab:CreateSection("What to send")
+
+    WebTab:CreateDropdown({
+        Name = "Mirror these notifications",
+        Options = TitleOptions,
+        CurrentOption = { "Pity Roll", "Infinity Tower", "Rejoin", "Missing remote", "Titan Hub" },
+        MultipleOptions = true,
+        Flag = "WebhookTitles",
+        Callback = function(list)
+            MirrorTitles = {}
+            for _, t in ipairs(list) do MirrorTitles[t] = true end
+        end,
+    })
+
+    WebTab:CreateToggle({
+        Name = "Send boss win / loss results",
+        CurrentValue = false,
+        Flag = "WebhookBossResults",
+        Callback = function(v) NotifyBossResults = v end,
+    })
+end)()
+
+-- ==================== Potions tab ====================
+-- own scope: adds no top-level locals
+;(function()
+    local PotionsTab = Window:CreateTab("Potions", 4483362458)
+
+    -- names taken from the game's own UI (RaidShopFrame > potions: cells)
+    -- NOT included on purpose: "Skill Tree Reset" (destructive) and "Weather Reroll" (not a buff potion)
+    local PotionNames = {
+        "Luck Potion I", "Luck Potion II", "Luck Potion III", "Luck Potion IV",
+        "Speed Potion I", "Speed Potion II", "Speed Potion III", "Speed Potion IV",
+        "Battle Potion I", "Battle Potion II", "Battle Potion III", "Battle Potion IV",
+        "Boss Potion", "Raid Potion",
+    }
+
+    local SelectedPotions = {}
+    local PotionWeathers = { arcane = true, awakened = true }
+    local PotionInterval = 600       -- seconds between drinks of the SAME potion (set it near the potion duration)
+    local PotionAmount = 1
+    local WeatherGuard = 180         -- do not re-trigger the weather burst for the same weather within this time
+    local potionToken, weatherPotionToken = 0, 0
+
+    -- survives re-execute / server hop in the same executor session (best effort)
+    getgenv().TitanPotionLast = getgenv().TitanPotionLast or {}
+    getgenv().TitanPotionWeatherLast = getgenv().TitanPotionWeatherLast or {}
+    local lastDrink = getgenv().TitanPotionLast
+    local lastWeather = getgenv().TitanPotionWeatherLast
+
+    local function drink(name)
+        if not useItemRemote then return false end
+        local ok = pcall(function() useItemRemote:FireServer(name, PotionAmount) end)
+        if ok then lastDrink[name] = os.time() end
+        return ok
+    end
+
+    local function hasSelection()
+        return next(SelectedPotions) ~= nil
+    end
+
+    -- drinks every selected potion (force) or only the ones whose interval has passed
+    local function drinkSelected(force)
+        local n = 0
+        for _, name in ipairs(PotionNames) do
+            if SelectedPotions[name] then
+                local last = lastDrink[name]
+                if force or not last or os.time() - last >= PotionInterval then
+                    if drink(name) then n += 1 end
+                    task.wait(0.25)
+                end
+            end
+        end
+        return n
+    end
+
+    table.insert(activeConnections, { Disconnect = function()
+        potionToken += 1
+        weatherPotionToken += 1
+    end })
+
+    PotionsTab:CreateSection("Potion Selection")
+
+    PotionsTab:CreateDropdown({
+        Name = "Select Potions to Use",
+        Options = PotionNames,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "SelectedPotionsList",
+        Callback = function(list)
+            SelectedPotions = {}
+            for _, name in ipairs(list) do SelectedPotions[name] = true end
+        end,
+    })
+
+    PotionsTab:CreateInput({
+        Name = "Amount per use",
+        Default = "1",
+        Placeholder = "e.g. 1",
+        Flag = "PotionUseAmount",
+        Callback = function(v)
+            PotionAmount = math.clamp(math.floor(tonumber(v) or 1), 1, 100)
+        end,
+    })
+
+    PotionsTab:CreateButton({
+        Name = "Drink Selected Potions Now",
+        Callback = function()
+            if not hasSelection() then
+                Rayfield:Notify({ Title = "Potions", Content = "Pick at least one potion first", Duration = 3 })
+                return
+            end
+            if not useItemRemote then
+                Rayfield:Notify({ Title = "Potions", Content = "useItem remote not ready", Duration = 3 })
+                return
+            end
+            task.spawn(function()
+                local n = drinkSelected(true)
+                Rayfield:Notify({ Title = "Potions", Content = "Sent " .. n .. " potion request(s)", Duration = 3 })
+            end)
+        end,
+    })
+
+    PotionsTab:CreateSection("Auto Drink (Interval)")
+
+    PotionsTab:CreateInput({
+        Name = "Interval per potion (seconds)",
+        Default = "600",
+        Placeholder = "same as the potion duration",
+        Flag = "PotionIntervalSec",
+        Callback = function(v)
+            PotionInterval = math.max(math.floor(tonumber(v) or 600), 10)
+        end,
+    })
+
+    PotionsTab:CreateToggle({
+        Name = "Auto Drink Selected Potions",
+        CurrentValue = false,
+        Flag = "AutoDrinkPotions",
+        Callback = function(Value)
+            potionToken += 1
+            local myToken = potionToken
+            if not Value then return end
+            task.spawn(function()
+                while potionToken == myToken and Rayfield.Loading do task.wait(0.3) end
+                while potionToken == myToken do
+                    -- only potions whose own interval has passed are drunk (no re-drink on resume / rejoin)
+                    if hasSelection() then drinkSelected(false) end
+                    task.wait(5)
+                end
+            end)
+        end,
+    })
+
+    PotionsTab:CreateSection("Weather Burst (Drink on Weather)")
+
+    PotionsTab:CreateDropdown({
+        Name = "Trigger on these Weathers",
+        Options = PerfCache.weatherNames or { "Arcane", "Awakened", "Glitch", "Monsoon" },
+        CurrentOption = { "Arcane", "Awakened" },
+        MultipleOptions = true,
+        Flag = "PotionTriggerWeathers",
+        Callback = function(list)
+            PotionWeathers = {}
+            for _, n in ipairs(list) do PotionWeathers[norm(n)] = true end
+        end,
+    })
+
+    PotionsTab:CreateToggle({
+        Name = "Drink when Weather Appears",
+        CurrentValue = false,
+        Flag = "DrinkOnWeather",
+        Callback = function(Value)
+            weatherPotionToken += 1
+            local myToken = weatherPotionToken
+            if not Value then return end
+            task.spawn(function()
+                while weatherPotionToken == myToken and Rayfield.Loading do task.wait(0.3) end
+                local lastSeen = nil
+                while weatherPotionToken == myToken do
+                    local w = PerfCache.getWeather and PerfCache.getWeather()
+                    if w and PotionWeathers[norm(w)] and hasSelection() then
+                        local key = norm(w)
+                        -- once per weather appearance, and never twice within WeatherGuard seconds
+                        if lastSeen ~= key and (not lastWeather[key] or os.time() - lastWeather[key] >= WeatherGuard) then
+                            lastSeen = key
+                            lastWeather[key] = os.time()
+                            local n = drinkSelected(true)
+                            Rayfield:Notify({ Title = "Potions", Content = "Weather " .. w .. " active - sent " .. n .. " potion(s)", Duration = 4 })
+                        end
+                    elseif not w then
+                        lastSeen = nil
+                    end
+                    task.wait(2)
                 end
             end)
         end,
