@@ -2169,6 +2169,7 @@ do
     end
 
     local ServerProgress, ServerReady, ServerInterval = nil, false, 0.2
+    local ResultTick = 0 -- counts rollResult events (used to wait for the server answer)
 
     local function parseAmount(s)
         s = tostring(s or ""):gsub(",", ""):gsub("%s", "")
@@ -2179,6 +2180,7 @@ do
     end
 
     onRemoteEvent("rollResult", function(...)
+            ResultTick += 1
             for i = 1, select("#", ...) do
                 local v = select(i, ...)
                 if type(v) == "table" and type(v.rollProgress) == "number" then
@@ -2273,8 +2275,19 @@ do
                     end
                     notifiedFull = false
                     if FillWhileWaiting then
+                        local before = ResultTick
                         doRoll()
-                        task.wait(ServerInterval + 0.02)
+                        if cur >= MaxPity - 30 then
+                            -- near full: wait for the server answer before the next roll,
+                            -- otherwise an in-flight roll can spend the boosted (pity) roll by accident
+                            local t = os.clock()
+                            while ResultTick == before and os.clock() - t < 1.5 and pityToken == token do
+                                task.wait(0.02)
+                            end
+                            task.wait(0.1)
+                        else
+                            task.wait(ServerInterval + 0.02)
+                        end
                     else
                         task.wait(0.5)
                     end
