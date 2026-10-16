@@ -1035,6 +1035,26 @@ local function shouldHideGui(gui)
     return false
 end
 
+local function pressButton(btn)
+    if not btn then return false end
+    if getconnections then
+        for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+            local ok, conns = pcall(getconnections, sig)
+            if ok and conns and #conns > 0 then
+                for _, c in ipairs(conns) do
+                    pcall(function() c:Fire() end)
+                end
+                return true
+            end
+        end
+    end
+    if firesignal then
+        pcall(function() firesignal(btn.MouseButton1Click) end)
+        return true
+    end
+    return false
+end
+
 local function getBattleParts()
     local pgui = player:FindFirstChild("PlayerGui")
     local ui = pgui and pgui:FindFirstChild("BattleUI")
@@ -1144,8 +1164,7 @@ local function queueReload()
     local qot = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if qot then
         qotQueued = true
-        -- %q escapes quotes / backslashes so the URL can never break out of the string
-        pcall(qot, ("loadstring(game:HttpGet(%q))()"):format(ScriptLoadURL))
+        pcall(qot, 'loadstring(game:HttpGet("' .. ScriptLoadURL .. '"))()')
     end
 end
 
@@ -1193,16 +1212,10 @@ table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function(
 
     rejoining = true
     rejoinAttempt = 0
-    pcall(function()
-        Rayfield:Notify({ Title = "Rejoin", Content = "Disconnected: " .. msg:sub(1, 150) .. " - trying to rejoin", Duration = 5 })
-    end)
     task.spawn(function()
-        -- capped retries with a growing delay (no endless teleport spam)
-        local tries = 0
-        while AutoReconnectEnabled and rejoining and tries < 10 do
-            tries += 1
+        while AutoReconnectEnabled and rejoining do
             executeRejoin()
-            task.wait(math.min(8 + tries * 4, 40))
+            task.wait(8)
         end
         rejoining = false
     end)
@@ -1490,7 +1503,6 @@ local function attemptBoss(boss, diff, alive, worldKey, useWalk)
 
     local function stillGoing() return alive() and isCharAlive() end
 
-    -- FIX: the "Wait for battle end" option is now passed through (was hard-coded to true)
     local fired = hitAndRunBoss(boss, diff, stillGoing, WaitForBattle, useWalk)
     if not alive() then return false end
 
@@ -2569,7 +2581,7 @@ end
         end,
     })
 
-    -- ===== end the tower when a chosen weather appears =====
+    -- ===== NEW: end the tower when a chosen weather appears =====
     TowerTab:CreateSection("End the tower on weather")
 
     local EndWeathers = { arcane = true, awakened = true }
@@ -2671,220 +2683,6 @@ end
                 end
             end)
         end,
-    })
-end)()
-
--- ==================== Discord Webhook ====================
--- The webhook URL is a SECRET: it is stored in its own file (TitanRNG_Smart/webhook.txt),
--- never inside the shared config, and only real discord.com webhook URLs are accepted.
--- own scope: adds no top-level locals
-;(function()
-    local HttpService = game:GetService("HttpService")
-    local WebTab = Window:CreateTab("Discord", 4483362458)
-
-    local FILE = "TitanRNG_Smart/webhook.txt"
-    local HOSTS = {
-        "https://discord.com/api/webhooks/",
-        "https://discordapp.com/api/webhooks/",
-        "https://canary.discord.com/api/webhooks/",
-        "https://ptb.discord.com/api/webhooks/",
-    }
-    local MIN_GAP = 2.5      -- seconds between messages (Discord rate limit)
-    local MAX_QUEUE = 20     -- oldest messages are dropped beyond this
-
-    local WebhookURL = ""
-    local Enabled = false
-    local NotifyBossResults = false
-    local MirrorTitles = {
-        ["Pity Roll"] = true, ["Infinity Tower"] = true, ["Rejoin"] = true,
-        ["Missing remote"] = true, ["Titan Hub"] = true,
-    }
-    local TitleOptions = {
-        "Pity Roll", "Infinity Tower", "Potions", "Raid", "Secret Bosses",
-        "Rejoin", "Missing remote", "Titan Hub",
-    }
-    local queue, sendToken = {}, 0
-    local reqFn = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
-
-    local function validUrl(u)
-        if type(u) ~= "string" then return false end
-        for _, h in ipairs(HOSTS) do
-            if u:sub(1, #h) == h and u:sub(#h + 1):match("^%d+/[%w_%-]+") then return true end
-        end
-        return false
-    end
-
-    -- load the saved URL (separate file, not part of the config)
-    pcall(function()
-        if isfile and isfile(FILE) then
-            local s = (tostring(readfile(FILE)):gsub("%s+", ""))
-            if validUrl(s) then WebhookURL = s end
-        end
-    end)
-
-    local function saveUrl(u)
-        pcall(function()
-            if makefolder and isfolder and not isfolder("TitanRNG_Smart") then makefolder("TitanRNG_Smart") end
-            if writefile then writefile(FILE, u) end
-        end)
-    end
-
-    -- returns ok, shouldRetry
-    local function post(payload)
-        if not reqFn then return false, false end
-        local ok, res = pcall(reqFn, {
-            Url = WebhookURL,
-            Method = "POST",
-            Headers = { ["Content-Type"] = "application/json" },
-            Body = HttpService:JSONEncode(payload),
-        })
-        if not ok or type(res) ~= "table" then return false, false end
-        local code = res.StatusCode or res.status_code
-        if code == 429 then
-            local wait = 3
-            pcall(function()
-                local d = HttpService:JSONDecode(res.Body)
-                if type(d.retry_after) == "number" then wait = d.retry_after end
-            end)
-            task.wait(math.min(wait, 30) + 0.5)
-            return false, true
-        end
-        return (type(code) == "number" and code >= 200 and code < 300), false
-    end
-
-    local function enqueue(title, text, color)
-        if not Enabled or WebhookURL == "" then return end
-        if #queue >= MAX_QUEUE then table.remove(queue, 1) end
-        table.insert(queue, {
-            allowed_mentions = { parse = {} }, -- game text can never ping @everyone
-            embeds = {{
-                title = tostring(title):sub(1, 200),
-                description = tostring(text):sub(1, 1800),
-                color = color or 0x3498DB,
-                footer = { text = player.Name .. " | Titan Hub" },
-                timestamp = DateTime.now():ToIsoDate(),
-            }},
-        })
-    end
-
-    local function startSender()
-        sendToken += 1
-        local my = sendToken
-        task.spawn(function()
-            while sendToken == my do
-                local item = queue[1]
-                if item then
-                    if Enabled and WebhookURL ~= "" then
-                        local ok, retry = post(item)
-                        if ok or not retry then table.remove(queue, 1) end
-                    else
-                        table.remove(queue, 1)
-                    end
-                    task.wait(MIN_GAP)
-                else
-                    task.wait(0.5)
-                end
-            end
-        end)
-    end
-    startSender()
-    table.insert(activeConnections, { Disconnect = function() sendToken += 1 end })
-
-    -- mirror the hub's own in-game notifications to Discord (only the titles you picked)
-    local origNotify = Rayfield.Notify
-    Rayfield.Notify = function(self, cfg)
-        origNotify(self, cfg)
-        pcall(function()
-            if type(cfg) == "table" and cfg.Title and MirrorTitles[cfg.Title] then
-                enqueue(cfg.Title, cfg.Content or "")
-            end
-        end)
-    end
-
-    -- boss win / loss messages (can be frequent, so it has its own toggle, off by default)
-    onRemoteEvent("bossResult", function(won, boss, diff, cd)
-        if not NotifyBossResults then return end
-        local name = BossDisplayName[boss] or tostring(boss)
-        enqueue(
-            won and "Boss won" or "Boss lost",
-            name .. " | " .. tostring(diff),
-            won and 0x2ECC71 or 0xE74C3C
-        )
-    end)
-
-    WebTab:CreateSection("Setup")
-
-    WebTab:CreateParagraph({
-        Title = "Keep the URL private",
-        Content = "Anyone with the webhook URL can post in your channel. It is saved in its own file, not in the config. Do not screenshot this field. If it leaks, delete the webhook in Discord.",
-    })
-
-    WebTab:CreateInput({
-        Name = "Webhook URL",
-        Default = WebhookURL,
-        Placeholder = "https://discord.com/api/webhooks/...",
-        Callback = function(v)
-            v = (tostring(v or ""):gsub("%s+", ""))
-            if v == "" then
-                WebhookURL = ""
-                saveUrl("")
-            elseif validUrl(v) then
-                WebhookURL = v
-                saveUrl(v)
-            else
-                WebhookURL = ""
-                if #v >= 40 then
-                    Rayfield:Notify({ Title = "Discord", Content = "Not a valid discord.com webhook URL", Duration = 4 })
-                end
-            end
-        end,
-    })
-
-    WebTab:CreateToggle({
-        Name = "Enable Discord notifications",
-        CurrentValue = false,
-        Flag = "WebhookEnabled",
-        Callback = function(v)
-            Enabled = v
-            if v and not reqFn then
-                Rayfield:Notify({ Title = "Discord", Content = "Your executor has no request function, messages cannot be sent", Duration = 6 })
-            end
-        end,
-    })
-
-    WebTab:CreateButton({
-        Name = "Send test message",
-        Callback = function()
-            if not Enabled then
-                Rayfield:Notify({ Title = "Discord", Content = "Enable the notifications first", Duration = 3 })
-            elseif WebhookURL == "" then
-                Rayfield:Notify({ Title = "Discord", Content = "Paste a valid webhook URL first", Duration = 3 })
-            else
-                enqueue("Test", "Titan Hub is connected to this channel.", 0x2ECC71)
-                Rayfield:Notify({ Title = "Discord", Content = "Test message queued", Duration = 3 })
-            end
-        end,
-    })
-
-    WebTab:CreateSection("What to send")
-
-    WebTab:CreateDropdown({
-        Name = "Mirror these notifications",
-        Options = TitleOptions,
-        CurrentOption = { "Pity Roll", "Infinity Tower", "Rejoin", "Missing remote", "Titan Hub" },
-        MultipleOptions = true,
-        Flag = "WebhookTitles",
-        Callback = function(list)
-            MirrorTitles = {}
-            for _, t in ipairs(list) do MirrorTitles[t] = true end
-        end,
-    })
-
-    WebTab:CreateToggle({
-        Name = "Send boss win / loss results",
-        CurrentValue = false,
-        Flag = "WebhookBossResults",
-        Callback = function(v) NotifyBossResults = v end,
     })
 end)()
 
