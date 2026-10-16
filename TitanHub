@@ -184,7 +184,7 @@ function Rayfield:LoadConfiguration()
 end
 
 local Window = Rayfield:CreateWindow({
-   Name = "Titan RNG - Hub V36 (Raid Walk + Auto Rejoin + Pity Roll + Secret Bosses)",
+   Name = "Titan RNG - Hub V37 (Raid Walk + Auto Rejoin + Pity Roll + Secret Bosses)",
    LoadingTitle = "Loading system...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
@@ -202,7 +202,6 @@ local ActiveMode = nil
 local ActiveWorldKey = nil
 local FarmToken = 0
 local fastBattleToken = 0
-local autoQuestToken = 0
 local autoClaimToken = 0
 local autoTowerToken = 0
 local DisableBattleAnimation = false
@@ -243,7 +242,6 @@ getgenv().TitanLoaded = function()
     ActiveWorldKey = nil
     FarmToken += 1
     fastBattleToken += 1
-    autoQuestToken += 1
     autoClaimToken += 1
     autoTowerToken += 1
     DisableBattleAnimation = false
@@ -935,7 +933,6 @@ end
 local VirtualUser = game:GetService("VirtualUser")
 local AntiAfk = true
 
--- Disable the game's AfkRejoinClient script so it doesn't kick you after 2 minutes
 local function disableGameAfkScript()
     local pScripts = player:FindFirstChild("PlayerScripts")
     local afkScript = pScripts and pScripts:FindFirstChild("AfkRejoinClient")
@@ -953,7 +950,6 @@ table.insert(activeConnections, player.Idled:Connect(function()
     end)
 end))
 
--- Extract the private server link code from a URL
 local function extractLinkCode(url)
     if type(url) ~= "string" then return nil end
     local code = url:match("privateServerLinkCode=([%w_%-]+)")
@@ -962,8 +958,8 @@ local function extractLinkCode(url)
     return code
 end
 
-local rejoining = false      -- prevents stacking loops
-local qotQueued = false      -- prevents duplicate queue_on_teleport calls
+local rejoining = false
+local qotQueued = false
 local rejoinAttempt = 0
 
 local function queueReload()
@@ -979,13 +975,11 @@ local function executeRejoin()
     rejoinAttempt += 1
     queueReload()
 
-    -- 1) Official game rejoin remote (first attempt only)
     if rejoinAttempt == 1 and requestRejoinRemote then
         pcall(function() requestRejoinRemote:FireServer() end)
         task.wait(1.5)
     end
 
-    -- 2) First attempt: same server; afterwards: same place
     if rejoinAttempt == 1 and game.JobId ~= "" then
         pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
@@ -997,15 +991,13 @@ local function executeRejoin()
     end
 end
 
--- If the teleport itself fails, fall back to the backup method instead of waiting blindly
 table.insert(activeConnections, TeleportService.TeleportInitFailed:Connect(function()
     if rejoinAttempt == 1 then rejoinAttempt = 2 end
 end))
 
--- Disconnect monitor: only one loop at a time
 table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function()
     if not AutoReconnectEnabled or rejoining then return end
-    if GuiService:GetErrorMessage() == "" then return end -- ignore the message being cleared
+    if GuiService:GetErrorMessage() == "" then return end
 
     rejoining = true
     rejoinAttempt = 0
@@ -1331,7 +1323,6 @@ RaidTab:CreateDropdown({
 })
 
 -- ==================== Server & Rejoin tab ====================
--- built after the UI Settings tab so this tab is the last one in the list
 Rayfield.AfterSettings = function()
     local ServerTab = Window:CreateTab("Server & Rejoin", 4483362458)
 
@@ -1749,47 +1740,23 @@ do
     })
 end
 
--- ==================== Pity Roll tab ====================
--- Fill the pity bar (X/10K) -> hold when full -> spend it when the chosen weather shows up -> repeat
+-- ==================== Pity Roll (reads WeatherPity_mythic attribute) ====================
 do
     table.insert(ignoreIdx, "RollPityStart")
 
-    local ExpectedMax = 10000
-    local ServerWeatherTimeout = 900     -- seconds before a remote-only weather is considered expired
-    local MaxSpendRolls = 15             -- safety: rolls at a full bar before giving up
+    local MaxPity = 10000
+    local ServerWeatherTimeout = 900
+    local MaxSpendRolls = 25
 
-    local PityWeathers = {}              -- set of normalized weather names
+    local PityWeathers = {}
     local FillWhileWaiting = true
     local pityToken = 0
     local pityToggle
     local ActiveServerWeather, ActiveServerWeatherAt = nil, 0
 
+    -- stop the pity loop on Unload / re-execute
     table.insert(activeConnections, { Disconnect = function() pityToken += 1 end })
 
-    local function parseAmount(s)
-        s = tostring(s or ""):gsub(",", ""):gsub("%s", "")
-        local num, suf = s:match("^([%d%.]+)([KkMmBb]?)$")
-        num = tonumber(num)
-        if not num then return nil end
-        return num * (({ k = 1e3, m = 1e6, b = 1e9 })[suf:lower()] or 1)
-    end
-
-    local function isShown(obj)
-        local cur = obj
-        while cur and cur ~= game do
-            if cur:IsA("GuiObject") and not cur.Visible then return false end
-            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
-            cur = cur.Parent
-        end
-        return true
-    end
-
-    local function getMain()
-        local pgui = player:FindFirstChild("PlayerGui")
-        return pgui and pgui:FindFirstChild("Main"), pgui
-    end
-
-    -- weather names
     local WeatherNames, WeatherSet = {}, {}
     do
         local folder = Rep:FindFirstChild("weatherEffects")
@@ -1807,24 +1774,9 @@ do
         for _, n in ipairs(WeatherNames) do WeatherSet[norm(n)] = true end
     end
 
-    local function brief(v)
-        if type(v) == "table" then
-            local t, n = {}, 0
-            for k, x in pairs(v) do
-                n += 1
-                if n > 8 then break end
-                t[#t + 1] = tostring(k) .. "=" .. tostring(x)
-            end
-            return "{" .. table.concat(t, ", ") .. "}"
-        end
-        return tostring(v)
-    end
-
-    local LastWeatherArgs = "(none received yet)"
     local weatherRemote = Rep:FindFirstChild("weatherUpdate")
     if weatherRemote then
         table.insert(activeConnections, weatherRemote.OnClientEvent:Connect(function(a, b)
-            LastWeatherArgs = brief(a) .. " | " .. brief(b)
             local cand
             if type(a) == "string" then cand = a
             elseif type(a) == "table" then cand = a.weather or a.Weather or a.name or a.Name or a.type or a[1]
@@ -1839,145 +1791,69 @@ do
         end))
     end
 
-    -- Server-side pity count: the server sends rollProgress with every roll result
-    local ServerProgress, ServerMax, ServerProgressAt, ServerRollInfo = nil, nil, 0, nil
+    local function doRoll()
+        local rollRemote = Rep:FindFirstChild("RollRequest")
+        if rollRemote then
+            pcall(function() rollRemote:FireServer() end)
+        else
+            local ok, btn = pcall(function()
+                return player.PlayerGui.Main.Bottom.rollButtons.RollButtonFrame.RollButton
+            end)
+            if ok and btn then pressButton(btn) end
+        end
+    end
+
+    -- server value: the game sends rollProgress with every roll result
+    local ServerProgress = nil
     local rollResultRemote = Rep:FindFirstChild("rollResult")
     if rollResultRemote then
         table.insert(activeConnections, rollResultRemote.OnClientEvent:Connect(function(...)
             for i = 1, select("#", ...) do
                 local v = select(i, ...)
                 if type(v) == "table" and type(v.rollProgress) == "number" then
-                    ServerProgress, ServerProgressAt, ServerRollInfo = v.rollProgress, os.clock(), v
-                    for k, x in pairs(v) do
-                        local kl = tostring(k):lower()
-                        if type(x) == "number" and kl:find("max") and (kl:find("progress") or kl:find("pity")) then
-                            ServerMax = x
-                        end
-                    end
+                    ServerProgress = v.rollProgress
                 end
             end
         end))
     end
 
-    -- Roll button: direct path first, text search as fallback
-    local rollBtn
-    local function findRollButton()
-        if rollBtn and rollBtn.Parent and isShown(rollBtn) then return rollBtn end
-        rollBtn = nil
-        local main, pgui = getMain()
-        local ok, b = pcall(function() return main.Bottom.rollButtons.RollButtonFrame.RollButton end)
-        if ok and b and b:IsA("GuiButton") then rollBtn = b return rollBtn end
-        if not pgui then return nil end
-        for _, d in ipairs(pgui:GetDescendants()) do
-            if d:IsA("TextLabel") and d.Text == "Roll!" and isShown(d) then
-                local btn = d:FindFirstAncestorWhichIsA("GuiButton")
-                if btn then rollBtn = btn break end
-            end
-        end
-        return rollBtn
+    local function parseAmount(s)
+        s = tostring(s or ""):gsub(",", ""):gsub("%s", "")
+        local num, suf = s:match("^([%d%.]+)([KkMmBb]?)$")
+        num = tonumber(num)
+        if not num then return nil end
+        return num * (({ k = 1e3, m = 1e6, b = 1e9 })[suf:lower()] or 1)
     end
 
-    local rollRemote = Rep:FindFirstChild("RollRequest")
-    local function doRoll()
-        if rollRemote then
-            pcall(function() rollRemote:FireServer() end)
-        else
-            local b = findRollButton()
-            if b then pressButton(b) end
-        end
-    end
-
-    -- pity bar: text "1.71K/10K", falling back to the green fill when the text is replaced (e.g. "2x Luck")
-    local function parseProgressText(t)
-        local a, as, b, bs = tostring(t):match("^%s*([%d%.,]+)%s*([KkMmBb]?)%s*/%s*([%d%.,]+)%s*([KkMmBb]?)%s*$")
-        if not a then return nil end
-        local cur, max = parseAmount(a .. as), parseAmount(b .. bs)
-        if not cur or not max then return nil end
-        if max ~= ExpectedMax then return nil end
-        return cur, max
-    end
-
-    local progLabel, lastMax = nil, ExpectedMax
-    local function getProgressLabel()
-        if progLabel and progLabel.Parent then return progLabel end
-        progLabel = nil
-        local btn = findRollButton()
-        local scope = btn or select(2, getMain())
-        if not scope then return nil end
-        local ok, l = pcall(function() return btn.progressContainer.progressLabel end)
-        if ok and l then progLabel = l return l end
-        for _, d in ipairs(scope:GetDescendants()) do
-            if d.Name == "progressLabel" and d:IsA("TextLabel") then progLabel = d return d end
-        end
-        return nil
-    end
-
-    -- green fill of the pity bar: search the whole roll area, not only the button
-    local fillObj
-    local function findFill()
-        if fillObj and fillObj.Parent and fillObj.Parent:IsA("GuiObject") then return fillObj end
-        fillObj = nil
-        local main = getMain()
-        local ok, area = pcall(function() return main.Bottom.rollButtons end)
-        if not (ok and area) then return nil end
-        local best
-        for _, d in ipairs(area:GetDescendants()) do
-            if d:IsA("GuiObject") and d.Parent and d.Parent:IsA("GuiObject") then
-                local n = d.Name:lower()
-                if n == "progressfill" then best = d break end
-                if not best and n:find("fill") then best = d end
-            end
-        end
-        fillObj = best
-        return best
-    end
-
-    -- returns cur, max, approx(bool). Server value (rollResult) first, screen only as a fallback.
-    local function readProgress()
-        local tcur, tmax
-        local lbl = getProgressLabel()
-        if lbl and isShown(lbl) then tcur, tmax = parseProgressText(lbl.Text) end
-
-        if ServerProgress ~= nil then
-            -- safety net: if the screen clearly disagrees and no roll arrived for a while, trust the screen
-            if tcur and math.abs(tcur - ServerProgress) > 100 and os.clock() - ServerProgressAt > 3 then
-                ServerProgress, ServerProgressAt = tcur, os.clock()
-            end
-            if ServerMax then lastMax = ServerMax end
-            return ServerProgress, ServerMax or lastMax, false
-        end
-
-        if tcur then lastMax = tmax return tcur, tmax, false end
-
-        local fill = findFill()
-        if fill then
-            local pw = fill.Parent.AbsoluteSize.X
-            if pw > 0 then
-                return math.clamp(fill.AbsoluteSize.X / pw, 0, 1) * lastMax, lastMax, true
-            end
-        end
-        return nil, nil, false
-    end
-
-    -- weather: Main.weatherInfo.nameContainer.nameLabel, then a text scan, then the remote
-    local weatherLabel, lastWeatherScan = nil, 0
-    local function currentWeather()
-        if weatherLabel and weatherLabel.Parent and isShown(weatherLabel) and WeatherSet[norm(weatherLabel.Text)] then
-            return weatherLabel.Text
-        end
-        weatherLabel = nil
-        local main, pgui = getMain()
-        local ok, l = pcall(function() return main.weatherInfo.nameContainer.nameLabel end)
-        if ok and l and isShown(l) and WeatherSet[norm(l.Text)] then weatherLabel = l return l.Text end
-        if pgui and os.clock() - lastWeatherScan >= 1 then
-            lastWeatherScan = os.clock()
-            for _, d in ipairs(pgui:GetDescendants()) do
-                if d:IsA("TextLabel") and d.Name == "nameLabel" and WeatherSet[norm(d.Text)] and isShown(d) then
-                    weatherLabel = d
-                    return d.Text
+    -- bar text like "8,787/10,000" (or "8.78K/10K" with Short Numbers on)
+    local progLabel
+    local function readBarText()
+        if not (progLabel and progLabel.Parent) then
+            progLabel = nil
+            local ok, area = pcall(function() return player.PlayerGui.Main.Bottom.rollButtons end)
+            if ok and area then
+                for _, d in ipairs(area:GetDescendants()) do
+                    if d.Name == "progressLabel" and d:IsA("TextLabel") then progLabel = d break end
                 end
             end
         end
+        if not progLabel then return nil end
+        local a, b = tostring(progLabel.Text):match("^%s*([%d%.,]+%s*[KkMmBb]?)%s*/%s*([%d%.,]+%s*[KkMmBb]?)%s*$")
+        local cur, max = parseAmount(a), parseAmount(b)
+        if cur and max == MaxPity then return cur end
+        return nil
+    end
+
+    -- bar text first (exact, current), then the server value from the last roll
+    local function getPity()
+        return readBarText() or ServerProgress
+    end
+
+    local function currentWeather()
+        local ok, l = pcall(function()
+            return player.PlayerGui.Main.weatherInfo.nameContainer.nameLabel
+        end)
+        if ok and l and WeatherSet[norm(l.Text)] then return l.Text end
         if ActiveServerWeather and os.clock() - ActiveServerWeatherAt > ServerWeatherTimeout then
             ActiveServerWeather = nil
         end
@@ -1987,8 +1863,7 @@ do
     local function weatherMatches(w)
         if next(PityWeathers) == nil then return true end   -- nothing selected = spend as soon as it's full
         if not w then return false end
-        local n = norm(w)
-        return PityWeathers[n] == true or n == "mashup"
+        return PityWeathers[norm(w)] == true
     end
 
     local function stopPity(reason)
@@ -1997,44 +1872,26 @@ do
     end
 
     local function runPity(token)
-        local missingSince, notifiedFull, spendRolls, spending, lastCur, nearSince = nil, false, 0, false, nil, nil
-        local lastApprox, spentAt = false, 0
+        local notifiedFull, spending, spendRolls, missingSince = false, false, 0, nil
 
         while pityToken == token do
-            local cur, max, approx = readProgress()
+            local cur = getPity()
             if cur == nil then
                 missingSince = missingSince or os.clock()
                 if os.clock() - missingSince > 8 then
-                    stopPity("Pity bar not found on screen")
+                    stopPity("Pity bar value not found")
                     return
                 end
-                task.wait(0.3)
+                doRoll() -- a roll makes the server send rollProgress
+                task.wait(0.4)
             else
                 missingSince = nil
-                -- "full" only counts when the exact text says so. The fill bar is too coarse near the top
-                -- (9.94K already looks like 99%), so near the top we wait for the text to be readable again.
-                local full = cur >= max
-                local waitExact = false
-                if approx and not full and cur >= max * 0.97 then
-                    nearSince = nearSince or os.clock()
-                    if os.clock() - nearSince > 10 then full = true else waitExact = true end
-                else
-                    nearSince = nil
-                end
+                local full = cur >= MaxPity
                 local w = currentWeather()
 
-                -- only trust exact text readings (the fill bar animates), and ignore the seconds right after a spend
-                if not full and not spending and not approx and not lastApprox and os.clock() - spentAt > 8
-                    and lastCur and lastCur > max * 0.5 and cur < lastCur * 0.5 then
-                    Rayfield:Notify({ Title = "Pity Roll", Content = "Bar reset without holding at full - the x10,000 may have fired during filling. Tell Claude.", Duration = 8 })
-                end
-                lastCur, lastApprox = cur, approx
-
-                if waitExact then
-                    task.wait(0.25)
-                elseif not full then
+                if not full then
                     if spending then
-                        spending, spendRolls, spentAt = false, 0, os.clock()
+                        spending, spendRolls = false, 0
                         Rayfield:Notify({ Title = "Pity Roll", Content = "Pity used! Filling it again...", Duration = 4 })
                     end
                     notifiedFull = false
@@ -2051,7 +1908,7 @@ do
                     end
                     spendRolls += 1
                     if spendRolls > MaxSpendRolls then
-                        stopPity("Bar didn't reset after " .. MaxSpendRolls .. " rolls. Use the pity manually, then restart.")
+                        stopPity("Bar didn't reset after " .. MaxSpendRolls .. " rolls.")
                         return
                     end
                     doRoll()
@@ -2067,11 +1924,9 @@ do
         end
     end
 
-    local PityTab = RollTab   -- merged into the Roll & Tower tab
+    RollTab:CreateSection("Pity Roll (spend pity on weather)")
 
-    PityTab:CreateSection("Pity Roll (spend x10K pity on weather)")
-
-    PityTab:CreateDropdown({
+    RollTab:CreateDropdown({
         Name = "Spend pity during these weathers",
         Options = WeatherNames,
         CurrentOption = {},
@@ -2083,14 +1938,14 @@ do
         end,
     })
 
-    PityTab:CreateToggle({
+    RollTab:CreateToggle({
         Name = "Keep rolling to fill pity while waiting",
         CurrentValue = true,
         Flag = "RollPityFill",
         Callback = function(v) FillWhileWaiting = v end,
     })
 
-    pityToggle = PityTab:CreateToggle({
+    pityToggle = RollTab:CreateToggle({
         Name = "Start Pity Cycle",
         CurrentValue = false,
         Flag = "RollPityStart",
@@ -2105,173 +1960,15 @@ do
         end,
     })
 
-    PityTab:CreateSection("Pity debug")
-
-    PityTab:CreateButton({
-        Name = "Copy pity info (paste it to Claude)",
+    RollTab:CreateButton({
+        Name = "Show pity + weather",
         Callback = function()
-            local out = {}
-            local function line(d, depth)
-                local extra = {}
-                if d:IsA("TextLabel") or d:IsA("TextButton") then extra[#extra + 1] = "Text=" .. string.format("%q", d.Text) end
-                if d:IsA("ValueBase") then extra[#extra + 1] = "Value=" .. tostring(d.Value) end
-                if d:IsA("GuiObject") then extra[#extra + 1] = "Visible=" .. tostring(d.Visible) end
-                local ok, attrs = pcall(function() return d:GetAttributes() end)
-                if ok and attrs then for k, v in pairs(attrs) do extra[#extra + 1] = k .. "=" .. tostring(v) end end
-                out[#out + 1] = string.rep("  ", depth) .. "[" .. d.ClassName .. "] " .. d.Name .. (#extra > 0 and ("  -> " .. table.concat(extra, " | ")) or "")
-            end
-            local function walk(o, depth, maxd)
-                if depth > maxd or #out > 400 then return end
-                if not (o:IsA("UIStroke") or o:IsA("UICorner") or o:IsA("UIGradient") or o:IsA("UIListLayout") or o:IsA("UIPadding") or o:IsA("UIAspectRatioConstraint")) then
-                    line(o, depth)
-                end
-                for _, c in ipairs(o:GetChildren()) do walk(c, depth + 1, maxd) end
-            end
-
-            local pgui = player:FindFirstChild("PlayerGui")
-            out[#out + 1] = "=== nodes named *pity* (PlayerGui + ReplicatedStorage) ==="
-            for _, root in ipairs({ pgui, Rep }) do
-                if root then
-                    for _, d in ipairs(root:GetDescendants()) do
-                        if d.Name:lower():find("pity") then
-                            out[#out + 1] = "## " .. d:GetFullName()
-                            walk(d, 1, 4)
-                        end
-                    end
-                end
-            end
-            out[#out + 1] = "=== player attributes / leaderstats ==="
-            for k, v in pairs(player:GetAttributes()) do out[#out + 1] = k .. "=" .. tostring(v) end
-            out[#out + 1] = "=== ReplicatedStorage attributes ==="
-            for k, v in pairs(Rep:GetAttributes()) do
-                local sv = tostring(v)
-                out[#out + 1] = k .. "=" .. sv:sub(1, 120)
-            end
-
-            local text = table.concat(out, "\n")
-            local copy = setclipboard or toclipboard
-            if copy then pcall(copy, text) end
-            if writefile then pcall(writefile, "PityInfo.txt", text) end
-            print(text)
-            Rayfield:Notify({ Title = "Pity Roll", Content = "Copied " .. #out .. " lines. Paste it in the chat.", Duration = 6 })
-        end,
-    })
-
-    PityTab:CreateButton({
-        Name = "Find pity data source (does 6 rolls)",
-        Callback = function()
-            task.spawn(function()
-                local function snap()
-                    local t = {}
-                    local function add(path, v)
-                        local n = tonumber(v)
-                        if not n and type(v) == "string" then n = parseAmount(v) end
-                        if n then t[path] = n end
-                    end
-                    local function scan(o, label)
-                        for k, v in pairs(o:GetAttributes()) do add(label .. "@" .. k, v) end
-                    end
-                    scan(player, "player")
-                    scan(Rep, "Rep")
-                    scan(workspace, "workspace")
-                    for _, root in ipairs({ player, Rep }) do
-                        for _, d in ipairs(root:GetDescendants()) do
-                            if d:IsA("ValueBase") then add(d:GetFullName(), d.Value) end
-                            scan(d, d:GetFullName())
-                        end
-                    end
-                    return t
-                end
-
-                local function show(...)
-                    local parts = {}
-                    for i = 1, select("#", ...) do
-                        local v = select(i, ...)
-                        if type(v) == "table" then
-                            local items, n = {}, 0
-                            for k, x in pairs(v) do
-                                n += 1
-                                if n > 6 then items[#items + 1] = "..." break end
-                                items[#items + 1] = tostring(k) .. "=" .. tostring(x)
-                            end
-                            parts[#parts + 1] = "{" .. table.concat(items, ", ") .. "}"
-                        else
-                            parts[#parts + 1] = tostring(v)
-                        end
-                    end
-                    return table.concat(parts, " | "):sub(1, 200)
-                end
-
-                local before = readProgress()
-                local a = snap()
-                local log, conns = {}, {}
-                for _, d in ipairs(Rep:GetDescendants()) do
-                    if d:IsA("RemoteEvent") then
-                        table.insert(conns, d.OnClientEvent:Connect(function(...)
-                            log[#log + 1] = d.Name .. ": " .. show(...)
-                        end))
-                    end
-                end
-
-                for _ = 1, 6 do doRoll() task.wait(0.4) end
-                task.wait(1.2)
-
-                for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-                local b = snap()
-                local after = readProgress()
-
-                local out = { "bar before/after (screen): " .. tostring(before) .. " -> " .. tostring(after), "", "=== numbers that INCREASED in data ===" }
-                for path, nb in pairs(b) do
-                    local na = a[path]
-                    if na and nb > na then out[#out + 1] = path .. ": " .. na .. " -> " .. nb end
-                end
-                out[#out + 1] = ""
-                out[#out + 1] = "=== RemoteEvents received from the server while rolling ==="
-                local seen = 0
-                for _, l in ipairs(log) do
-                    seen += 1
-                    if seen > 60 then break end
-                    out[#out + 1] = l
-                end
-
-                local text = table.concat(out, "\n")
-                local copy = setclipboard or toclipboard
-                if copy then pcall(copy, text) end
-                print(text)
-                Rayfield:Notify({ Title = "Pity Roll", Content = "Done. Copied to clipboard - paste it in the chat.", Duration = 6 })
-            end)
-        end,
-    })
-
-    PityTab:CreateButton({
-        Name = "Show detected bar + weather",
-        Callback = function()
-            progLabel, weatherLabel, rollBtn, fillObj = nil, nil, nil, nil
-            do
-                local main = getMain()
-                local ok, area = pcall(function() return main.Bottom.rollButtons end)
-                if ok and area then
-                    for _, d in ipairs(area:GetDescendants()) do
-                        if not (d:IsA("UIStroke") or d:IsA("UICorner")) then
-                            print("[Pity] tree:", d:GetFullName():gsub("^.-rollButtons", "rollButtons"), d.ClassName,
-                                (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text or "")
-                        end
-                    end
-                end
-            end
-            local cur, max, approx = readProgress()
-            local w = currentWeather()
-            print("[Pity] bar:", cur, "/", max, approx and "(from fill)" or "(from text)")
-            print("[Pity] weather:", w, "| matches:", weatherMatches(w))
-            print("[Pity] server rollProgress:", ServerProgress, "| server max:", ServerMax)
-            if ServerRollInfo then
-                for k, v in pairs(ServerRollInfo) do print("[Pity] rollResult." .. tostring(k), "=", brief(v)) end
-            end
-            print("[Pity] last weatherUpdate args:", LastWeatherArgs)
             Rayfield:Notify({
                 Title = "Pity Roll",
-                Content = "Bar: " .. tostring(cur and math.floor(cur)) .. "/" .. tostring(max) .. (approx and " (fill)" or "") .. (ServerProgress and " [server]" or " [screen]") .. " | Weather: " .. tostring(w),
-                Duration = 6,
+                Content = "Pity: " .. tostring(getPity()) .. "/" .. MaxPity
+                    .. " (text=" .. tostring(readBarText()) .. ", server=" .. tostring(ServerProgress) .. ")"
+                    .. " | Weather: " .. tostring(currentWeather()),
+                Duration = 8,
             })
         end,
     })
@@ -2279,4 +1976,4 @@ end
 
 Rayfield:LoadConfiguration()
 
-Rayfield:Notify({ Title = "Titan Hub V36", Content = "Loaded (Raid Walk + Auto Rejoin + Pity Roll + Secret Bosses)", Duration = 5 })
+Rayfield:Notify({ Title = "Titan Hub V37", Content = "Loaded (Raid Walk + Auto Rejoin + Pity Roll + Secret Bosses)", Duration = 5 })
