@@ -1,3 +1,7 @@
+-- Early start: only needs LocalPlayer (NOT the map / game.Loaded)
+local Players = game:GetService("Players")
+while not Players.LocalPlayer do task.wait() end
+
 -- Clean up any previous instance first
 if getgenv().TitanLoaded then
     pcall(getgenv().TitanLoaded)
@@ -189,7 +193,6 @@ local Window = Rayfield:CreateWindow({
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
 
-local Players = game:GetService("Players")
 local Rep = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
@@ -253,25 +256,39 @@ getgenv().TitanLoaded = function()
 end
 
 -- ==================== Remotes ====================
-local function safeWaitForChild(parent, name, timeout)
-    local obj = parent:FindFirstChild(name) or parent:WaitForChild(name, timeout or 5)
-    if not obj then
-        warn("[Titan Hub] missing remote: " .. tostring(name))
-    end
-    return obj
+local challengeRemote, teleportAreaRemote, battleEvent, bossResultRemote
+local autoRollRemote, quickRollRemote, equipBestRemote, claimDailyRemote
+local claimQuestRemote, runInfTowerRemote
+
+-- resolved in the background, so the script can start before the game finished loading
+local RemoteSlots = {
+    challengeBoss = function(o) challengeRemote = o end,
+    teleportToArea = function(o) teleportAreaRemote = o end,
+    battleEvent = function(o) battleEvent = o end,
+    bossResult = function(o) bossResultRemote = o end,
+    toggleAutoRoll = function(o) autoRollRemote = o end,
+    toggleQuickRoll = function(o) quickRollRemote = o end,
+    equipBest = function(o) equipBestRemote = o end,
+    claimDaily = function(o) claimDailyRemote = o end,
+    claimQuest = function(o) claimQuestRemote = o end,
+    runInfTower = function(o) runInfTowerRemote = o end,
+}
+for name, assign in pairs(RemoteSlots) do
+    task.spawn(function()
+        local obj = Rep:WaitForChild(name, 180)
+        if obj then assign(obj) else warn("[Titan Hub] missing remote: " .. name) end
+    end)
 end
 
-local challengeRemote = safeWaitForChild(Rep, "challengeBoss", 5)
-local teleportAreaRemote = safeWaitForChild(Rep, "teleportToArea", 5)
-local battleEvent = safeWaitForChild(Rep, "battleEvent", 5)
-local bossResultRemote = safeWaitForChild(Rep, "bossResult", 5)
-local autoRollRemote = safeWaitForChild(Rep, "toggleAutoRoll", 5)
-local quickRollRemote = safeWaitForChild(Rep, "toggleQuickRoll", 5)
-local equipBestRemote = safeWaitForChild(Rep, "equipBest", 5)
-local claimDailyRemote = safeWaitForChild(Rep, "claimDaily", 5)
-local claimQuestRemote = safeWaitForChild(Rep, "claimQuest", 5)
-local runInfTowerRemote = safeWaitForChild(Rep, "runInfTower", 5)
-local requestRejoinRemote = Rep:FindFirstChild("requestRejoin")
+-- connect to a RemoteEvent as soon as it exists (and the script is still active)
+local function onRemoteEvent(name, handler)
+    task.spawn(function()
+        local obj = Rep:WaitForChild(name, 180)
+        if obj and getgenv().TitanLoaded then
+            table.insert(activeConnections, obj.OnClientEvent:Connect(handler))
+        end
+    end)
+end
 
 -- ==================== Data ====================
 local BossHierarchy = {
@@ -792,23 +809,19 @@ end
 
 local ResultCounter = 0
 local LastBossCooldown = 300
-if bossResultRemote then
-    table.insert(activeConnections, bossResultRemote.OnClientEvent:Connect(function(won, boss, diff, cd)
-        ResultCounter += 1
-        if type(cd) == "number" then LastBossCooldown = cd end
-    end))
-end
+onRemoteEvent("bossResult", function(won, boss, diff, cd)
+    ResultCounter += 1
+    if type(cd) == "number" then LastBossCooldown = cd end
+end)
 
 local BattleStarts, BattleEnds = 0, 0
-if battleEvent then
-    table.insert(activeConnections, battleEvent.OnClientEvent:Connect(function(action)
-        if action == "battle_start" then
-            BattleStarts += 1
-        elseif action == "battle_ended" then
-            BattleEnds += 1
-        end
-    end))
-end
+onRemoteEvent("battleEvent", function(action)
+    if action == "battle_start" then
+        BattleStarts += 1
+    elseif action == "battle_ended" then
+        BattleEnds += 1
+    end
+end)
 
 local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, useWalk)
     shouldContinue = shouldContinue or function() return true end
@@ -887,6 +900,12 @@ local function startMode(mode, loopFn)
 
     local function alive() return FarmToken == myToken and ActiveMode == mode end
     task.spawn(function()
+        -- do not start farming until the map is loaded
+        local t0 = os.clock()
+        while alive() and not (workspace:FindFirstChild("bossNpcs") or workspace:FindFirstChild("KaijuRaid")) and os.clock() - t0 < 120 do
+            task.wait(0.5)
+        end
+        if not alive() then return end
         local ok, err = pcall(loopFn, alive)
         if not ok then warn("farm loop error:", err) end
     end)
@@ -1027,7 +1046,11 @@ local function disableGameAfkScript()
         pcall(function() afkScript.Disabled = true end)
     end
 end
-disableGameAfkScript()
+task.spawn(function()
+    local ps = player:WaitForChild("PlayerScripts", 60)
+    if ps then ps:WaitForChild("AfkRejoinClient", 30) end
+    disableGameAfkScript()
+end)
 
 table.insert(activeConnections, player.Idled:Connect(function()
     if not AntiAfk then return end
@@ -1062,6 +1085,7 @@ local function executeRejoin()
     rejoinAttempt += 1
     queueReload()
 
+    local requestRejoinRemote = Rep:FindFirstChild("requestRejoin")
     if rejoinAttempt == 1 and requestRejoinRemote then
         pcall(function() requestRejoinRemote:FireServer() end)
         task.wait(1.5)
@@ -1984,9 +2008,7 @@ do
         for _, n in ipairs(WeatherNames) do WeatherSet[norm(n)] = true end
     end
 
-    local weatherRemote = Rep:FindFirstChild("weatherUpdate")
-    if weatherRemote then
-        table.insert(activeConnections, weatherRemote.OnClientEvent:Connect(function(a, b)
+    onRemoteEvent("weatherUpdate", function(a, b)
             local cand
             if type(a) == "string" then cand = a
             elseif type(a) == "table" then cand = a.weather or a.Weather or a.name or a.Name or a.type or a[1]
@@ -1998,8 +2020,7 @@ do
             elseif a == nil then
                 ActiveServerWeather = nil
             end
-        end))
-    end
+    end)
 
     local function doRoll()
         local rollRemote = Rep:FindFirstChild("RollRequest")
@@ -2024,9 +2045,7 @@ do
         return num * (({ k = 1e3, m = 1e6, b = 1e9 })[suf:lower()] or 1)
     end
 
-    local rollResultRemote = Rep:FindFirstChild("rollResult")
-    if rollResultRemote then
-        table.insert(activeConnections, rollResultRemote.OnClientEvent:Connect(function(...)
+    onRemoteEvent("rollResult", function(...)
             for i = 1, select("#", ...) do
                 local v = select(i, ...)
                 if type(v) == "table" and type(v.rollProgress) == "number" then
@@ -2043,8 +2062,7 @@ do
                     end
                 end
             end
-        end))
-    end
+    end)
 
     -- bar text like "8,787/10,000" (or "8.78K/10K" with Short Numbers on)
     local progLabel
