@@ -8,7 +8,10 @@ if getgenv().TitanLoaded then
 end
 
 -- ==================== Linoria UI ====================
-local repo = "https://raw.githubusercontent.com/mstudio45/LinoriaLib/main/"
+-- Pin to a specific commit: replace "main" with a commit hash from
+-- https://github.com/mstudio45/LinoriaLib/commits/main (after you verified that version works)
+local LINORIA_REF = "main"
+local repo = "https://raw.githubusercontent.com/mstudio45/LinoriaLib/" .. LINORIA_REF .. "/"
 local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
 local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
 local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
@@ -1183,7 +1186,15 @@ end))
 
 table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function()
     if not AutoReconnectEnabled or rejoining then return end
-    if GuiService:GetErrorMessage() == "" then return end
+    local msg = tostring(GuiService:GetErrorMessage() or ""):lower()
+    if msg == "" then return end
+
+    -- rejoin only for real disconnect / kick messages (not asset or image load errors)
+    local isDisconnect = false
+    for _, kw in ipairs({ "disconnect", "kick", "unexpected", "lost connection", "shutdown" }) do
+        if msg:find(kw, 1, true) then isDisconnect = true break end
+    end
+    if not isDisconnect then return end
 
     rejoining = true
     rejoinAttempt = 0
@@ -1240,7 +1251,7 @@ do
     local StopFlags = {
         "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
         "SmartFarm5", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
-        "AutoClaimQuests", "FastBattle",
+        "AutoClaimQuests", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -1381,7 +1392,7 @@ FarmTab:CreateToggle({
                       lastSkip = os.clock()
                       if battleEvent then pcall(function() battleEvent:FireServer("Skip") end) end
                   end
-                  task.wait(0.4)
+                  task.wait(0.4 + math.random() * 0.3)
               end
               restoreBattleGuis()
           end)
@@ -1609,7 +1620,7 @@ local function runKaijuRaidFarm()
                 for _, boss in ipairs(BossHierarchy["raid"]) do
                     if not alive() then break end
                     if SelectedRaidBosses[boss] then
-                        if attemptBoss(boss, diff, alive, "raid", RaidWalkMode) then
+                        if attemptBoss(boss, diff, alive, "raid", FarmWalk) then
                             didAny = true
                         end
                     end
@@ -1631,13 +1642,9 @@ ModeToggles["raid_farm"] = RaidTab:CreateToggle({
     end,
 })
 
-RaidTab:CreateToggle({
-    Name = "Walk to Bosses (natural walking, no teleport)",
-    CurrentValue = true,
-    Flag = "RaidWalkMode",
-    Callback = function(Value)
-        RaidWalkMode = Value
-    end,
+RaidTab:CreateParagraph({
+    Title = "Movement",
+    Content = "Walk / Teleport and Auto Jump follow the settings in Auto Farm > Movement.",
 })
 
 RaidTab:CreateButton({
@@ -1785,7 +1792,7 @@ end
 
 local function customFarmWorldOnce(worldKey, alive)
     local didAny = false
-    local useWalk = (worldKey == "raid") and RaidWalkMode or false
+    local useWalk = FarmWalk
     for _, diff in ipairs(DiffList) do
         for _, boss in ipairs(BossHierarchy[worldKey]) do
             if not alive() then return didAny end
@@ -1924,25 +1931,6 @@ RollTab:CreateButton({ Name = "Toggle Auto Roll", Callback = function() if autoR
 RollTab:CreateButton({ Name = "Toggle Quick Roll", Callback = function() if quickRollRemote then quickRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Equip Best Cards", Callback = function() if equipBestRemote then equipBestRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Claim Daily Reward", Callback = function() if claimDailyRemote then claimDailyRemote:FireServer() end end })
-
-RollTab:CreateToggle({
-   Name = "Auto Run Infinite Tower",
-   CurrentValue = false,
-   Flag = "AutoInfTowerMulti",
-   Callback = function(Value)
-      autoTowerToken += 1
-      local towerToken = autoTowerToken
-      if not Value then return end
-      task.spawn(function()
-          while autoTowerToken == towerToken do
-              if runInfTowerRemote and not ActiveMode then
-                  pcall(function() runInfTowerRemote:FireServer() end)
-              end
-              task.wait(15)
-          end
-      end)
-   end,
-})
 
 -- ==================== NPCs tab ====================
 local NpcTab = Window:CreateTab("NPCs", 4483362458)
@@ -2110,6 +2098,67 @@ do
     })
 end
 
+-- ==================== Auto Roll state helpers (used by Pity Roll) ====================
+-- reads the dot inside PlayerGui.Main.Bottom.rollButtons.AutoRollFrame (grey = off, green = on)
+do
+    local indicator
+
+    local function getFrame()
+        local ok, f = pcall(function()
+            return player.PlayerGui.Main.Bottom.rollButtons.AutoRollFrame
+        end)
+        return ok and f or nil
+    end
+
+    local NameHints = { "dot", "indicator", "circle", "status", "light", "state", "ball", "toggle" }
+
+    local function colorOf(o)
+        if o:IsA("ImageLabel") or o:IsA("ImageButton") then return o.ImageColor3 end
+        return o.BackgroundColor3
+    end
+
+    local function findIndicator()
+        local frame = getFrame()
+        if not frame then return nil end
+        local fallback
+        for _, d in ipairs(frame:GetDescendants()) do
+            if d:IsA("GuiObject") and not d:IsA("TextLabel") and not d:IsA("TextButton") then
+                local n = d.Name:lower()
+                for _, hint in ipairs(NameHints) do
+                    if n:find(hint, 1, true) then return d end
+                end
+                -- round and roughly square = likely the status dot
+                local corner = d:FindFirstChildOfClass("UICorner")
+                local s = d.AbsoluteSize
+                if not fallback and corner and corner.CornerRadius.Scale >= 0.45
+                    and s.X > 0 and math.abs(s.X - s.Y) < 3 then
+                    fallback = d
+                end
+            end
+        end
+        return fallback
+    end
+
+    local function isGreen(c)
+        return c.G > 0.5 and c.G > c.R * 1.25 and c.G > c.B * 1.25
+    end
+
+    -- true = on, false = off, nil = indicator not found
+    local function getState()
+        if not (indicator and indicator.Parent) then indicator = findIndicator() end
+        if not indicator then return nil end
+        return isGreen(colorOf(indicator))
+    end
+
+    local function toggleGame()
+        if autoRollRemote then pcall(function() autoRollRemote:FireServer() end) end
+    end
+
+    -- shared with the Pity Roll block
+    PerfCache.arGetState = getState
+    PerfCache.arToggle = toggleGame
+end
+
 -- ==================== Pity Roll ====================
 do
     local MaxPity = 10000
@@ -2121,6 +2170,25 @@ do
     local pityToken = 0
     local pityToggle
     local ActiveServerWeather, ActiveServerWeatherAt = nil, 0
+
+    -- merged mode: the game's Auto Roll fills the pity, the script takes over near full
+    local UseGameAuto = false
+    local AutoHandoff = 300      -- switch from game Auto Roll to manual rolls this far from full
+    local autoOwned, lastAutoToggle = false, 0
+
+    -- make the game's Auto Roll match `want` (true = on). Returns false if the state is unreadable.
+    local function setAuto(want)
+        local get, tog = PerfCache.arGetState, PerfCache.arToggle
+        if not (get and tog) then return false end
+        local st = get()
+        if st == nil then return false end
+        if st ~= want and os.clock() - lastAutoToggle > 1.5 then
+            lastAutoToggle = os.clock()
+            tog()
+        end
+        if want then autoOwned = true end
+        return true
+    end
 
     -- stop the pity loop on Unload / re-execute
     table.insert(activeConnections, { Disconnect = function() pityToken += 1 end })
@@ -2235,6 +2303,10 @@ do
         return ActiveServerWeather
     end
 
+    -- share with the Infinity Tower tab (end tower on weather)
+    PerfCache.getWeather = currentWeather
+    PerfCache.weatherNames = WeatherNames
+
     local function weatherMatches(w)
         if next(PityWeathers) == nil then return true end
         if not w then return false end
@@ -2274,10 +2346,14 @@ do
                         Rayfield:Notify({ Title = "Pity Roll", Content = "Pity used! Filling it again...", Duration = 4 })
                     end
                     notifiedFull = false
-                    if FillWhileWaiting then
+                    if FillWhileWaiting and UseGameAuto and cur < MaxPity - AutoHandoff and setAuto(true) then
+                        -- far from full: the game's own Auto Roll does the rolling
+                        task.wait(0.5)
+                    elseif FillWhileWaiting then
+                        if UseGameAuto then setAuto(false) end
                         local before = ResultTick
                         doRoll()
-                        if cur >= MaxPity - 30 then
+                        if cur >= MaxPity - 80 then
                             -- near full: wait for the server answer before the next roll,
                             -- otherwise an in-flight roll can spend the boosted (pity) roll by accident
                             local t = os.clock()
@@ -2289,6 +2365,7 @@ do
                             task.wait(ServerInterval + 0.02)
                         end
                     else
+                        if UseGameAuto then setAuto(false) end
                         task.wait(0.5)
                     end
                 elseif weatherMatches(w) then
@@ -2296,6 +2373,7 @@ do
                         spending, spendRolls = true, 0
                         Rayfield:Notify({ Title = "Pity Roll", Content = "Weather active (" .. tostring(w or "Any") .. ") - spending pity!", Duration = 4 })
                     end
+                    if UseGameAuto then setAuto(false) end
                     spendRolls += 1
                     if spendRolls > MaxSpendRolls then
                         stopPity("Bar didn't reset after " .. MaxSpendRolls .. " rolls.")
@@ -2304,6 +2382,7 @@ do
                     doRoll()
                     task.wait(0.25)
                 else
+                    if UseGameAuto then setAuto(false) end
                     if not notifiedFull then
                         notifiedFull = true
                         Rayfield:Notify({ Title = "Pity Roll", Content = "Pity is full. Holding until the chosen weather arrives.", Duration = 5 })
@@ -2335,6 +2414,13 @@ do
         Callback = function(v) FillWhileWaiting = v end,
     })
 
+    RollTab:CreateToggle({
+        Name = "Use game Auto Roll to fill pity",
+        CurrentValue = false,
+        Flag = "RollPityUseAuto",
+        Callback = function(v) UseGameAuto = v end,
+    })
+
     pityToggle = RollTab:CreateToggle({
         Name = "Start Pity Cycle",
         CurrentValue = false,
@@ -2342,7 +2428,14 @@ do
         Callback = function(Value)
             pityToken += 1
             local myToken = pityToken
-            if not Value then return end
+            if not Value then
+                -- hand the game's Auto Roll back to "off" if this mode turned it on
+                if autoOwned then
+                    autoOwned = false
+                    task.spawn(function() setAuto(false) end)
+                end
+                return
+            end
             task.spawn(function()
                 local ok, err = pcall(runPity, myToken)
                 if not ok then warn("[Pity Roll] error:", err) end
@@ -2363,6 +2456,218 @@ do
         end,
     })
 end
+
+-- ==================== Infinity Tower tab ====================
+-- own function scope: adds no top-level locals
+;(function()
+    local TowerTab = Window:CreateTab("Infinity Tower", 4483362458)
+    local towerRemote
+    task.spawn(function()
+        towerRemote = Rep:WaitForChild("infinityTowerAction", 180)
+        if not towerRemote then warn("[Titan Hub] missing remote: infinityTowerAction") end
+    end)
+
+    local TargetFloor = 0
+    local autoToken = 0
+    local autoToggle
+    local floorLabel, lastScan = nil, 0
+
+    local function sendAction(action)
+        if not towerRemote then return false end
+        return pcall(function() towerRemote:FireServer(action) end)
+    end
+
+    -- "Currently in battle: Floor 2273"  ->  2273
+    local function parseFloor(text)
+        text = tostring(text or ""):gsub("<[^>]+>", "")
+        if not text:lower():find("in battle", 1, true) then return nil end
+        local n = text:match("[Ff]loor%s*:?%s*([%d,]+)")
+        if not n then return nil end
+        return tonumber((n:gsub(",", "")))
+    end
+
+    local function readFloor()
+        -- primary source: BattleUI.battleContainer.battleTabs.tower.textLabel  ->  "Infinite F474"
+        local okT, tl = pcall(function()
+            return player.PlayerGui.BattleUI.battleContainer.battleTabs.tower.textLabel
+        end)
+        if okT and tl and tl:IsA("TextLabel") then
+            local txt = (tostring(tl.Text):gsub("<[^>]+>", ""))
+            local n = txt:match("[Ff]%s*([%d,]+)")
+            if n then
+                local f = tonumber((n:gsub(",", "")))
+                if f then return f end
+            end
+        end
+
+        -- fallback: scan for the "Currently in battle: Floor N" label
+        if floorLabel and floorLabel.Parent then
+            local f = parseFloor(floorLabel.Text)
+            if f then return f end
+        end
+        floorLabel = nil
+        if os.clock() - lastScan < 2 then return nil end
+        lastScan = os.clock()
+        local pgui = player:FindFirstChild("PlayerGui")
+        if not pgui then return nil end
+        for _, d in ipairs(pgui:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local f = parseFloor(d.Text)
+                if f then
+                    floorLabel = d
+                    return f
+                end
+            end
+        end
+        return nil
+    end
+
+    TowerTab:CreateSection("End the tower at a floor (claim the big reward)")
+
+    TowerTab:CreateInput({
+        Name = "End at floor",
+        Default = "",
+        Placeholder = "e.g. 2500",
+        Flag = "TowerTargetFloor",
+        Callback = function(v)
+            TargetFloor = tonumber((tostring(v or ""):gsub("[%s,]", ""))) or 0
+        end,
+    })
+
+    autoToggle = TowerTab:CreateToggle({
+        Name = "Auto End when floor reaches target",
+        CurrentValue = false,
+        Flag = "TowerAutoEnd",
+        Callback = function(Value)
+            autoToken += 1
+            local myToken = autoToken
+            if not Value then return end
+            task.spawn(function()
+                -- wait for the saved config so the target floor is applied first
+                while autoToken == myToken and Rayfield.Loading do task.wait(0.3) end
+                while autoToken == myToken do
+                    local f = readFloor()
+                    if f and TargetFloor > 0 and f >= TargetFloor then
+                        local ok = sendAction("end")
+                        Rayfield:Notify({
+                            Title = "Infinity Tower",
+                            Content = ok and ("Reached floor " .. f .. " - ending the tower to claim the reward")
+                                or "Tower remote not ready yet",
+                            Duration = 6,
+                        })
+                        if ok then
+                            autoToggle:Set(false)
+                            return
+                        end
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        end,
+    })
+
+    -- ===== NEW: end the tower when a chosen weather appears =====
+    TowerTab:CreateSection("End the tower on weather")
+
+    local EndWeathers = { arcane = true, awakened = true }
+    local weatherTok = 0
+    local weatherToggle
+
+    TowerTab:CreateDropdown({
+        Name = "End tower when this weather appears",
+        Options = PerfCache.weatherNames or { "Arcane", "Awakened" },
+        CurrentOption = { "Arcane", "Awakened" },
+        MultipleOptions = true,
+        Flag = "TowerEndWeathers",
+        Callback = function(list)
+            EndWeathers = {}
+            for _, n in ipairs(list) do EndWeathers[norm(n)] = true end
+        end,
+    })
+
+    weatherToggle = TowerTab:CreateToggle({
+        Name = "Auto End tower on weather",
+        CurrentValue = false,
+        Flag = "TowerEndOnWeather",
+        Callback = function(Value)
+            weatherTok += 1
+            local myTok = weatherTok
+            if not Value then return end
+            task.spawn(function()
+                while weatherTok == myTok and Rayfield.Loading do task.wait(0.3) end
+                while weatherTok == myTok do
+                    local w = PerfCache.getWeather and PerfCache.getWeather()
+                    if w and EndWeathers[norm(w)] then
+                        local ok = sendAction("end")
+                        Rayfield:Notify({
+                            Title = "Infinity Tower",
+                            Content = ok and ("Weather " .. w .. " is active - ending the tower")
+                                or "Tower remote not ready yet",
+                            Duration = 6,
+                        })
+                        if ok then
+                            weatherToggle:Set(false)
+                            return
+                        end
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        end,
+    })
+
+    TowerTab:CreateSection("Manual")
+
+    TowerTab:CreateButton({
+        Name = "End Tower NOW (claim reward)",
+        Callback = function()
+            local ok = sendAction("end")
+            Rayfield:Notify({ Title = "Infinity Tower", Content = ok and "End sent" or "Tower remote not found", Duration = 4 })
+        end,
+    })
+
+    TowerTab:CreateButton({
+        Name = "Pause Tower",
+        Callback = function()
+            local ok = sendAction("pause")
+            Rayfield:Notify({ Title = "Infinity Tower", Content = ok and "Pause sent" or "Tower remote not found", Duration = 4 })
+        end,
+    })
+
+    TowerTab:CreateButton({
+        Name = "Show current floor",
+        Callback = function()
+            local f = readFloor()
+            Rayfield:Notify({
+                Title = "Infinity Tower",
+                Content = f and ("Current floor: " .. f .. " | Target: " .. TargetFloor)
+                    or "Floor not found (no tower tab in the BATTLES list and no 'Currently in battle' label)",
+                Duration = 5,
+            })
+        end,
+    })
+
+    TowerTab:CreateSection("Auto Run")
+
+    TowerTab:CreateToggle({
+        Name = "Auto Run Infinite Tower",
+        CurrentValue = false,
+        Flag = "AutoInfTowerMulti",
+        Callback = function(Value)
+            autoTowerToken += 1
+            local towerToken = autoTowerToken
+            if not Value then return end
+            task.spawn(function()
+                while autoTowerToken == towerToken do
+                    if runInfTowerRemote and not ActiveMode then
+                        pcall(function() runInfTowerRemote:FireServer() end)
+                    end
+                    task.wait(15)
+                end
+            end)
+        end,
+    })
+end)()
 
 Rayfield:LoadConfiguration()
 
