@@ -1803,19 +1803,8 @@ do
         end
     end
 
-    -- server value: the game sends rollProgress with every roll result
-    local ServerProgress = nil
-    local rollResultRemote = Rep:FindFirstChild("rollResult")
-    if rollResultRemote then
-        table.insert(activeConnections, rollResultRemote.OnClientEvent:Connect(function(...)
-            for i = 1, select("#", ...) do
-                local v = select(i, ...)
-                if type(v) == "table" and type(v.rollProgress) == "number" then
-                    ServerProgress = v.rollProgress
-                end
-            end
-        end))
-    end
+    -- values the server sends with every roll (rollResult, 3rd argument)
+    local ServerProgress, ServerReady, ServerInterval = nil, false, 0.2
 
     local function parseAmount(s)
         s = tostring(s or ""):gsub(",", ""):gsub("%s", "")
@@ -1823,6 +1812,28 @@ do
         num = tonumber(num)
         if not num then return nil end
         return num * (({ k = 1e3, m = 1e6, b = 1e9 })[suf:lower()] or 1)
+    end
+
+    local rollResultRemote = Rep:FindFirstChild("rollResult")
+    if rollResultRemote then
+        table.insert(activeConnections, rollResultRemote.OnClientEvent:Connect(function(...)
+            for i = 1, select("#", ...) do
+                local v = select(i, ...)
+                if type(v) == "table" and type(v.rollProgress) == "number" then
+                    -- the game shows rollProgress % maxTierThreshold on the bar
+                    local maxT = (type(v.maxTierThreshold) == "number" and v.maxTierThreshold > 0) and v.maxTierThreshold or MaxPity
+                    ServerProgress = v.rollProgress % maxT
+                    -- pity ready = the bar label turns into the tier label ("100,000x Luck")
+                    local lbl = type(v.activeTier) == "table" and tostring(v.activeTier.label or "") or ""
+                    local mult = parseAmount(lbl:match("^%s*([%d%.,]+%s*[KkMmBb]?)%s*[xX]"))
+                    ServerReady = mult ~= nil and mult >= 10000
+                    -- the game's own roll interval
+                    if type(v.baseCooldown) == "number" and type(v.rollSpeed) == "number" and v.rollSpeed > 0 then
+                        ServerInterval = math.max(v.baseCooldown / v.rollSpeed, 0.125)
+                    end
+                end
+            end
+        end))
     end
 
     -- bar text like "8,787/10,000" (or "8.78K/10K" with Short Numbers on)
@@ -1850,7 +1861,10 @@ do
 
     -- bar text first (exact, current), then the server value from the last roll
     local function getPity()
-        return readBarText() or ServerProgress
+        local t = readBarText()
+        if t then return t end
+        if ServerReady then return MaxPity - 1 end
+        return ServerProgress
     end
 
     local function currentWeather()
@@ -1902,7 +1916,7 @@ do
                     notifiedFull = false
                     if FillWhileWaiting then
                         doRoll()
-                        task.wait(0.18)
+                        task.wait(ServerInterval + 0.02)
                     else
                         task.wait(0.5)
                     end
