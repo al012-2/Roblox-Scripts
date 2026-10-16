@@ -185,7 +185,7 @@ function Rayfield:LoadConfiguration()
 
     -- ===== Auto Save =====
     local auto = settings:AddRightGroupbox("Auto Save")
-    auto:AddToggle("AutoSaveCfg", { Text = "Auto save config (every 5s)", Default = true })
+    auto:AddToggle("AutoSaveCfg", { Text = "Auto save config (when something changes)", Default = true })
     auto:AddLabel("Saves farm / roll / pity state, so it resumes after a server change.", true)
 
     local myTok = (getgenv().TitanSaveTok or 0) + 1
@@ -202,18 +202,39 @@ function Rayfield:LoadConfiguration()
         return n ~= "" and n or nil
     end
 
+    -- cheap fingerprint of every toggle / option, so the file is written only when something changed
+    local function signature()
+        local parts = {}
+        for k, t in pairs(LToggles) do parts[#parts + 1] = k .. "=" .. tostring(t.Value) end
+        for k, o in pairs(LOptions) do
+            local v = o.Value
+            if type(v) == "table" then
+                local ks = {}
+                for kk, vv in pairs(v) do ks[#ks + 1] = tostring(kk) .. ":" .. tostring(vv) end
+                table.sort(ks)
+                v = table.concat(ks, ",")
+            end
+            parts[#parts + 1] = k .. "=" .. tostring(v)
+        end
+        table.sort(parts)
+        return table.concat(parts, "|")
+    end
+
     task.spawn(function()
         task.wait(8) -- let the autoload finish first, so defaults never overwrite the saved config
+        local lastSig
         while getgenv().TitanSaveTok == myTok do
             local t = LToggles.AutoSaveCfg
             if t and t.Value and not Rayfield.Loading then
-                local name = currentCfgName()
-                if not name then
-                    name = "AutoSave"
+                local ok, sig = pcall(signature)
+                if ok and sig ~= lastSig then
+                    local name = currentCfgName()
+                    local fresh = not name
+                    name = name or "AutoSave"
                     pcall(function() SaveManager:Save(name) end)
-                    pcall(function() SaveManager:SaveAutoloadConfig(name) end)
+                    if fresh then pcall(function() SaveManager:SaveAutoloadConfig(name) end) end
+                    lastSig = sig
                 end
-                pcall(function() SaveManager:Save(name) end)
             end
             task.wait(5)
         end
@@ -400,6 +421,9 @@ local function norm(s)
     return (s:lower():gsub("[%s_%-]", ""))
 end
 
+-- small caches so heavy lookups do not run every frame
+local PerfCache = { cd = {}, scanAt = 0 }
+
 -- ==================== World navigation ====================
 local function returnToLobby()
     local char = getCharWithTimeout(5)
@@ -429,11 +453,11 @@ local function nearWorldBosses(worldKey)
     if worldKey == "raid" then
         local raidFolder = workspace:FindFirstChild("KaijuRaid")
         if not raidFolder then return false end
-        for _, m in ipairs(raidFolder:GetDescendants()) do
-            if m:IsA("Model") then
-                local ok, pos = pcall(function() return m:GetPivot().Position end)
-                if ok and (pos - root.Position).Magnitude < 600 then return true end
-            end
+        -- "am I inside the raid map": distance to the raid portal spawn (no map scan, works even with no bosses alive)
+        local sp = raidFolder:FindFirstChild("portal")
+        sp = sp and sp:FindFirstChild("spawnLoc")
+        if sp and sp:IsA("BasePart") then
+            return (sp.Position - root.Position).Magnitude < 600
         end
         return false
     end
@@ -686,7 +710,9 @@ local function findBossModel(bossName)
         end
     end
 
-    if not found then
+    -- full-workspace scan is expensive: allowed at most once every 20s (shared by all bosses)
+    if not found and os.clock() - PerfCache.scanAt > 20 then
+        PerfCache.scanAt = os.clock()
         local npcsFolder = workspace:FindFirstChild("npcs")
         for _, obj in ipairs(workspace:GetDescendants()) do
             if obj:IsA("Model")
@@ -702,7 +728,7 @@ local function findBossModel(bossName)
     return found
 end
 
-local function isBossOnCooldown(bossName, difficulty)
+local function isBossOnCooldownRaw(bossName, difficulty)
     local bossModel = findBossModel(bossName)
     if not bossModel then return false end
 
@@ -721,6 +747,16 @@ local function isBossOnCooldown(bossName, difficulty)
         end
     end
     return false
+end
+
+-- cached for 0.5s (cleared on every boss result / battle end, so it never gets stale)
+local function isBossOnCooldown(bossName, difficulty)
+    local k = bossName .. "|" .. difficulty
+    local c = PerfCache.cd[k]
+    if c and os.clock() - c.t < 0.5 then return c.v end
+    local v = isBossOnCooldownRaw(bossName, difficulty)
+    PerfCache.cd[k] = { t = os.clock(), v = v }
+    return v
 end
 
 -- ==================== Movement (teleport + natural walking for raid) ====================
@@ -841,6 +877,7 @@ local ResultCounter = 0
 local LastBossCooldown = 300
 onRemoteEvent("bossResult", function(won, boss, diff, cd)
     ResultCounter += 1
+    PerfCache.cd = {}
     if type(cd) == "number" then LastBossCooldown = cd end
 end)
 
@@ -850,6 +887,7 @@ onRemoteEvent("battleEvent", function(action)
         BattleStarts += 1
     elseif action == "battle_ended" then
         BattleEnds += 1
+        PerfCache.cd = {}
     end
 end)
 
@@ -1343,7 +1381,7 @@ FarmTab:CreateToggle({
                       lastSkip = os.clock()
                       if battleEvent then pcall(function() battleEvent:FireServer("Skip") end) end
                   end
-                  task.wait(0.1)
+                  task.wait(0.4)
               end
               restoreBattleGuis()
           end)
