@@ -2259,8 +2259,8 @@ do
                     stopPity("Pity bar value not found")
                     return
                 end
-                doRoll()
-                task.wait(0.4)
+                -- never roll blindly here: a roll could spend a ready pity outside the chosen weather
+                task.wait(0.5)
             else
                 missingSince = nil
                 local full = cur >= MaxPity - 1
