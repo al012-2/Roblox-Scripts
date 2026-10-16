@@ -1838,6 +1838,10 @@ do
             end
         end
         if not progLabel then return nil end
+        -- when the pity is ready the label turns into "100,000x Luck"
+        local txt = tostring(progLabel.Text)
+        local mult = parseAmount(txt:match("^%s*([%d%.,]+%s*[KkMmBb]?)%s*[xX]"))
+        if mult and mult >= 10000 then return MaxPity - 1 end
         local a, b = tostring(progLabel.Text):match("^%s*([%d%.,]+%s*[KkMmBb]?)%s*/%s*([%d%.,]+%s*[KkMmBb]?)%s*$")
         local cur, max = parseAmount(a), parseAmount(b)
         if cur and max == MaxPity then return cur end
@@ -1886,7 +1890,8 @@ do
                 task.wait(0.4)
             else
                 missingSince = nil
-                local full = cur >= MaxPity
+                -- the pity is ready at 9999/10000: the NEXT roll is the boosted one
+                local full = cur >= MaxPity - 1
                 local w = currentWeather()
 
                 if not full then
