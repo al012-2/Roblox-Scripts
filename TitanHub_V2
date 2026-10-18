@@ -278,9 +278,9 @@ local DiffList = {"Normal", "Hard", "Extreme", "Nightmare"}
 local ModeToggles = {}
 local isSwitchingMode = false
 
--- Regular worlds are separated from the raid
-local WorldOrder = {"1", "2", "3", "4", "5"}
-local AllWorldsAndRaid = {"1", "2", "3", "4", "5", "raid"}
+-- Regular worlds are separated from the raid and events
+local WorldOrder = {"1", "2", "3", "4", "5", "6"}
+local AllWorldsAndRaid = {"1", "2", "3", "4", "5", "6", "raid", "halloween"}
 
 -- Raid-specific settings
 local RaidWalkMode = true
@@ -368,7 +368,22 @@ local BossHierarchy = {
    ["3"] = {"dreamer", "insect_eater", "thread_demon", "moon_reaper", "worthy_fighter", "thriller_king"},
    ["4"] = {"leopard_assassin", "mochi_man", "sand_warlord", "string_emperor", "red_dog", "dragon_emperor"},
    ["5"] = {"blood_brother", "blooming_wrath", "volcano_head", "deadbeat_dad", "kindness_spreader", "curse_tyrant"},
-   ["raid"] = {"kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"}
+   ["6"] = {"mirror_traitor"}, -- Hueco Mundo: the rest is discovered from workspace.bossNpcs["6"] below
+   ["raid"] = {"kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"},
+   ["halloween"] = {
+       "halloween_scythe",
+       "halloween_lich",
+       "halloween_alucard",
+       "halloween_pinhead",
+       "halloween_tomie",
+       "halloween_friend",
+       "halloween_darkness",
+       "halloween_ghost_1",
+       "halloween_ghost_2",
+       "halloween_ghost_3",
+       "halloween_ghost_4",
+       "halloween_ghost_5",
+   },
 }
 
 local BossDisplayName = {
@@ -377,7 +392,46 @@ local BossDisplayName = {
     mina_ashiro = "Artillery Captain",
     soshiro_hoshina = "Blade Vice Captain",
     kikoru_shinomiya = "Axe Prodigy",
+    halloween_scythe = "Scythe Meister",
+    halloween_lich = "Eternal Blight",
+    halloween_alucard = "Bloodthirsty Monarch",
+    halloween_pinhead = "Architect of Agony",
+    halloween_tomie = "Beautiful Abomination",
+    halloween_friend = "Faceless Prophet",
+    halloween_darkness = "Primordial Dread",
+    halloween_ghost_1 = "Pumpkin Wisp",
+    halloween_ghost_2 = "Grave Phantom",
+    halloween_ghost_3 = "Forest Banshee",
+    halloween_ghost_4 = "Castle Wraith",
+    halloween_ghost_5 = "Royal Wraith",
 }
+
+-- World 6 (Hueco Mundo): bosses are read from workspace.bossNpcs["6"] (attribute bossId, or the model name).
+-- No waiting at startup: the folder usually streams in only after you enter the world,
+-- so scanWorld6() runs once now and again every time we arrive in world 6.
+local function scanWorld6()
+    local bn = workspace:FindFirstChild("bossNpcs")
+    local f6 = bn and bn:FindFirstChild("6")
+    if not f6 then return false end
+    local ids, seen = {}, {}
+    for _, m in ipairs(f6:GetChildren()) do
+        if m:IsA("Model") and not m:GetAttribute("AreaOrder") then
+            local id = m:GetAttribute("bossId")
+            if type(id) ~= "string" or id == "" then
+                id = m.Name:lower():gsub("%s+", "_")
+            end
+            if id ~= "" and not seen[id] then
+                seen[id] = true
+                table.insert(ids, id)
+                if m.Name ~= "" and not BossDisplayName[id] then BossDisplayName[id] = m.Name end
+            end
+        end
+    end
+    if #ids == 0 then return false end
+    BossHierarchy["6"] = ids
+    return true
+end
+pcall(scanWorld6)
 
 local WorldAreaNames = {
     ["1"] = "Shiganshina",
@@ -385,7 +439,9 @@ local WorldAreaNames = {
     ["3"] = "Infinity Castle",
     ["4"] = "Marineford",
     ["5"] = "Shibuya Station",
-    ["raid"] = "Kaiju Raid"
+    ["6"] = "Hueco Mundo",
+    ["raid"] = "Kaiju Raid",
+    ["halloween"] = "Halloween Event",
 }
 
 local NpcButtons = {
@@ -461,6 +517,25 @@ local lastTpWorld, lastTpChar = nil, nil
 local function nearWorldBosses(worldKey)
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     if not root then return false end
+    if worldKey == "halloween" then
+        local hw = workspace:FindFirstChild("HalloweenEvent")
+        if hw then
+            local evNpcs = hw:FindFirstChild("EventNPCs")
+            local bosses = evNpcs and evNpcs:FindFirstChild("Bosses")
+            if bosses then
+                for _, m in ipairs(bosses:GetChildren()) do
+                    if m:IsA("Model") then
+                        local ok, pos = pcall(function() return m:GetPivot().Position end)
+                        if ok and (pos - root.Position).Magnitude < 900 then return true end
+                    end
+                end
+            end
+            local p = hw:FindFirstChildWhichIsA("BasePart", true)
+            if p and (p.Position - root.Position).Magnitude < 900 then return true end
+        end
+        return false
+    end
+
     if worldKey == "raid" then
         local raidFolder = workspace:FindFirstChild("KaijuRaid")
         if not raidFolder then return false end
@@ -541,6 +616,17 @@ end
 
 local lastRaidNotify = 0
 
+local function refreshWorld6Data()
+    if scanWorld6() then
+        for _, b in ipairs(BossHierarchy["6"]) do
+            if not BossWorldOf[b] then
+                BossWorldOf[b] = "6"
+                table.insert(AllBossList, b)
+            end
+        end
+    end
+end
+
 local function forceTeleportToWorld(worldKey)
     local char = getCharWithTimeout(10)
     if not char then return end
@@ -550,6 +636,28 @@ local function forceTeleportToWorld(worldKey)
     -- If we are already near the world's bosses, don't teleport again
     if nearWorldBosses(worldKey) then
         lastTpWorld, lastTpChar = worldKey, char
+        if worldKey == "6" then refreshWorld6Data() end
+        return
+    end
+
+    if worldKey == "halloween" then
+        local startPos = root.Position
+        if teleportAreaRemote then
+            pcall(function() teleportAreaRemote:FireServer("event", "halloween") end)
+            local t = os.clock()
+            while os.clock() - t < 6 do
+                if nearWorldBosses("halloween") then
+                    task.wait(0.6)
+                    return
+                end
+                local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if r and (r.Position - startPos).Magnitude > 100 then
+                    task.wait(1.0)
+                    return
+                end
+                task.wait(0.3)
+            end
+        end
         return
     end
 
@@ -568,8 +676,7 @@ local function forceTeleportToWorld(worldKey)
         -- 1) the real arguments captured with the Spy (direct remote call, no GUI needed)
         if teleportAreaRemote then
             for _, args in ipairs({
-                { "Kaiju Raid", nil },
-                { "raid", "kaiju" },
+                { "raid", "kaiju" }, -- confirmed with Cobalt
             }) do
                 pcall(function() teleportAreaRemote:FireServer(args[1], args[2]) end)
                 if arrived(6) then return end
@@ -619,6 +726,7 @@ local function forceTeleportToWorld(worldKey)
                     if moved or os.clock() - t >= 2 then
                         task.wait(0.5)
                         lastTpWorld, lastTpChar = worldKey, player.Character
+                        if worldKey == "6" then refreshWorld6Data() end
                         return
                     end
                 end
@@ -694,29 +802,37 @@ local function findBossModel(bossName)
     local want2 = BossDisplayName[bossName] and norm(BossDisplayName[bossName]) or nil
     local found
 
-    local searchRoots = { workspace:FindFirstChild("bossNpcs"), workspace:FindFirstChild("KaijuRaid") }
+    local hwFolder = workspace:FindFirstChild("HalloweenEvent")
+    local searchRoots = {
+        workspace:FindFirstChild("bossNpcs"),
+        workspace:FindFirstChild("KaijuRaid"),
+        hwFolder and hwFolder:FindFirstChild("EventNPCs"),
+        hwFolder,
+    }
     for _, root in ipairs(searchRoots) do
         if root then
             local unnamed
             for _, folder in ipairs(root:GetChildren()) do
-                if folder:IsA("Model") then
+                if folder:IsA("Model") and not folder:GetAttribute("AreaOrder") then
                     local n = norm(folder.Name)
                     if folder:GetAttribute("bossId") == bossName or n == want or (want2 and n == want2) then
                         found = folder
                         break
                     end
                 end
-                for _, m in ipairs(folder:GetChildren()) do
-                    if m:IsA("Model") then
-                        local n = norm(m.Name)
-                        if m:GetAttribute("bossId") == bossName
-                            or n == want
-                            or (want2 and n == want2)
-                            or (n ~= "" and want ~= "" and n:find(want, 1, true)) then
-                            found = m
-                            break
-                        elseif n == "" and UnnamedFallback[bossName] and BossWorldOf[bossName] == folder.Name then
-                            unnamed = unnamed or m
+                if folder.Name ~= "BossAreas" and folder.Name ~= "Guides" then
+                    for _, m in ipairs(folder:GetChildren()) do
+                        if m:IsA("Model") and not m:GetAttribute("AreaOrder") then
+                            local n = norm(m.Name)
+                            if m:GetAttribute("bossId") == bossName
+                                or n == want
+                                or (want2 and n == want2)
+                                or (n ~= "" and want ~= "" and n:find(want, 1, true)) then
+                                found = m
+                                break
+                            elseif n == "" and UnnamedFallback[bossName] and BossWorldOf[bossName] == folder.Name then
+                                unnamed = unnamed or m
+                            end
                         end
                     end
                 end
@@ -724,6 +840,24 @@ local function findBossModel(bossName)
             end
             if found then break end
             found = found or unnamed
+        end
+    end
+
+    if not found and hwFolder then
+        for _, subName in ipairs({ "EventNPCs", "Ghosts" }) do
+            local sub = hwFolder:FindFirstChild(subName)
+            if sub then
+                for _, d in ipairs(sub:GetDescendants()) do
+                    if d:IsA("Model") and not d:GetAttribute("AreaOrder") then
+                        local n = norm(d.Name)
+                        if d:GetAttribute("bossId") == bossName or n == want or (want2 and n == want2) then
+                            found = d
+                            break
+                        end
+                    end
+                end
+            end
+            if found then break end
         end
     end
 
@@ -1119,6 +1253,32 @@ task.spawn(function()
     disableGameAfkScript()
 end)
 
+-- Block the game's own AFK rejoin (AfkRejoinClient -> requestRejoin after ~120s without mouse movement).
+-- Calls made by this script (checkcaller) are allowed, so our own auto-rejoin still works.
+getgenv().TitanAntiAfk = true
+if hookmetamethod and getnamecallmethod and not getgenv().TitanAfkHooked then
+    getgenv().TitanAfkHooked = true
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        if getgenv().TitanAntiAfk and getnamecallmethod() == "FireServer"
+            and typeof(self) == "Instance" and self.Name == "requestRejoin"
+            and not (checkcaller and checkcaller()) then
+            return nil
+        end
+        return oldNamecall(self, ...)
+    end)
+end
+table.insert(activeConnections, { Disconnect = function() getgenv().TitanAntiAfk = false end })
+
+-- small mouse-move nudge as well, in case the AFK check also listens to input
+task.spawn(function()
+    local VIM = game:GetService("VirtualInputManager")
+    while getgenv().TitanLoaded do
+        task.wait(60)
+        if AntiAfk then pcall(function() VIM:SendMouseMoveEvent(math.random(5, 15), math.random(5, 15), game) end) end
+    end
+end)
+
 table.insert(activeConnections, player.Idled:Connect(function()
     if not AntiAfk then return end
     pcall(function()
@@ -1251,9 +1411,9 @@ do
     local scriptStopped = false
     local StopFlags = {
         "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
-        "SmartFarm5", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
-        "AutoClaimQuests", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
-        "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions",
+        "SmartFarm5", "SmartFarm6", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
+        "AutoClaimQuests", "AutoClaimIndex", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
+        "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions", "HalloweenAutoBoss", "AutoEndless", "AutoPrestigeTower",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -1408,7 +1568,7 @@ FarmTab:CreateToggle({
    Name = "Anti AFK",
    CurrentValue = true,
    Flag = "AntiAfk",
-   Callback = function(Value) AntiAfk = Value end,
+   Callback = function(Value) AntiAfk = Value; getgenv().TitanAntiAfk = Value end,
 })
 
 FarmTab:CreateToggle({
@@ -1572,10 +1732,10 @@ local function runAllWorldsFarm()
     end)
 end
 
-FarmTab:CreateSection("Smart Farm (Worlds 1-5)")
+FarmTab:CreateSection("Smart Farm (Worlds 1-6)")
 
 ModeToggles["all"] = FarmTab:CreateToggle({
-   Name = "Smart Farm: ALL Worlds (1-5 Rotate)",
+   Name = "Smart Farm: ALL Worlds (1-6 Rotate)",
    CurrentValue = false,
    Flag = "SmartFarmAll",
    Callback = function(Value)
@@ -1832,7 +1992,7 @@ local function runCustomBossFarm()
     end)
 end
 
-local WorldShort = { ["1"] = "SHI", ["2"] = "LEAF", ["3"] = "INF", ["4"] = "MAR", ["5"] = "SHIB", ["raid"] = "RAID" }
+local WorldShort = { ["1"] = "SHI", ["2"] = "LEAF", ["3"] = "INF", ["4"] = "MAR", ["5"] = "SHIB", ["6"] = "HUECO", ["raid"] = "RAID", ["halloween"] = "HW" }
 
 local function titleCase(id)
     local t = id:gsub("_", " ")
@@ -1997,6 +2157,48 @@ QuestTab:CreateToggle({
     end,
 })
 
+-- ==================== Index rewards (claimIndexReward) ====================
+-- Only "Normal" was captured with Cobalt; the other difficulties use the same pattern (extra calls are harmless if rejected).
+local indexToken = 0
+table.insert(activeConnections, { Disconnect = function() indexToken += 1 end })
+
+local function claimIndexRewards()
+    local r = Rep:FindFirstChild("claimIndexReward")
+    if not r then
+        Rayfield:Notify({ Title = "Index", Content = "claimIndexReward remote not found", Duration = 4 })
+        return
+    end
+    for _, diff in ipairs(DiffList) do
+        pcall(function() r:FireServer(diff) end)
+        task.wait(0.3)
+    end
+end
+
+QuestTab:CreateButton({
+    Name = "Claim Index Rewards Now",
+    Callback = function() task.spawn(claimIndexRewards) end,
+})
+
+QuestTab:CreateToggle({
+    Name = "Auto Claim Index Rewards (every 60s)",
+    CurrentValue = false,
+    Flag = "AutoClaimIndex",
+    Callback = function(Value)
+        indexToken += 1
+        local myToken = indexToken
+        if not Value then return end
+        task.spawn(function()
+            while indexToken == myToken do
+                claimIndexRewards()
+                for _ = 1, 60 do
+                    if indexToken ~= myToken then return end
+                    task.wait(1)
+                end
+            end
+        end)
+    end,
+})
+
 -- ==================== Secret Bosses ====================
 do
     local SecretSelected, SecretDiffs = {}, { Normal = true }
@@ -2097,6 +2299,223 @@ do
         Callback = function(list)
             SecretDiffs = {}
             for _, d in ipairs(list) do SecretDiffs[d] = true end
+        end,
+    })
+end
+
+-- ==================== Halloween Event (Custom Boss tab) ====================
+do
+    local ALL_MAIN = "All Main Bosses (1-5)"
+    local ALL_GHOSTS = "All Ghosts (1-5)"
+    local ALL_HIDDEN = "All Hidden Bosses"
+    local ALL_HW = "All Halloween Bosses & Ghosts"
+
+    local HwSelected = { [ALL_MAIN] = true }
+    local HwDiffs = { Normal = true }
+    local HwNames = { ALL_MAIN, ALL_GHOSTS, ALL_HIDDEN, ALL_HW }
+    local HwIdOf = {}
+    local IdAlreadyAdded = {}
+
+    local MainBossIds = {
+        halloween_scythe = true,
+        halloween_lich = true,
+        halloween_alucard = true,
+        halloween_pinhead = true,
+        halloween_tomie = true,
+    }
+    local HiddenBossIds = {
+        halloween_friend = true,
+        halloween_darkness = true,
+    }
+    local GhostIds = {
+        halloween_ghost_1 = true,
+        halloween_ghost_2 = true,
+        halloween_ghost_3 = true,
+        halloween_ghost_4 = true,
+        halloween_ghost_5 = true,
+    }
+
+    local KnownNonHw = {
+        crimson_phantom = true,
+        the_needle_hunter = true,
+        hornet = true,
+    }
+    for _, worldKey in ipairs({ "1", "2", "3", "4", "5", "6", "raid" }) do
+        for _, b in ipairs(BossHierarchy[worldKey] or {}) do
+            KnownNonHw[b] = true
+        end
+    end
+
+    local function prettyName(id)
+        local t = tostring(id):gsub("_", " ")
+        return (t:gsub("(%a)([%w]*)", function(a, r) return a:upper() .. r end))
+    end
+
+    local function addHwBoss(displayName, id)
+        if not id or id == "" or KnownNonHw[id] or IdAlreadyAdded[id] then return end
+        IdAlreadyAdded[id] = true
+        table.insert(HwNames, displayName)
+        HwIdOf[displayName] = id
+        if not BossDisplayName[id] then
+            BossDisplayName[id] = displayName
+        end
+    end
+
+    -- Pre-populate all exact Halloween bosses & ghosts from Workspace.HalloweenEvent
+    local PresetHalloween = {
+        { "Scythe Meister (Boss 1)",        "halloween_scythe"   },
+        { "Eternal Blight (Boss 2)",        "halloween_lich"     },
+        { "Bloodthirsty Monarch (Boss 3)",  "halloween_alucard"  },
+        { "Architect of Agony (Boss 4)",    "halloween_pinhead"  },
+        { "Beautiful Abomination (Final)",  "halloween_tomie"    },
+        { "Faceless Prophet (Hidden)",      "halloween_friend"   },
+        { "Primordial Dread (Hidden)",      "halloween_darkness" },
+        { "Pumpkin Wisp (Ghost 1)",         "halloween_ghost_1"  },
+        { "Grave Phantom (Ghost 2)",        "halloween_ghost_2"  },
+        { "Forest Banshee (Ghost 3)",       "halloween_ghost_3"  },
+        { "Castle Wraith (Ghost 4)",        "halloween_ghost_4"  },
+        { "Royal Wraith (Ghost 5)",         "halloween_ghost_5"  },
+    }
+    for _, entry in ipairs(PresetHalloween) do
+        addHwBoss(entry[1], entry[2])
+    end
+
+    local function refreshHalloween()
+        local hw = workspace:FindFirstChild("HalloweenEvent")
+        if hw then
+            local evNpcs = hw:FindFirstChild("EventNPCs")
+            local bosses = evNpcs and evNpcs:FindFirstChild("Bosses")
+            if bosses then
+                for _, m in ipairs(bosses:GetChildren()) do
+                    if m:IsA("Model") and not m:GetAttribute("AreaOrder") then
+                        local id = m:GetAttribute("bossId")
+                        if id then
+                            local disp = (m.Name ~= "" and not m.Name:find("_")) and m.Name or prettyName(id)
+                            addHwBoss(disp, id)
+                        end
+                    end
+                end
+            end
+            local ghosts = hw:FindFirstChild("Ghosts")
+            if ghosts then
+                for _, m in ipairs(ghosts:GetChildren()) do
+                    if m:IsA("Model") then
+                        local id = m:GetAttribute("bossId")
+                        if id then
+                            local disp = (m.Name ~= "" and not m.Name:find("_")) and m.Name or prettyName(id)
+                            addHwBoss(disp, id)
+                        end
+                    end
+                end
+            end
+        end
+
+        local dd = LOptions and LOptions.HalloweenBossesPick
+        if dd and type(dd.SetValues) == "function" then
+            pcall(function() dd:SetValues(HwNames) end)
+        end
+    end
+
+    refreshHalloween()
+
+    local function isBossChosen(name, id)
+        if HwSelected[ALL_HW] or next(HwSelected) == nil then return true end
+        if HwSelected[name] then return true end
+        if HwSelected[ALL_MAIN] and MainBossIds[id] then return true end
+        if HwSelected[ALL_GHOSTS] and GhostIds[id] then return true end
+        if HwSelected[ALL_HIDDEN] and HiddenBossIds[id] then return true end
+        return false
+    end
+
+    local function teleportToHalloween()
+        if not teleportAreaRemote then
+            Rayfield:Notify({ Title = "Halloween Event", Content = "teleportToArea remote not ready", Duration = 4 })
+            return false
+        end
+        pcall(function() teleportAreaRemote:FireServer("event", "halloween") end)
+        return true
+    end
+
+    local function runHalloween()
+        startMode("halloween", function(alive)
+            while alive() do
+                if not nearWorldBosses("halloween") then
+                    forceTeleportToWorld("halloween")
+                    task.wait(1.0)
+                end
+                refreshHalloween()
+                local didAny = false
+                for _, name in ipairs(HwNames) do
+                    local id = HwIdOf[name]
+                    if id and isBossChosen(name, id) then
+                        for _, diff in ipairs(DiffList) do
+                            if not alive() then break end
+                            if HwDiffs[diff] and findBossModel(id) then
+                                if attemptBoss(id, diff, alive, "halloween", FarmWalk) then
+                                    didAny = true
+                                end
+                            end
+                        end
+                    end
+                end
+                task.wait(didAny and 0.5 or 2.5)
+            end
+        end)
+    end
+
+    local HwTab = Window:CreateTab("Halloween", 4483362458)
+
+    HwTab:CreateSection("Control")
+
+    HwTab:CreateButton({
+        Name = "Teleport to Halloween Event",
+        Callback = function()
+            if teleportToHalloween() then
+                Rayfield:Notify({ Title = "Halloween Event", Content = "Teleported to Halloween Event", Duration = 3 })
+                task.delay(1.5, refreshHalloween)
+            end
+        end,
+    })
+
+    HwTab:CreateParagraph({
+        Title = "How it works",
+        Content = "Teleports to the event, then fights the bosses you pick below. Movement follows Auto Farm > Movement.",
+    })
+
+    ModeToggles["halloween"] = HwTab:CreateToggle({
+        Name = "Auto Halloween Bosses",
+        CurrentValue = false,
+        Flag = "HalloweenAutoBoss",
+        Callback = function(Value)
+            if Value then runHalloween() else stopMode("halloween") end
+        end,
+    })
+
+    HwTab:CreateSection("Bosses")
+
+    HwTab:CreateDropdown({
+        Name = "Bosses to fight",
+        Options = HwNames,
+        CurrentOption = { ALL_MAIN },
+        MultipleOptions = true,
+        Flag = "HalloweenBossesPick",
+        Callback = function(list)
+            HwSelected = {}
+            for _, n in ipairs(list) do HwSelected[n] = true end
+        end,
+    })
+
+    HwTab:CreateSection("Difficulty")
+
+    HwTab:CreateDropdown({
+        Name = "Difficulties to run",
+        Options = DiffList,
+        CurrentOption = { "Normal" },
+        MultipleOptions = true,
+        Flag = "HalloweenBossDiffs",
+        Callback = function(list)
+            HwDiffs = {}
+            for _, d in ipairs(list) do HwDiffs[d] = true end
         end,
     })
 end
@@ -2486,7 +2905,7 @@ end
 
 -- ==================== Infinity Tower tab ====================
 -- own function scope: adds no top-level locals
-;(function()
+do (function()
     local TowerTab = Window:CreateTab("Infinity Tower", 4483362458)
     local towerRemote
     task.spawn(function()
@@ -2497,8 +2916,6 @@ end
     local TargetFloor = 0
     local autoToken = 0
     local autoToggle
-    local floorLabel, lastScan = nil, 0
-
     local function sendAction(action)
         if not towerRemote then return false end
         return pcall(function() towerRemote:FireServer(action) end)
@@ -2516,49 +2933,35 @@ end
         return sendAction("end")
     end
 
-    -- "Currently in battle: Floor 2273"  ->  2273
-    local function parseFloor(text)
-        text = tostring(text or ""):gsub("<[^>]+>", "")
-        if not text:lower():find("in battle", 1, true) then return nil end
-        local n = text:match("[Ff]loor%s*:?%s*([%d,]+)")
-        if not n then return nil end
-        return tonumber((n:gsub(",", "")))
+    local function floorNumber(txt, loose)
+        if not txt then return nil end
+        txt = tostring(txt):gsub("<[^>]+>", "")
+        local n = txt:match("[Ff]loor%s*:?%s*([%d,]+)")
+        if not n and loose then n = txt:match("[Ff]%s*([%d,]+)") end   -- "Infinite F474"
+        return n and tonumber((n:gsub(",", ""))) or nil
+    end
+
+    local function labelText(root, path)
+        local node = root
+        for _, nm in ipairs(path) do node = node and node:FindFirstChild(nm) end
+        if node and (node:IsA("TextLabel") or node:IsA("TextButton")) then
+            local t = node.ContentText
+            if t == nil or t == "" then t = node.Text end
+            return t
+        end
+        return nil
     end
 
     local function readFloor()
-        -- primary source: BattleUI.battleContainer.battleTabs.tower.textLabel  ->  "Infinite F474"
-        local okT, tl = pcall(function()
-            return player.PlayerGui.BattleUI.battleContainer.battleTabs.tower.textLabel
-        end)
-        if okT and tl and tl:IsA("TextLabel") then
-            local txt = (tostring(tl.Text):gsub("<[^>]+>", ""))
-            local n = txt:match("[Ff]%s*([%d,]+)")
-            if n then
-                local f = tonumber((n:gsub(",", "")))
-                if f then return f end
-            end
-        end
-
-        -- fallback: scan for the "Currently in battle: Floor N" label
-        if floorLabel and floorLabel.Parent then
-            local f = parseFloor(floorLabel.Text)
-            if f then return f end
-        end
-        floorLabel = nil
-        if os.clock() - lastScan < 2 then return nil end
-        lastScan = os.clock()
-        local pgui = player:FindFirstChild("PlayerGui")
-        if not pgui then return nil end
-        for _, d in ipairs(pgui:GetDescendants()) do
-            if d:IsA("TextLabel") then
-                local f = parseFloor(d.Text)
-                if f then
-                    floorLabel = d
-                    return f
-                end
-            end
-        end
-        return nil
+        local pg = player:FindFirstChild("PlayerGui")
+        local ui = pg and pg:FindFirstChild("BattleUI")
+        if not ui then return nil end
+        -- 1) the tower tab itself: specific to the Infinity Tower ("Infinite F474")
+        return floorNumber(labelText(ui, { "battleContainer", "battleTabs", "tower", "textLabel" }), true)
+            -- 2) "Currently in battle: Floor 2"
+            or floorNumber(labelText(ui, { "battleNotifierLabel" }))
+            -- 3) "Floor: 2"
+            or floorNumber(labelText(ui, { "battleContainer", "floorCount" }))
     end
 
     TowerTab:CreateSection("End the tower at a floor (claim the big reward)")
@@ -2708,14 +3111,14 @@ end
             end)
         end,
     })
-end)()
+end)() end
 
 -- ==================== Potions tab ====================
 -- Potion timers are read from the game's own HUD (the buff icons that show the remaining seconds).
 -- HUD icons are matched to potions through the shop cells (same icon image). If a potion's icon
 -- cannot be read, the script falls back to its own drink time, so it never spams potions.
 -- own scope: adds no top-level locals
-;(function()
+do (function()
     local PotionsTab = Window:CreateTab("Potions", 4483362458)
 
     -- names taken from the game's own UI (RaidShopFrame > potions: cells)
@@ -3284,7 +3687,7 @@ end)()
         if n > 0 and PrepDelay > 0 then task.wait(PrepDelay) end
         return n
     end
-end)()
+end)() end
 
 -- ==================== Raid Shop (auto buy potions) ====================
 -- raidShopRequest is a RemoteFunction, captured with Cobalt:
@@ -3292,7 +3695,7 @@ end)()
 --   InvokeServer("get", "kaiju")                            -- shop data
 -- This spends real in-game currency, so every purchase is capped (see MaxBuys).
 -- own scope: adds no top-level locals
-;(function()
+do (function()
     local HttpService = game:GetService("HttpService")
     local ShopTab = Window:CreateTab("Raid Shop", 4483362458)
 
@@ -3505,7 +3908,7 @@ end)()
         Title = "Spends currency",
         Content = "Each purchase costs raid-shop currency. Buying stops at the max per restock, and a refused purchase pauses that potion for 15 minutes.",
     })
-end)()
+end)() end
 
 -- ==================== Crafting (auto craft potions) ====================
 -- craftItem is a RemoteEvent, captured with Cobalt:
@@ -3515,7 +3918,7 @@ end)()
 -- A potion is crafted only when its stock is below "Keep at least". If the stock cannot be read,
 -- that potion is SKIPPED (never crafted blindly), so materials are not wasted.
 -- own scope: adds no top-level locals
-;(function()
+do (function()
     local CraftTab = Window:CreateTab("Crafting", 4483362458)
 
     local craftRemote
@@ -3731,10 +4134,10 @@ end)()
         Title = "Spends materials",
         Content = "Only potions below 'Keep at least' are crafted, and never more than what is missing. The server refuses a craft you cannot afford.",
     })
-end)()
+end)() end
 
 -- ==================== Offline rolls: auto collect ====================
-;(function()
+do (function()
     local token = 0
     table.insert(activeConnections, { Disconnect = function() token += 1 end })
 
@@ -3781,7 +4184,337 @@ end)()
         end,
     })
     start()
-end)()
+end)() end
+
+-- ==================== Endless Raid ====================
+-- endlessAction is a RemoteEvent, captured with Cobalt:
+--   FireServer("start")
+-- A start counts as accepted only if a battle starts within 5 seconds (battleEvent "battle_start").
+-- Auto mode starts again after a battle ends (never sooner than "Wait at least"), and backs off when starts fail.
+-- own scope: adds no top-level locals
+do (function()
+    local EndlessTab = Window:CreateTab("Endless Raid", 4483362458)
+
+    local endlessRemote
+    task.spawn(function()
+        endlessRemote = Rep:WaitForChild("endlessAction", 180)
+        if not endlessRemote then
+            warn("[Titan Hub] missing remote: endlessAction")
+            pcall(function() Rayfield:Notify({ Title = "Missing remote", Content = "endlessAction", Duration = 6 }) end)
+        end
+    end)
+
+    local GoToNpc = false   -- teleport next to the Kaiju Researcher before each start
+    local MinGap = 20       -- seconds between two starts, at least
+    local MaxWait = 600     -- restart anyway if no battle end was seen for this long
+    local endlessToken = 0
+
+    table.insert(activeConnections, { Disconnect = function() endlessToken += 1 end })
+
+    -- workspace.KaijuRaid.endless["Kaiju Researcher"] (confirmed in the dump)
+    local function npcPart()
+        local kr = workspace:FindFirstChild("KaijuRaid")
+        local f = kr and kr:FindFirstChild("endless")
+        local npc = f and f:FindFirstChild("Kaiju Researcher")
+        if not npc then return nil end
+        return npc:FindFirstChild("HumanoidRootPart") or npc:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    local function goToNpc()
+        if not isCharAlive() then return false end
+        local part = npcPart()
+        if not part or not nearWorldBosses("raid") then
+            forceTeleportToWorld("raid")
+            part = npcPart()
+        end
+        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if part and root then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.CFrame = part.CFrame * CFrame.new(0, 0, 4) + Vector3.new(0, 2, 0)
+            task.wait(0.6)
+            return true
+        end
+        return false
+    end
+
+    -- true if a battle started within 5 seconds after the request
+    local function startEndless()
+        if not endlessRemote then return false, "endlessAction remote not ready" end
+        if GoToNpc and not goToNpc() then return false, "Kaiju Researcher not found" end
+        local before = BattleStarts
+        local ok = pcall(function() endlessRemote:FireServer("start") end)
+        if not ok then return false, "send failed" end
+        local t = os.clock()
+        while os.clock() - t < 5 do
+            if BattleStarts ~= before then return true end
+            task.wait(0.1)
+        end
+        return false, "no battle started (already running, or the server refused)"
+    end
+
+    EndlessTab:CreateSection("Endless Raid")
+
+    EndlessTab:CreateButton({
+        Name = "Start Endless now",
+        Callback = function()
+            task.spawn(function()
+                local ok, why = startEndless()
+                Rayfield:Notify({
+                    Title = "Endless",
+                    Content = ok and "Endless started" or ("Not started: " .. tostring(why)),
+                    Duration = 5,
+                })
+            end)
+        end,
+    })
+
+    EndlessTab:CreateToggle({
+        Name = "Go to Kaiju Researcher before starting",
+        CurrentValue = false,
+        Flag = "EndlessGoToNpc",
+        Callback = function(v) GoToNpc = v end,
+    })
+
+    EndlessTab:CreateInput({
+        Name = "Wait at least (seconds) between starts",
+        Default = "20",
+        Placeholder = "e.g. 20",
+        Flag = "EndlessMinGap",
+        Callback = function(v)
+            MinGap = math.clamp(math.floor(tonumber(v) or 20), 5, 3600)
+        end,
+    })
+
+    EndlessTab:CreateToggle({
+        Name = "Auto Endless (start again when it ends)",
+        CurrentValue = false,
+        Flag = "AutoEndless",
+        Callback = function(Value)
+            endlessToken += 1
+            local my = endlessToken
+            if not Value then return end
+            task.spawn(function()
+                while endlessToken == my and Rayfield.Loading do task.wait(0.3) end
+                local fails = 0
+                while endlessToken == my do
+                    local endsBefore = BattleEnds
+                    local ok, why = startEndless()
+                    local t = os.clock()
+                    if ok then
+                        fails = 0
+                        -- wait for a battle end (or MaxWait), never sooner than MinGap
+                        while endlessToken == my and os.clock() - t < MaxWait do
+                            if BattleEnds ~= endsBefore and os.clock() - t >= MinGap then break end
+                            task.wait(0.5)
+                        end
+                    else
+                        fails += 1
+                        if fails == 3 then
+                            Rayfield:Notify({
+                                Title = "Endless",
+                                Content = "Did not start 3 times: " .. tostring(why) .. ". Try 'Go to Kaiju Researcher before starting'.",
+                                Duration = 7,
+                            })
+                        end
+                        -- back off: MinGap, 2x, 3x ... up to 6x
+                        local waitFor = MinGap * math.min(fails, 6)
+                        while endlessToken == my and os.clock() - t < waitFor do task.wait(0.5) end
+                    end
+                end
+            end)
+        end,
+    })
+
+    EndlessTab:CreateParagraph({
+        Title = "How it works",
+        Content = "Sends the same 'start' the game sends. A start counts only if a battle begins within 5s. Auto mode starts again after a battle ends.",
+    })
+end)() end
+
+-- ==================== Prestige Tower ====================
+-- runPrestigeTower is a RemoteEvent, captured with Cobalt:
+--   FireServer()            (no arguments)
+-- After a run the game shows BattleUI.prestigeFloorEndUI ("DEFEATED" / "on Floor 37") with a CONTINUE button
+-- (confirmed in the dump). Auto mode presses CONTINUE and starts again.
+-- NEVER touches BattleUI.prestigeConfirmationPrompt (that is the real Prestige / reset).
+-- own scope: adds no top-level locals
+do (function()
+    local PrestigeTab = Window:CreateTab("Prestige Tower", 4483362458)
+
+    local prestigeRemote
+    task.spawn(function()
+        prestigeRemote = Rep:WaitForChild("runPrestigeTower", 180)
+        if not prestigeRemote then
+            warn("[Titan Hub] missing remote: runPrestigeTower")
+            pcall(function() Rayfield:Notify({ Title = "Missing remote", Content = "runPrestigeTower", Duration = 6 }) end)
+        end
+    end)
+
+    local MinGap = 10        -- seconds between the end of a run and the next start
+    local MaxRun = 1800      -- give up waiting for the end screen after this long, then start again
+    local prestigeToken = 0
+    local runs, bestFloor = 0, 0
+
+    table.insert(activeConnections, { Disconnect = function() prestigeToken += 1 end })
+
+    local function shown(o)
+        local n = o
+        while n and n ~= game do
+            if n:IsA("GuiObject") and not n.Visible then return false end
+            if n:IsA("ScreenGui") and not n.Enabled then return false end
+            n = n.Parent
+        end
+        return n ~= nil
+    end
+
+    -- PlayerGui.BattleUI.prestigeFloorEndUI, only when it is on screen
+    local function endScreen()
+        local ok, ui = pcall(function() return player.PlayerGui.BattleUI.prestigeFloorEndUI end)
+        if ok and ui and shown(ui) then return ui end
+        return nil
+    end
+
+    -- "on Floor 37" -> 37
+    local function endFloor(ui)
+        local sub = ui:FindFirstChild("subtitle")
+        local txt = sub and sub:IsA("TextLabel") and (sub.ContentText ~= "" and sub.ContentText or sub.Text) or ""
+        local n = tostring(txt):match("([%d,]+)")
+        return n and tonumber((n:gsub(",", ""))) or nil
+    end
+
+    -- presses CONTINUE (up to 3 tries); returns the floor that was reached
+    local function closeEndScreen()
+        local ui = endScreen()
+        if not ui then return nil end
+        local floor = endFloor(ui)
+        local btn = ui:FindFirstChild("continueButton")
+        for _ = 1, 3 do
+            if not endScreen() then break end
+            if btn and btn:IsA("GuiButton") then pressButton(btn) end
+            task.wait(1)
+        end
+        return floor
+    end
+
+    -- true if a battle started within 5 seconds after the request
+    local function startPrestige()
+        if not prestigeRemote then return false, "runPrestigeTower remote not ready" end
+        if endScreen() then closeEndScreen() end
+        local before = BattleStarts
+        local ok = pcall(function() prestigeRemote:FireServer() end)
+        if not ok then return false, "send failed" end
+        local t = os.clock()
+        while os.clock() - t < 5 do
+            if BattleStarts ~= before then return true end
+            task.wait(0.1)
+        end
+        return false, "no battle started (already running, or the server refused)"
+    end
+
+    local function recordRun(floor)
+        runs += 1
+        if floor and floor > bestFloor then bestFloor = floor end
+        Rayfield:Notify({
+            Title = "Prestige Tower",
+            Content = "Run " .. runs .. " ended" .. (floor and (" on floor " .. floor) or "") .. " (best " .. bestFloor .. ")",
+            Duration = 5,
+        })
+    end
+
+    PrestigeTab:CreateSection("Prestige Tower")
+
+    PrestigeTab:CreateButton({
+        Name = "Start Prestige Tower now",
+        Callback = function()
+            task.spawn(function()
+                local ok, why = startPrestige()
+                Rayfield:Notify({
+                    Title = "Prestige Tower",
+                    Content = ok and "Prestige Tower started" or ("Not started: " .. tostring(why)),
+                    Duration = 5,
+                })
+            end)
+        end,
+    })
+
+    PrestigeTab:CreateButton({
+        Name = "Press CONTINUE on the end screen",
+        Callback = function()
+            task.spawn(function()
+                if not endScreen() then
+                    Rayfield:Notify({ Title = "Prestige Tower", Content = "End screen is not open", Duration = 3 })
+                    return
+                end
+                local floor = closeEndScreen()
+                Rayfield:Notify({ Title = "Prestige Tower", Content = "Closed (floor " .. tostring(floor) .. ")", Duration = 3 })
+            end)
+        end,
+    })
+
+    PrestigeTab:CreateInput({
+        Name = "Wait after a run before starting again (seconds)",
+        Default = "10",
+        Placeholder = "e.g. 10",
+        Flag = "PrestigeMinGap",
+        Callback = function(v)
+            MinGap = math.clamp(math.floor(tonumber(v) or 10), 3, 3600)
+        end,
+    })
+
+    PrestigeTab:CreateToggle({
+        Name = "Auto Prestige Tower (CONTINUE + start again)",
+        CurrentValue = false,
+        Flag = "AutoPrestigeTower",
+        Callback = function(Value)
+            prestigeToken += 1
+            local my = prestigeToken
+            if not Value then return end
+            task.spawn(function()
+                while prestigeToken == my and Rayfield.Loading do task.wait(0.3) end
+                local inf = LToggles.AutoInfTowerMulti
+                if inf and inf.Value then
+                    Rayfield:Notify({
+                        Title = "Prestige Tower",
+                        Content = "Auto Run Infinite Tower is on too. If the two towers block each other, turn one off.",
+                        Duration = 7,
+                    })
+                end
+                local fails = 0
+                while prestigeToken == my do
+                    local ok, why = startPrestige()
+                    local t = os.clock()
+                    if ok then
+                        fails = 0
+                        -- wait for the end screen of this run
+                        while prestigeToken == my and not endScreen() and os.clock() - t < MaxRun do
+                            task.wait(0.5)
+                        end
+                        if prestigeToken ~= my then return end
+                        if endScreen() then
+                            task.wait(1)
+                            recordRun(closeEndScreen())
+                        end
+                        local w = os.clock()
+                        while prestigeToken == my and os.clock() - w < MinGap do task.wait(0.5) end
+                    else
+                        fails += 1
+                        if fails == 3 then
+                            Rayfield:Notify({ Title = "Prestige Tower", Content = "Did not start 3 times: " .. tostring(why), Duration = 7 })
+                        end
+                        -- back off: MinGap, 2x, 3x ... up to 6x
+                        local waitFor = MinGap * math.min(fails, 6)
+                        while prestigeToken == my and os.clock() - t < waitFor do task.wait(0.5) end
+                    end
+                end
+            end)
+        end,
+    })
+
+    PrestigeTab:CreateParagraph({
+        Title = "Safe",
+        Content = "Only starts the Prestige Tower and presses CONTINUE on its end screen. It never presses the real Prestige (reset) button.",
+    })
+end)() end
 
 -- ==================== Live Tracker ====================
 -- Works two ways:
