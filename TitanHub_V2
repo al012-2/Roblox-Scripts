@@ -1035,26 +1035,6 @@ local function shouldHideGui(gui)
     return false
 end
 
-local function pressButton(btn)
-    if not btn then return false end
-    if getconnections then
-        for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
-            local ok, conns = pcall(getconnections, sig)
-            if ok and conns and #conns > 0 then
-                for _, c in ipairs(conns) do
-                    pcall(function() c:Fire() end)
-                end
-                return true
-            end
-        end
-    end
-    if firesignal then
-        pcall(function() firesignal(btn.MouseButton1Click) end)
-        return true
-    end
-    return false
-end
-
 local function getBattleParts()
     local pgui = player:FindFirstChild("PlayerGui")
     local ui = pgui and pgui:FindFirstChild("BattleUI")
@@ -1164,7 +1144,8 @@ local function queueReload()
     local qot = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if qot then
         qotQueued = true
-        pcall(qot, 'loadstring(game:HttpGet("' .. ScriptLoadURL .. '"))()')
+        -- %q escapes quotes / backslashes so the URL can never break out of the string
+        pcall(qot, ("loadstring(game:HttpGet(%q))()"):format(ScriptLoadURL))
     end
 end
 
@@ -1212,10 +1193,16 @@ table.insert(activeConnections, GuiService.ErrorMessageChanged:Connect(function(
 
     rejoining = true
     rejoinAttempt = 0
+    pcall(function()
+        Rayfield:Notify({ Title = "Rejoin", Content = "Disconnected: " .. msg:sub(1, 150) .. " - trying to rejoin", Duration = 5 })
+    end)
     task.spawn(function()
-        while AutoReconnectEnabled and rejoining do
+        -- capped retries with a growing delay (no endless teleport spam)
+        local tries = 0
+        while AutoReconnectEnabled and rejoining and tries < 10 do
+            tries += 1
             executeRejoin()
-            task.wait(8)
+            task.wait(math.min(8 + tries * 4, 40))
         end
         rejoining = false
     end)
@@ -1266,7 +1253,7 @@ do
         "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
         "SmartFarm5", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
         "AutoClaimQuests", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
-        "AutoDrinkPotions", "DrinkOnWeather",
+        "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -1503,6 +1490,7 @@ local function attemptBoss(boss, diff, alive, worldKey, useWalk)
 
     local function stillGoing() return alive() and isCharAlive() end
 
+    -- FIX: the "Wait for battle end" option is now passed through (was hard-coded to true)
     local fired = hitAndRunBoss(boss, diff, stillGoing, WaitForBattle, useWalk)
     if not alive() then return false end
 
@@ -2177,14 +2165,12 @@ end
 -- ==================== Pity Roll ====================
 do
     local MaxPity = 10000
-    local ServerWeatherTimeout = 900
     local MaxSpendRolls = 25
 
     local PityWeathers = {}
     local FillWhileWaiting = true
     local pityToken = 0
     local pityToggle
-    local ActiveServerWeather, ActiveServerWeatherAt = nil, 0
 
     -- merged mode: the game's Auto Roll fills the pity, the script takes over near full
     local UseGameAuto = false
@@ -2225,19 +2211,53 @@ do
         for _, n in ipairs(WeatherNames) do WeatherSet[norm(n)] = true end
     end
 
-    onRemoteEvent("weatherUpdate", function(a, b)
-            local cand
-            if type(a) == "string" then cand = a
-            elseif type(a) == "table" then cand = a.weather or a.Weather or a.name or a.Name or a.type or a[1]
-            elseif type(b) == "string" then cand = b end
-            if type(cand) == "string" then
-                local n = norm(cand)
-                if n == "none" or n == "clear" or n == "" then ActiveServerWeather = nil
-                elseif WeatherSet[n] then ActiveServerWeather, ActiveServerWeatherAt = cand, os.clock() end
-            elseif a == nil then
-                ActiveServerWeather = nil
-            end
+    -- weather arrives through sendUI("weatherUpdate", data), not through its own remote
+    -- data fields (captured): Name, duration, startedAt (unix), rollSpeedMultiplier, luckMultiplier, setBy
+    local ServerWeather = nil -- { name, endsAt, speed, luck }
+    onRemoteEvent("sendUI", function(action, data)
+        if action ~= "weatherUpdate" then return end
+        if type(data) == "table" and type(data.Name) == "string" and data.Name ~= "" then
+            local started = type(data.startedAt) == "number" and data.startedAt or workspace:GetServerTimeNow()
+            local dur = type(data.duration) == "number" and data.duration or 0
+            ServerWeather = {
+                name = data.Name,
+                endsAt = started + dur,
+                speed = tonumber(data.rollSpeedMultiplier),
+                luck = tonumber(data.luckMultiplier),
+            }
+        else
+            ServerWeather = nil
+        end
     end)
+
+    -- fallback: the HUD label, accepted only if it is visible AND the timer is not zero
+    local function labelWeather()
+        local ok, wi = pcall(function() return player.PlayerGui.Main.weatherInfo end)
+        if not (ok and wi) then return nil end
+        if wi:IsA("GuiObject") and not wi.Visible then return nil end
+        local nameL = wi:FindFirstChild("nameLabel", true)
+        local durL = wi:FindFirstChild("durationLabel", true)
+        if not (nameL and durL) then return nil end
+        local left = tostring(durL.Text):gsub("^Ends in:%s*", "")
+        if not left:find("[1-9]") then return nil end   -- "0s" = expired
+        if not WeatherSet[norm(nameL.Text)] then return nil end
+        return nameL.Text
+    end
+
+    -- returns name, secondsLeft (nil if unknown), data
+    local function weatherInfo()
+        local sw = ServerWeather
+        if sw then
+            local left = sw.endsAt - workspace:GetServerTimeNow()
+            if left > 0 then return sw.name, left, sw end
+            ServerWeather = nil
+        end
+        local n = labelWeather()
+        if n then return n, nil, nil end
+        return nil
+    end
+
+    local function currentWeather() return (weatherInfo()) end
 
     local function doRoll()
         local rollRemote = Rep:FindFirstChild("RollRequest")
@@ -2307,19 +2327,10 @@ do
         return ServerProgress
     end
 
-    local function currentWeather()
-        local ok, l = pcall(function()
-            return player.PlayerGui.Main.weatherInfo.nameContainer.nameLabel
-        end)
-        if ok and l and WeatherSet[norm(l.Text)] then return l.Text end
-        if ActiveServerWeather and os.clock() - ActiveServerWeatherAt > ServerWeatherTimeout then
-            ActiveServerWeather = nil
-        end
-        return ActiveServerWeather
-    end
-
-    -- share with the Infinity Tower tab (end tower on weather)
+    -- share with the Infinity Tower tab (end tower on weather) and the Live Tracker
     PerfCache.getWeather = currentWeather
+    PerfCache.getWeatherInfo = weatherInfo
+    PerfCache.getPity = getPity -- Live Tracker
     PerfCache.weatherNames = WeatherNames
 
     local function weatherMatches(w)
@@ -2461,11 +2472,12 @@ do
     RollTab:CreateButton({
         Name = "Show pity + weather",
         Callback = function()
+            local wn, wl = weatherInfo()
             Rayfield:Notify({
                 Title = "Pity Roll",
                 Content = "Pity: " .. tostring(getPity()) .. "/" .. MaxPity
                     .. " (text=" .. tostring(readBarText()) .. ", server=" .. tostring(ServerProgress) .. ")"
-                    .. " | Weather: " .. tostring(currentWeather()),
+                    .. " | Weather: " .. tostring(wn) .. (wl and (" (" .. math.floor(wl) .. "s left)") or ""),
                 Duration = 8,
             })
         end,
@@ -2490,6 +2502,18 @@ end
     local function sendAction(action)
         if not towerRemote then return false end
         return pcall(function() towerRemote:FireServer(action) end)
+    end
+
+    -- drink the chosen potions first (luck etc., only if they are not already running), then end the tower
+    local function endTowerPrepared()
+        local prep = PerfCache.prepBeforeTowerEnd
+        if prep then
+            local ok, n = pcall(prep)
+            if ok and type(n) == "number" and n > 0 then
+                Rayfield:Notify({ Title = "Infinity Tower", Content = "Drank " .. n .. " potion(s) before ending the tower", Duration = 4 })
+            end
+        end
+        return sendAction("end")
     end
 
     -- "Currently in battle: Floor 2273"  ->  2273
@@ -2563,7 +2587,7 @@ end
                 while autoToken == myToken do
                     local f = readFloor()
                     if f and TargetFloor > 0 and f >= TargetFloor then
-                        local ok = sendAction("end")
+                        local ok = endTowerPrepared()
                         Rayfield:Notify({
                             Title = "Infinity Tower",
                             Content = ok and ("Reached floor " .. f .. " - ending the tower to claim the reward")
@@ -2581,7 +2605,7 @@ end
         end,
     })
 
-    -- ===== NEW: end the tower when a chosen weather appears =====
+    -- ===== end the tower when a chosen weather appears =====
     TowerTab:CreateSection("End the tower on weather")
 
     local EndWeathers = { arcane = true, awakened = true }
@@ -2613,7 +2637,7 @@ end
                 while weatherTok == myTok do
                     local w = PerfCache.getWeather and PerfCache.getWeather()
                     if w and EndWeathers[norm(w)] then
-                        local ok = sendAction("end")
+                        local ok = endTowerPrepared()
                         Rayfield:Notify({
                             Title = "Infinity Tower",
                             Content = ok and ("Weather " .. w .. " is active - ending the tower")
@@ -2687,6 +2711,9 @@ end
 end)()
 
 -- ==================== Potions tab ====================
+-- Potion timers are read from the game's own HUD (the buff icons that show the remaining seconds).
+-- HUD icons are matched to potions through the shop cells (same icon image). If a potion's icon
+-- cannot be read, the script falls back to its own drink time, so it never spams potions.
 -- own scope: adds no top-level locals
 ;(function()
     local PotionsTab = Window:CreateTab("Potions", 4483362458)
@@ -2702,21 +2729,293 @@ end)()
 
     local SelectedPotions = {}
     local PotionWeathers = { arcane = true, awakened = true }
-    local PotionInterval = 600       -- seconds between drinks of the SAME potion (set it near the potion duration)
+    local PotionInterval = 300   -- fallback: seconds one drink lasts (used only when the HUD timer cannot be read)
+    local RefillBelow = 10       -- drink again when less than this many seconds remain
+    local WeatherMin = 120       -- on a chosen weather, every potion needs at least this many seconds left
+    local PrepMin = 30           -- before ending the tower, every prep potion needs at least this many seconds left
     local PotionAmount = 1
-    local WeatherGuard = 180         -- do not re-trigger the weather burst for the same weather within this time
+    local WeatherGuard = 180     -- do not re-trigger the weather check for the same weather within this time
     local potionToken, weatherPotionToken = 0, 0
 
-    -- survives re-execute / server hop in the same executor session (best effort)
+    -- survive re-execute / server hop in the same executor session (best effort)
     getgenv().TitanPotionLast = getgenv().TitanPotionLast or {}
     getgenv().TitanPotionWeatherLast = getgenv().TitanPotionWeatherLast or {}
+    getgenv().TitanPotionSeen = getgenv().TitanPotionSeen or {}
     local lastDrink = getgenv().TitanPotionLast
     local lastWeather = getgenv().TitanPotionWeatherLast
+    local seenInHud = getgenv().TitanPotionSeen
+
+    -- ===== read the potion timers from the HUD =====
+    local IconMap = {}                                  -- icon image key -> potion name (learned from the shop cells)
+    local hudState = setmetatable({}, { __mode = "k" }) -- label -> { v, t, ticks }
+    local hudList, hudUnmapped = {}, {}
+    local hudListAt, hudReadAt = 0, 0
+    local hudTimers, hudWorks = {}, false
+    local hudRows, learnAt = {}, 0
+
+    local function iconKey(img)
+        return tostring(img.Image) .. "|" .. tostring(img.ImageRectOffset)
+    end
+
+    local function countMap()
+        local c = 0
+        for _ in pairs(IconMap) do c += 1 end
+        return c
+    end
+
+    -- "21986" -> 21986, "5:00" -> 300, "1:02:03" -> 3723
+    local function parseSeconds(txt)
+        local t = tostring(txt or "")
+        t = t:gsub("<[^>]+>", "")
+        t = t:gsub("[,%s]", "")
+        if t == "" then return nil end
+        if t:match("^%d+%.?%d*$") then return tonumber(t) end
+        local a, b, c = t:match("^(%d+):(%d+):?(%d*)$")
+        if a then
+            if c ~= "" then return tonumber(a) * 3600 + tonumber(b) * 60 + tonumber(c) end
+            return tonumber(a) * 60 + tonumber(b)
+        end
+        return nil
+    end
+
+    local function isShown(obj)
+        local node = obj
+        while node do
+            if node:IsA("GuiObject") and not node.Visible then return false end
+            if node:IsA("ScreenGui") and not node.Enabled then return false end
+            node = node.Parent
+        end
+        return true
+    end
+
+    -- the potion icon of every shop cell; an image used by several cells (currency, background) is ignored
+    local function learnIcons()
+        local node = player:FindFirstChild("PlayerGui")
+        for _, nm in ipairs({ "NpcInteraction", "RaidShopFrame", "contentFrame", "scrollFrame", "potions:", "cells" }) do
+            node = node and node:FindFirstChild(nm)
+        end
+        if not node then return 0 end
+        local perCell, keyCount = {}, {}
+        for _, cell in ipairs(node:GetChildren()) do
+            local pname = cell.Name:match("^potions:(.+)$")
+            if pname then
+                perCell[pname] = {}
+                for _, d in ipairs(cell:GetDescendants()) do
+                    if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image ~= "" then
+                        perCell[pname][iconKey(d)] = true
+                    end
+                end
+            end
+        end
+        for _, set in pairs(perCell) do
+            for key in pairs(set) do keyCount[key] = (keyCount[key] or 0) + 1 end
+        end
+        IconMap = {}
+        for pname, set in pairs(perCell) do
+            for key in pairs(set) do
+                if keyCount[key] == 1 then IconMap[key] = pname end
+            end
+        end
+        return countMap()
+    end
+
+    -- the small icon cell around a number label: returns the image and whether it is a known potion icon
+    local function findIcon(label)
+        local node = label
+        local firstAny
+        for _ = 1, 4 do
+            node = node.Parent
+            if not node or not node:IsA("GuiObject") then break end
+            local s = node.AbsoluteSize
+            if s.X > 220 or s.Y > 220 then break end
+            local pool = { node }
+            for _, d in ipairs(node:GetDescendants()) do pool[#pool + 1] = d end
+            for _, o in ipairs(pool) do
+                if (o:IsA("ImageLabel") or o:IsA("ImageButton")) and o.Image ~= "" then
+                    if IconMap[iconKey(o)] then return o, true end
+                    firstAny = firstAny or o
+                end
+            end
+        end
+        return firstAny, false
+    end
+
+    local function rebuildList()
+        hudListAt = tick()
+        hudList, hudUnmapped = {}, {}
+        local pgui = player:FindFirstChild("PlayerGui")
+        if not pgui then return end
+        if next(IconMap) == nil then learnIcons() end
+        for _, d in ipairs(pgui:GetDescendants()) do
+            if d:IsA("TextLabel") and parseSeconds(d.Text) ~= nil and isShown(d) then
+                local img, mapped = findIcon(d)
+                if img then
+                    if mapped then
+                        table.insert(hudList, { label = d, img = img })
+                    elseif #hudUnmapped < 40 then
+                        table.insert(hudUnmapped, { label = d, img = img })
+                    end
+                end
+            end
+        end
+    end
+
+    -- ===== PlayerGui.Main.activeEffectsHolder.activeEffects: the game's own list of active effects =====
+    local function getEffectsContainer()
+        local pgui = player:FindFirstChild("PlayerGui")
+        local main = pgui and pgui:FindFirstChild("Main")
+        local holder = main and main:FindFirstChild("activeEffectsHolder")
+        return holder and holder:FindFirstChild("activeEffects")
+    end
+
+    -- which potion is this effect? name / attributes / text first (longest match wins, so IV is not read as I),
+    -- then the icon image
+    local function identify(child, img)
+        local cands = { child.Name }
+        for _, v in pairs(child:GetAttributes()) do
+            if type(v) == "string" then cands[#cands + 1] = v end
+        end
+        for _, d in ipairs(child:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text ~= "" and parseSeconds(d.Text) == nil then cands[#cands + 1] = d.Text end
+        end
+        local best, bestLen
+        for _, c in ipairs(cands) do
+            local n = norm((tostring(c):gsub("^potions:", "")))
+            for _, pname in ipairs(PotionNames) do
+                local pn = norm(pname)
+                if n:find(pn, 1, true) and (not bestLen or #pn > bestLen) then best, bestLen = pname, #pn end
+            end
+        end
+        if best then return best end
+        if img then return IconMap[iconKey(img)] end
+        return nil
+    end
+
+    local function readEffects(container)
+        local timers, works, rows = {}, false, {}
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("GuiObject") then
+                local bestV, img, exact
+                local pool = { child }
+                for _, d in ipairs(child:GetDescendants()) do pool[#pool + 1] = d end
+                for _, o in ipairs(pool) do
+                    if o:IsA("TextLabel") then
+                        local v = parseSeconds(o.Text)
+                        if v and o.Name == "timeLeftLabel" then
+                            bestV, exact = v, true   -- the game's own timer label
+                        elseif v and not exact and (not bestV or v > bestV) then
+                            bestV = v
+                        end
+                    elseif (o:IsA("ImageLabel") or o:IsA("ImageButton")) and o.Image ~= "" then
+                        if not img or IconMap[iconKey(o)] then img = o end
+                    end
+                end
+                local name = identify(child, img)
+                table.insert(rows, { child = child, value = bestV, potion = name })
+                if name and bestV then
+                    timers[name] = math.max(timers[name] or 0, bestV)
+                    works = true
+                end
+            end
+        end
+        return timers, works, rows
+    end
+
+    -- returns { [potion name] = seconds left }, and whether at least one real (ticking) timer was read.
+    -- A label counts as a timer only after it was seen counting down, so item counts are never mistaken for time.
+    local function readHud(force)
+        if not force and tick() - hudReadAt < 1.5 then return hudTimers, hudWorks end
+        hudReadAt = tick()
+        local container = getEffectsContainer()
+        if container then
+            if next(IconMap) == nil and tick() - learnAt > 10 then
+                learnAt = tick()
+                learnIcons()
+            end
+            local timers, works, rows = readEffects(container)
+            hudRows = rows
+            for name in pairs(timers) do seenInHud[name] = true end
+            if not works and next(seenInHud) ~= nil then works = true end
+            hudTimers, hudWorks = timers, works
+            return timers, works
+        end
+        if tick() - hudListAt > 20 then rebuildList() end
+        local timers, works = {}, false
+        local now = tick()
+        for _, e in ipairs(hudList) do
+            local label, img = e.label, e.img
+            if label.Parent and img.Parent then
+                local v = parseSeconds(label.Text)
+                local name = IconMap[iconKey(img)]
+                if v and name then
+                    local st = hudState[label]
+                    if not st then
+                        st = { v = v, t = now, ticks = 0 }
+                        hudState[label] = st
+                    else
+                        local dt = now - st.t
+                        if dt >= 0.8 then
+                            if v < st.v and math.abs((st.v - v) - dt) <= 2.5 then st.ticks += 1 end
+                            st.v, st.t = v, now
+                        end
+                    end
+                    if st.ticks >= 2 and isShown(label) then
+                        timers[name] = math.max(timers[name] or 0, v)
+                        works = true
+                        seenInHud[name] = true
+                    end
+                end
+            end
+        end
+        hudTimers, hudWorks = timers, works
+        return timers, works
+    end
+
+    -- reads the timers; the generic fallback scan needs a few seconds to see the numbers counting down
+    local function warmHud()
+        hudListAt = 0
+        readHud(true)
+        if not getEffectsContainer() then
+            task.wait(2)
+            readHud(true)
+            task.wait(2)
+        end
+        return readHud(true)
+    end
+
+    local function fmtTime(s)
+        s = math.floor(s)
+        local h, m = math.floor(s / 3600), math.floor((s % 3600) / 60)
+        if h > 0 then return h .. "h " .. m .. "m" end
+        if m > 0 then return m .. "m " .. (s % 60) .. "s" end
+        return s .. "s"
+    end
+
+    -- seconds left on a potion
+    local function remainingOf(name)
+        local timers, works = readHud()
+        local last = lastDrink[name]
+        local since = last and (os.time() - last) or math.huge
+        local hud = timers[name]
+        if hud then return hud end
+        if works and seenInHud[name] then
+            -- this potion's timer is normally visible, so "no icon" means it ran out
+            if since < 6 then return PotionInterval end -- just drunk, the HUD can lag a moment
+            return 0
+        end
+        -- icon never seen / HUD unreadable: fall back to our own drink time
+        if last then return math.max(PotionInterval - since, 0) end
+        return 0
+    end
 
     local function drink(name)
         if not useItemRemote then return false end
         local ok = pcall(function() useItemRemote:FireServer(name, PotionAmount) end)
-        if ok then lastDrink[name] = os.time() end
+        if ok then
+            lastDrink[name] = os.time()
+            if PerfCache.onPotion then PerfCache.onPotion(PotionAmount) end -- Live Tracker
+            hudListAt, hudReadAt = 0, 0 -- a new icon may appear: rescan soon
+        end
         return ok
     end
 
@@ -2724,13 +3023,16 @@ end)()
         return next(SelectedPotions) ~= nil
     end
 
-    -- drinks every selected potion (force) or only the ones whose interval has passed
-    local function drinkSelected(force)
+    -- drinks every potion in `set` that has less than `minRemaining` seconds left.
+    -- minRemaining = math.huge means "drink all of them now".
+    -- The same potion is never drunk twice within 20 seconds (unless forced).
+    local function ensure(set, minRemaining)
         local n = 0
         for _, name in ipairs(PotionNames) do
-            if SelectedPotions[name] then
+            if set[name] then
                 local last = lastDrink[name]
-                if force or not last or os.time() - last >= PotionInterval then
+                local since = last and (os.time() - last) or math.huge
+                if (minRemaining == math.huge or since >= 20) and remainingOf(name) < minRemaining then
                     if drink(name) then n += 1 end
                     task.wait(0.25)
                 end
@@ -2780,21 +3082,96 @@ end)()
                 return
             end
             task.spawn(function()
-                local n = drinkSelected(true)
+                local n = ensure(SelectedPotions, math.huge)
                 Rayfield:Notify({ Title = "Potions", Content = "Sent " .. n .. " potion request(s)", Duration = 3 })
             end)
         end,
     })
 
-    PotionsTab:CreateSection("Auto Drink (Interval)")
+    PotionsTab:CreateButton({
+        Name = "Show potion timers",
+        Callback = function()
+            task.spawn(function()
+                local timers = warmHud()
+                local parts = {}
+                for _, name in ipairs(PotionNames) do
+                    if timers[name] then table.insert(parts, name .. " " .. fmtTime(timers[name])) end
+                end
+                if #parts > 0 then
+                    Rayfield:Notify({ Title = "Potions", Content = table.concat(parts, " | "), Duration = 10 })
+                else
+                    Rayfield:Notify({
+                        Title = "Potions",
+                        Content = "No potion timer could be read (shop icons learned: " .. countMap() .. "). Use 'Print potion HUD (F9)'.",
+                        Duration = 8,
+                    })
+                end
+            end)
+        end,
+    })
+
+    PotionsTab:CreateButton({
+        Name = "Print potion HUD (F9)",
+        Callback = function()
+            task.spawn(function()
+                warmHud()
+                local container = getEffectsContainer()
+                print("[Potions HUD] shop icons learned: " .. countMap() .. " | effects container: " .. (container and container:GetFullName() or "NOT FOUND"))
+                if container then
+                    for _, child in ipairs(container:GetChildren()) do
+                        print(("  effect %s (%s)"):format(child.Name, child.ClassName))
+                        for k, v in pairs(child:GetAttributes()) do print("    attr " .. tostring(k) .. " = " .. tostring(v)) end
+                        local shown = 0
+                        for _, d in ipairs(child:GetDescendants()) do
+                            if shown >= 12 then break end
+                            shown += 1
+                            local extra = ""
+                            if d:IsA("TextLabel") then
+                                extra = " text=" .. d.Text
+                            elseif d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                                extra = " image=" .. iconKey(d)
+                            end
+                            print("    " .. d.ClassName .. " " .. d.Name .. extra)
+                        end
+                    end
+                    for _, r in ipairs(hudRows) do
+                        print(("  READ  %s | value=%s | potion=%s"):format(r.child.Name, tostring(r.value), tostring(r.potion)))
+                    end
+                else
+                    print("  labels matched: " .. #hudList .. " | not matched: " .. #hudUnmapped)
+                    for _, e in ipairs(hudList) do
+                        local st = hudState[e.label]
+                        print(("  matched   %s | text=%s | potion=%s | ticks=%d"):format(
+                            e.label:GetFullName(), e.label.Text, IconMap[iconKey(e.img)] or "?", st and st.ticks or 0))
+                    end
+                    for _, e in ipairs(hudUnmapped) do
+                        print(("  UNMATCHED %s | text=%s | image=%s"):format(e.label:GetFullName(), e.label.Text, iconKey(e.img)))
+                    end
+                end
+                Rayfield:Notify({ Title = "Potions", Content = "HUD info printed in the F9 console", Duration = 4 })
+            end)
+        end,
+    })
+
+    PotionsTab:CreateSection("Auto Drink (keeps every selected potion running)")
 
     PotionsTab:CreateInput({
-        Name = "Interval per potion (seconds)",
-        Default = "600",
-        Placeholder = "same as the potion duration",
+        Name = "Drink again when less than (seconds) remain",
+        Default = "10",
+        Placeholder = "e.g. 10",
+        Flag = "PotionRefillBelow",
+        Callback = function(v)
+            RefillBelow = math.clamp(math.floor(tonumber(v) or 10), 1, 120)
+        end,
+    })
+
+    PotionsTab:CreateInput({
+        Name = "Fallback: seconds one drink lasts",
+        Default = "300",
+        Placeholder = "5 minutes = 300",
         Flag = "PotionIntervalSec",
         Callback = function(v)
-            PotionInterval = math.max(math.floor(tonumber(v) or 600), 10)
+            PotionInterval = math.max(math.floor(tonumber(v) or 300), 10)
         end,
     })
 
@@ -2809,15 +3186,15 @@ end)()
             task.spawn(function()
                 while potionToken == myToken and Rayfield.Loading do task.wait(0.3) end
                 while potionToken == myToken do
-                    -- only potions whose own interval has passed are drunk (no re-drink on resume / rejoin)
-                    if hasSelection() then drinkSelected(false) end
-                    task.wait(5)
+                    -- a potion is drunk only when its timer is (almost) over
+                    if hasSelection() then ensure(SelectedPotions, RefillBelow) end
+                    task.wait(2)
                 end
             end)
         end,
     })
 
-    PotionsTab:CreateSection("Weather Burst (Drink on Weather)")
+    PotionsTab:CreateSection("Weather Burst (make sure potions run on a weather)")
 
     PotionsTab:CreateDropdown({
         Name = "Trigger on these Weathers",
@@ -2850,8 +3227,9 @@ end)()
                         if lastSeen ~= key and (not lastWeather[key] or os.time() - lastWeather[key] >= WeatherGuard) then
                             lastSeen = key
                             lastWeather[key] = os.time()
-                            local n = drinkSelected(true)
-                            Rayfield:Notify({ Title = "Potions", Content = "Weather " .. w .. " active - sent " .. n .. " potion(s)", Duration = 4 })
+                            -- only potions that would run out during the weather are drunk
+                            local n = ensure(SelectedPotions, WeatherMin)
+                            Rayfield:Notify({ Title = "Potions", Content = "Weather " .. w .. " active - drank " .. n .. " potion(s)", Duration = 4 })
                         end
                     elseif not w then
                         lastSeen = nil
@@ -2861,7 +3239,928 @@ end)()
             end)
         end,
     })
+
+    -- ===== potions to have running right before the Infinity Tower is ended =====
+    local PrepPotions = { ["Luck Potion IV"] = true }
+    local PrepEnabled = true
+    local PrepDelay = 3
+
+    PotionsTab:CreateSection("Before ending the Infinity Tower")
+
+    PotionsTab:CreateToggle({
+        Name = "Prep potions before auto-ending the tower",
+        CurrentValue = true,
+        Flag = "TowerPrepEnabled",
+        Callback = function(v) PrepEnabled = v end,
+    })
+
+    PotionsTab:CreateDropdown({
+        Name = "Potions to have active before ending",
+        Options = PotionNames,
+        CurrentOption = { "Luck Potion IV" },
+        MultipleOptions = true,
+        Flag = "TowerPrepPotions",
+        Callback = function(list)
+            PrepPotions = {}
+            for _, n in ipairs(list) do PrepPotions[n] = true end
+        end,
+    })
+
+    PotionsTab:CreateInput({
+        Name = "Wait after drinking, before ending (seconds)",
+        Default = "3",
+        Placeholder = "e.g. 3",
+        Flag = "TowerPrepDelay",
+        Callback = function(v)
+            PrepDelay = math.clamp(tonumber(v) or 3, 0, 30)
+        end,
+    })
+
+    -- called by the Infinity Tower tab right before it sends "end".
+    -- Returns how many potions were drunk (a potion that still has time left is NOT drunk again).
+    PerfCache.prepBeforeTowerEnd = function()
+        if not PrepEnabled or next(PrepPotions) == nil or not useItemRemote then return 0 end
+        local n = ensure(PrepPotions, PrepMin)
+        if n > 0 and PrepDelay > 0 then task.wait(PrepDelay) end
+        return n
+    end
 end)()
+
+-- ==================== Raid Shop (auto buy potions) ====================
+-- raidShopRequest is a RemoteFunction, captured with Cobalt:
+--   InvokeServer("buy", "kaiju", "potions:<Potion Name>")   -> purchase
+--   InvokeServer("get", "kaiju")                            -- shop data
+-- This spends real in-game currency, so every purchase is capped (see MaxBuys).
+-- own scope: adds no top-level locals
+;(function()
+    local HttpService = game:GetService("HttpService")
+    local ShopTab = Window:CreateTab("Raid Shop", 4483362458)
+
+    local shopRemote
+    task.spawn(function()
+        shopRemote = Rep:WaitForChild("raidShopRequest", 180)
+        if not shopRemote then
+            warn("[Titan Hub] missing remote: raidShopRequest")
+            pcall(function() Rayfield:Notify({ Title = "Missing remote", Content = "raidShopRequest", Duration = 6 }) end)
+        end
+    end)
+
+    local ShopId = "kaiju"
+    -- Skill Tree Reset and Weather Reroll are in the shop too, but are NOT buyable from this tab on purpose
+    local BuyNames = {
+        "Luck Potion I", "Luck Potion II", "Luck Potion III", "Luck Potion IV",
+        "Speed Potion I", "Speed Potion II", "Speed Potion III", "Speed Potion IV",
+        "Battle Potion I", "Battle Potion II", "Battle Potion III", "Battle Potion IV",
+        "Boss Potion", "Raid Potion",
+    }
+    local Selected = {}
+    local MaxBuys = 5                  -- max purchases per potion per restock cycle (the shop shows 5/5)
+    local CYCLE = 4 * 3600 + 60        -- the shop restocks about every 4 hours
+    local RETRY_AFTER_FAIL = 900       -- after a refused purchase, wait this long before trying that potion again
+    local buyToken = 0
+
+    -- survives re-execute / server hop in the same executor session (best effort)
+    getgenv().TitanShop = getgenv().TitanShop or { bought = {}, nextTry = {}, cycleStart = os.time() }
+    local State = getgenv().TitanShop
+
+    table.insert(activeConnections, { Disconnect = function() buyToken += 1 end })
+
+    local function rollCycle()
+        if os.time() - State.cycleStart >= CYCLE then
+            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+        end
+    end
+
+    local function show(v)
+        if type(v) == "table" then
+            local ok, s = pcall(function() return HttpService:JSONEncode(v) end)
+            if ok then return s end
+        end
+        return tostring(v)
+    end
+
+    -- explicit refusals only; a nil / true / data reply counts as an attempt (bounded by MaxBuys anyway)
+    local function refused(res)
+        if res == false then return true end
+        if type(res) == "table" and (res.success == false or res.ok == false or res.error ~= nil) then return true end
+        if type(res) == "string" then
+            local s = res:lower()
+            for _, kw in ipairs({ "not enough", "out of stock", "sold out", "insufficient", "fail", "error", "cannot", "invalid" }) do
+                if s:find(kw, 1, true) then return true end
+            end
+        end
+        return false
+    end
+
+    local function buyOne(name)
+        if not shopRemote then return false, "remote not ready" end
+        local ok, res = pcall(function() return shopRemote:InvokeServer("buy", ShopId, "potions:" .. name) end)
+        if not ok then return false, tostring(res) end
+        warn("[Raid Shop] " .. name .. " -> " .. show(res))
+        if refused(res) then return false, res end
+        return true, res
+    end
+
+    local function hasSelection() return next(Selected) ~= nil end
+
+    local function buyCycle(alive)
+        rollCycle()
+        local total = 0
+        for _, name in ipairs(BuyNames) do
+            if Selected[name] then
+                while alive() and (State.bought[name] or 0) < MaxBuys and (State.nextTry[name] or 0) <= os.time() do
+                    local ok = buyOne(name)
+                    if ok then
+                        State.bought[name] = (State.bought[name] or 0) + 1
+                        total += 1
+                        task.wait(0.7)
+                    else
+                        State.nextTry[name] = os.time() + RETRY_AFTER_FAIL
+                        break
+                    end
+                end
+            end
+        end
+        return total
+    end
+
+    local function dump(v, indent, depth)
+        indent, depth = indent or "", depth or 0
+        if type(v) ~= "table" or depth > 4 then
+            print(indent .. tostring(v))
+            return
+        end
+        for k, x in pairs(v) do
+            if type(x) == "table" then
+                print(indent .. tostring(k) .. " = {")
+                dump(x, indent .. "  ", depth + 1)
+                print(indent .. "}")
+            else
+                print(indent .. tostring(k) .. " = " .. tostring(x))
+            end
+        end
+    end
+
+    ShopTab:CreateSection("Potions to buy")
+
+    ShopTab:CreateDropdown({
+        Name = "Buy these potions",
+        Options = BuyNames,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "ShopPotionsPick",
+        Callback = function(list)
+            Selected = {}
+            for _, n in ipairs(list) do Selected[n] = true end
+        end,
+    })
+
+    ShopTab:CreateInput({
+        Name = "Max buys per potion per restock",
+        Default = "5",
+        Placeholder = "e.g. 5",
+        Flag = "ShopMaxBuys",
+        Callback = function(v)
+            MaxBuys = math.clamp(math.floor(tonumber(v) or 5), 1, 50)
+        end,
+    })
+
+    ShopTab:CreateSection("Buy")
+
+    ShopTab:CreateButton({
+        Name = "Buy selected now (1 of each)",
+        Callback = function()
+            if not hasSelection() then
+                Rayfield:Notify({ Title = "Shop", Content = "Pick at least one potion first", Duration = 3 })
+                return
+            end
+            task.spawn(function()
+                rollCycle()
+                local n = 0
+                for _, name in ipairs(BuyNames) do
+                    if Selected[name] then
+                        if buyOne(name) then
+                            State.bought[name] = (State.bought[name] or 0) + 1
+                            n += 1
+                        end
+                        task.wait(0.7)
+                    end
+                end
+                Rayfield:Notify({ Title = "Shop", Content = "Purchase accepted for " .. n .. " potion(s)", Duration = 4 })
+            end)
+        end,
+    })
+
+    ShopTab:CreateToggle({
+        Name = "Auto buy selected potions",
+        CurrentValue = false,
+        Flag = "AutoBuyShopPotions",
+        Callback = function(Value)
+            buyToken += 1
+            local myToken = buyToken
+            if not Value then return end
+            local function alive() return buyToken == myToken end
+            task.spawn(function()
+                while alive() and Rayfield.Loading do task.wait(0.3) end
+                while alive() do
+                    if hasSelection() then
+                        local n = buyCycle(alive)
+                        if n > 0 then
+                            Rayfield:Notify({ Title = "Shop", Content = "Bought " .. n .. " potion(s) from the Kaiju Raid shop", Duration = 4 })
+                        end
+                    end
+                    task.wait(60)
+                end
+            end)
+        end,
+    })
+
+    ShopTab:CreateButton({
+        Name = "Reset buy counters",
+        Callback = function()
+            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+            Rayfield:Notify({ Title = "Shop", Content = "Counters reset", Duration = 3 })
+        end,
+    })
+
+    ShopTab:CreateSection("Debug")
+
+    ShopTab:CreateButton({
+        Name = "Print shop data (F9)",
+        Callback = function()
+            task.spawn(function()
+                if not shopRemote then
+                    Rayfield:Notify({ Title = "Shop", Content = "raidShopRequest not ready", Duration = 3 })
+                    return
+                end
+                local ok, data = pcall(function() return shopRemote:InvokeServer("get", ShopId) end)
+                print("[Raid Shop] get ok:", ok)
+                dump(data)
+                Rayfield:Notify({ Title = "Shop", Content = "Shop data printed in the F9 console", Duration = 4 })
+            end)
+        end,
+    })
+
+    ShopTab:CreateParagraph({
+        Title = "Spends currency",
+        Content = "Each purchase costs raid-shop currency. Buying stops at the max per restock, and a refused purchase pauses that potion for 15 minutes.",
+    })
+end)()
+
+-- ==================== Crafting (auto craft potions) ====================
+-- craftItem is a RemoteEvent, captured with Cobalt:
+--   FireServer("craft", "<Potion Name>", amount)
+-- Stock is read from the game's Inventory UI (confirmed with the F9 dump):
+--   PlayerGui.Inventory.InventoryFrame.itemsFrame.CollectionFrame.itemScroll.<Potion Name>.quantityLabel  ("43x")
+-- A potion is crafted only when its stock is below "Keep at least". If the stock cannot be read,
+-- that potion is SKIPPED (never crafted blindly), so materials are not wasted.
+-- own scope: adds no top-level locals
+;(function()
+    local CraftTab = Window:CreateTab("Crafting", 4483362458)
+
+    local craftRemote
+    task.spawn(function()
+        craftRemote = Rep:WaitForChild("craftItem", 180)
+        if not craftRemote then
+            warn("[Titan Hub] missing remote: craftItem")
+            pcall(function() Rayfield:Notify({ Title = "Missing remote", Content = "craftItem", Duration = 6 }) end)
+        end
+    end)
+
+    -- Skill Tree Reset and Weather Reroll are not potions to craft, so they are not listed
+    local CraftNames = {
+        "Luck Potion I", "Luck Potion II", "Luck Potion III", "Luck Potion IV",
+        "Speed Potion I", "Speed Potion II", "Speed Potion III", "Speed Potion IV",
+        "Battle Potion I", "Battle Potion II", "Battle Potion III", "Battle Potion IV",
+        "Boss Potion", "Raid Potion",
+    }
+    local Selected = {}
+    local Amount = 1          -- max amount per craft request
+    local MinStock = 50       -- keep at least this many of each selected potion
+    local IntervalMin = 10    -- how often the auto mode checks the stock
+    local craftToken = 0
+
+    -- survives re-execute / server hop in the same executor session (best effort)
+    getgenv().TitanCraftLast = getgenv().TitanCraftLast or {}
+    local lastCraft = getgenv().TitanCraftLast
+
+    table.insert(activeConnections, { Disconnect = function() craftToken += 1 end })
+
+    -- how many of this potion you own, or nil if the Inventory UI cannot be read right now
+    local function getStock(name)
+        local node = player:FindFirstChild("PlayerGui")
+        for _, nm in ipairs({ "Inventory", "InventoryFrame", "itemsFrame", "CollectionFrame", "itemScroll" }) do
+            node = node and node:FindFirstChild(nm)
+        end
+        if not node then return nil end
+
+        -- only trust a populated list (an empty list means the UI has not been built yet)
+        local populated = false
+        for _, c in ipairs(node:GetChildren()) do
+            if c:IsA("Frame") then populated = true break end
+        end
+        if not populated then return nil end
+
+        local cell = node:FindFirstChild(name)
+        if not cell then return 0 end   -- the inventory lists only items you own
+
+        local lbl = cell:FindFirstChild("quantityLabel", true)
+        if not (lbl and lbl:IsA("TextLabel")) then return nil end
+        local txt = tostring(lbl.Text):gsub("<[^>]+>", "")
+        txt = txt:gsub(",", "")
+        local n = txt:match("(%d+)")
+        return n and tonumber(n) or nil
+    end
+
+    local function craftOne(name, amt)
+        if not craftRemote then return false end
+        local ok = pcall(function() craftRemote:FireServer("craft", name, amt) end)
+        if ok then
+            lastCraft[name] = os.time()
+            if PerfCache.onCraft then PerfCache.onCraft(amt) end -- Live Tracker
+        end
+        return ok
+    end
+
+    local function hasSelection() return next(Selected) ~= nil end
+
+    -- crafts every selected potion that is below MinStock. Returns (requests sent, potions skipped as unreadable)
+    local function craftDue()
+        local sent, unreadable = 0, 0
+        for _, name in ipairs(CraftNames) do
+            if Selected[name] then
+                local stock = getStock(name)
+                if stock == nil then
+                    unreadable += 1
+                elseif stock < MinStock then
+                    local last = lastCraft[name]
+                    -- never hit the same potion twice within 15 seconds
+                    if not last or os.time() - last >= 15 then
+                        -- never craft more than what is missing to reach MinStock
+                        local amt = math.min(Amount, MinStock - stock)
+                        if craftOne(name, amt) then sent += 1 end
+                        task.wait(0.6)
+                    end
+                end
+            end
+        end
+        return sent, unreadable
+    end
+
+    CraftTab:CreateSection("Potions to craft")
+
+    CraftTab:CreateDropdown({
+        Name = "Craft these potions",
+        Options = CraftNames,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "CraftPotionsPick",
+        Callback = function(list)
+            Selected = {}
+            for _, n in ipairs(list) do Selected[n] = true end
+        end,
+    })
+
+    CraftTab:CreateInput({
+        Name = "Keep at least (stock)",
+        Default = "50",
+        Placeholder = "e.g. 50",
+        Flag = "CraftMinStock",
+        Callback = function(v)
+            MinStock = math.clamp(math.floor(tonumber(v) or 50), 1, 100000)
+        end,
+    })
+
+    CraftTab:CreateInput({
+        Name = "Max amount per craft request",
+        Default = "1",
+        Placeholder = "e.g. 1",
+        Flag = "CraftAmount",
+        Callback = function(v)
+            Amount = math.clamp(math.floor(tonumber(v) or 1), 1, 50)
+        end,
+    })
+
+    CraftTab:CreateSection("Craft")
+
+    CraftTab:CreateButton({
+        Name = "Craft selected now (only below stock)",
+        Callback = function()
+            if not hasSelection() then
+                Rayfield:Notify({ Title = "Crafting", Content = "Pick at least one potion first", Duration = 3 })
+                return
+            end
+            if not craftRemote then
+                Rayfield:Notify({ Title = "Crafting", Content = "craftItem remote not ready", Duration = 3 })
+                return
+            end
+            task.spawn(function()
+                local sent, unreadable = craftDue()
+                local msg = "Sent " .. sent .. " craft request(s)"
+                if unreadable > 0 then
+                    msg = msg .. " | could not read the stock of " .. unreadable .. " (skipped)"
+                end
+                Rayfield:Notify({ Title = "Crafting", Content = msg, Duration = 5 })
+            end)
+        end,
+    })
+
+    CraftTab:CreateInput({
+        Name = "Check stock every (minutes)",
+        Default = "10",
+        Placeholder = "e.g. 10",
+        Flag = "CraftIntervalMin",
+        Callback = function(v)
+            IntervalMin = math.clamp(math.floor(tonumber(v) or 10), 1, 1440)
+        end,
+    })
+
+    CraftTab:CreateToggle({
+        Name = "Auto craft selected potions",
+        CurrentValue = false,
+        Flag = "AutoCraftPotions",
+        Callback = function(Value)
+            craftToken += 1
+            local myToken = craftToken
+            if not Value then return end
+            task.spawn(function()
+                while craftToken == myToken and Rayfield.Loading do task.wait(0.3) end
+                local warnedUnread = false
+                while craftToken == myToken do
+                    if hasSelection() and craftRemote then
+                        local sent, unreadable = craftDue()
+                        if sent > 0 then
+                            Rayfield:Notify({ Title = "Crafting", Content = "Sent " .. sent .. " craft request(s)", Duration = 4 })
+                        end
+                        if unreadable > 0 and not warnedUnread then
+                            warnedUnread = true
+                            Rayfield:Notify({
+                                Title = "Crafting",
+                                Content = "Could not read the stock of " .. unreadable .. " potion(s) - skipped (open the Inventory once)",
+                                Duration = 6,
+                            })
+                        elseif unreadable == 0 then
+                            warnedUnread = false
+                        end
+                    end
+                    -- wait in 1s steps so turning the toggle off reacts immediately
+                    local waited = 0
+                    while craftToken == myToken and waited < IntervalMin * 60 do
+                        task.wait(1)
+                        waited += 1
+                    end
+                end
+            end)
+        end,
+    })
+
+    CraftTab:CreateSection("Debug")
+
+    CraftTab:CreateButton({
+        Name = "Print potion stock (F9)",
+        Callback = function()
+            print("[Crafting] stock read from the Inventory UI (nil = cannot read):")
+            for _, name in ipairs(CraftNames) do
+                print(("  %-18s %s"):format(name, tostring(getStock(name))))
+            end
+            Rayfield:Notify({ Title = "Crafting", Content = "Stock printed in the F9 console", Duration = 4 })
+        end,
+    })
+
+    CraftTab:CreateParagraph({
+        Title = "Spends materials",
+        Content = "Only potions below 'Keep at least' are crafted, and never more than what is missing. The server refuses a craft you cannot afford.",
+    })
+end)()
+
+-- ==================== Offline rolls: auto collect ====================
+;(function()
+    local token = 0
+    table.insert(activeConnections, { Disconnect = function() token += 1 end })
+
+    local function visible(o)
+        local n = o
+        while n and n ~= game do
+            if n:IsA("GuiObject") and not n.Visible then return false end
+            if n:IsA("ScreenGui") and not n.Enabled then return false end
+            n = n.Parent
+        end
+        return true
+    end
+
+    -- the WELCOME BACK window only shows after joining, so the watcher gives up after 90s
+    local function start()
+        token += 1
+        local my = token
+        task.spawn(function()
+            local t0, tries = os.clock(), 0
+            while token == my and os.clock() - t0 < 90 and tries < 3 do
+                local ok, btn = pcall(function() return player.PlayerGui.OfflineUI.panel.collect end)
+                if ok and btn and btn:IsA("GuiButton") and visible(btn) then
+                    task.wait(1)
+                    tries += 1
+                    pressButton(btn)
+                    task.wait(2)
+                    if not visible(btn) then
+                        Rayfield:Notify({ Title = "Offline rolls", Content = "Collected", Duration = 3 })
+                        return
+                    end
+                end
+                task.wait(1)
+            end
+        end)
+    end
+
+    RollTab:CreateSection("Offline rolls")
+    RollTab:CreateToggle({
+        Name = "Auto collect offline rolls (WELCOME BACK window)",
+        CurrentValue = true,
+        Flag = "AutoCollectOffline",
+        Callback = function(Value)
+            if Value then start() else token += 1 end
+        end,
+    })
+    start()
+end)()
+
+-- ==================== Live Tracker ====================
+-- Works two ways:
+--   1) pasted inside the main script, right before Rayfield:LoadConfiguration()  -> panel + "Tracker" tab
+--   2) executed on its own in the executor                                        -> panel only (R = reset, - = minimize)
+-- Reads only paths confirmed in the game dump (no PlayerGui scans), so it is light.
+-- own scope: adds no top-level locals
+do (function()
+    local Players = game:GetService("Players")
+    local UIS = game:GetService("UserInputService")
+    local Rep = game:GetService("ReplicatedStorage")
+
+    -- main-script locals when pasted inside it; nil when run alone
+    local Win = Window
+    local RF = Rayfield
+    local LP = player or Players.LocalPlayer
+    local mainConns = activeConnections
+    local embedded = type(Win) == "table" and type(Win.CreateTab) == "function"
+        and type(RF) == "table" and type(mainConns) == "table"
+    local PC = type(PerfCache) == "table" and PerfCache or {}
+
+    -- ===== lifetime: one tracker at a time =====
+    local conns = {}
+    local trackToken = 0
+    local function cleanup()
+        trackToken += 1
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+        table.clear(conns)
+    end
+    local G = (getgenv and getgenv()) or _G
+    if type(G.TitanTrackerCleanup) == "function" then pcall(G.TitanTrackerCleanup) end
+    G.TitanTrackerCleanup = cleanup
+    if embedded then table.insert(mainConns, { Disconnect = cleanup }) end
+    local myToken = trackToken
+
+    -- ===== counters =====
+    local S = { start = os.time(), bosses = 0, potions = 0, potSeen = 0, crafts = 0, topFloor = 0 }
+    local hooked = { potion = false, craft = false }
+
+    -- called from the Potions / Crafting blocks of the main script (the one-line hooks)
+    PC.onPotion = function(n) hooked.potion = true; S.potions += (tonumber(n) or 1) end
+    PC.onCraft = function(n) hooked.craft = true; S.crafts += (tonumber(n) or 1) end
+
+    -- ===== extra live data: rolls to next level, server luck, tower cards =====
+    local rollInfo = { total = nil, need = nil }
+    local luckInfo = { mult = nil, left = nil, at = 0 }
+    local towerCards = nil
+
+    local function commas(n)
+        local r = tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,"):reverse()
+        return (r:gsub("^,", ""))
+    end
+
+    if type(onRemoteEvent) == "function" then
+        onRemoteEvent("rollResult", function(...)
+            for i = 1, select("#", ...) do
+                local v = select(i, ...)
+                if type(v) == "table" and type(v.totalRolls) == "number" and type(v.spThreshold) == "number" then
+                    rollInfo.total, rollInfo.need = v.totalRolls, v.spThreshold
+                end
+            end
+        end)
+        onRemoteEvent("sendUI", function(action, data)
+            if action == "serverLuckUpdate" and type(data) == "table" then
+                luckInfo.mult, luckInfo.left, luckInfo.at = data.multiplier, data.duration, os.clock()
+            end
+        end)
+        onRemoteEvent("floorPromptEvent", function(data)
+            if type(data) == "table" and type(data.floorCards) == "number" then
+                towerCards = data.floorCards
+            end
+        end)
+    end
+
+    local function onBoss(won)
+        if won == true or (type(won) == "table" and (won.won == true or won.win == true or won.victory == true)) then
+            S.bosses += 1
+        end
+    end
+    task.spawn(function()
+        local ev = Rep:WaitForChild("bossResult", 180)
+        if ev and ev:IsA("RemoteEvent") and trackToken == myToken then
+            table.insert(conns, ev.OnClientEvent:Connect(onBoss))
+        end
+    end)
+
+    -- ===== helpers =====
+    local function fmtTime(sec)
+        return string.format("%02d:%02d:%02d", math.floor(sec / 3600), math.floor((sec % 3600) / 60), sec % 60)
+    end
+
+    -- text read from the game goes into a RichText label: escape it so it can never break the panel
+    local function esc(s)
+        s = tostring(s)
+        s = s:gsub("&", "&amp;")
+        s = s:gsub("<", "&lt;")
+        s = s:gsub(">", "&gt;")
+        return s
+    end
+
+    -- ContentText = the text without the game's own rich-text tags
+    local function textAt(root, path)
+        local node = root
+        for _, nm in ipairs(path) do node = node and node:FindFirstChild(nm) end
+        if node and (node:IsA("TextLabel") or node:IsA("TextButton")) then
+            local t = node.ContentText
+            if t == nil or t == "" then t = node.Text end
+            return t
+        end
+        return nil
+    end
+
+    -- "Currently in battle: Floor 4603" / "Floor: 4603"  (strict)   |   "Infinite F474"  (loose)
+    local function floorFrom(txt, loose)
+        if not txt then return nil end
+        txt = tostring(txt):gsub("<[^>]+>", "")
+        local n = txt:match("[Ff]loor%s*:?%s*([%d,]+)")
+        if not n and loose then n = txt:match("[Ff]%s*([%d,]+)") end
+        return n and tonumber((n:gsub(",", ""))) or nil
+    end
+
+    local function playerGui()
+        return LP and LP:FindFirstChild("PlayerGui")
+    end
+
+    local function readFloor()
+        local pg = playerGui()
+        local ui = pg and pg:FindFirstChild("BattleUI")
+        if not ui then return nil end
+        return floorFrom(textAt(ui, { "battleContainer", "battleTabs", "tower", "textLabel" }), true)
+            or floorFrom(textAt(ui, { "battleNotifierLabel" }))
+            or floorFrom(textAt(ui, { "battleContainer", "floorCount" }))
+    end
+
+    local function readMain()
+        local pg = playerGui()
+        return pg and pg:FindFirstChild("Main")
+    end
+
+    -- potion buffs running right now (the game's own active-effects list)
+    -- + counts new potion buffs, so "drunk" works even without the main-script hook
+    local watchedList
+    local function activePotions(main)
+        local holder = main and main:FindFirstChild("activeEffectsHolder")
+        local list = holder and holder:FindFirstChild("activeEffects")
+        if list ~= watchedList then
+            watchedList = list
+            if list then
+                table.insert(conns, list.ChildAdded:Connect(function(ch)
+                    task.wait(0.2) -- attribute may be set right after parenting
+                    if ch:GetAttribute("category") == "potion" then S.potSeen += 1 end
+                end))
+            end
+        end
+        if not list then return nil end
+        local n = 0
+        for _, ch in ipairs(list:GetChildren()) do
+            if ch:GetAttribute("category") == "potion" then n += 1 end
+        end
+        return n
+    end
+
+    -- ===== the on-screen panel =====
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "TitanTracker"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 998
+
+    local frame = Instance.new("Frame")
+    frame.Active = true
+    frame.AutomaticSize = Enum.AutomaticSize.Y
+    frame.Size = UDim2.new(0, 215, 0, 0)
+    frame.Position = UDim2.new(0, 12, 0.18, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    frame.BackgroundTransparency = 0.2
+    frame.BorderSizePixel = 0
+    frame.Parent = gui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    local pad = Instance.new("UIPadding", frame)
+    pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
+    pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
+
+    local content = Instance.new("TextLabel")
+    content.AutomaticSize = Enum.AutomaticSize.Y
+    content.Size = UDim2.new(1, 0, 0, 0)
+    content.BackgroundTransparency = 1
+    content.RichText = true
+    content.TextWrapped = true
+    content.TextXAlignment = Enum.TextXAlignment.Left
+    content.TextYAlignment = Enum.TextYAlignment.Top
+    content.TextColor3 = Color3.fromRGB(210, 210, 210)
+    content.Font = Enum.Font.GothamSemibold
+    content.TextSize = 12
+    content.Text = "Live Session..."
+    content.Parent = frame
+
+    local function mkBtn(txt, x)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, 18, 0, 18)
+        b.Position = UDim2.new(1, x, 0, -2)
+        b.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+        b.BorderSizePixel = 0
+        b.AutoButtonColor = true
+        b.Text = txt
+        b.TextColor3 = Color3.fromRGB(220, 220, 220)
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 12
+        b.ZIndex = 2
+        b.Parent = frame
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+        return b
+    end
+    local minBtn = mkBtn("-", -18)
+    local resetBtn = mkBtn("R", -40)
+
+    -- parent: gethui -> CoreGui -> PlayerGui (removes an old panel left from a previous run)
+    local function killOld(p)
+        pcall(function()
+            local old = p and p:FindFirstChild("TitanTracker")
+            if old and old ~= gui then old:Destroy() end
+        end)
+    end
+    local parent
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok and typeof(h) == "Instance" then parent = h end
+    end
+    if not parent then
+        local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+        if ok and cg then
+            killOld(cg)
+            if pcall(function() gui.Parent = cg end) and gui.Parent then parent = cg end
+        end
+    end
+    parent = parent or LP:WaitForChild("PlayerGui")
+    killOld(parent)
+    gui.Parent = parent
+    table.insert(conns, { Disconnect = function() pcall(function() gui:Destroy() end) end })
+
+    -- drag (mouse + touch); follows only the finger / mouse that started the drag
+    local dragInput, dragStart, startPos
+    local MB1, MOVE, TOUCH = Enum.UserInputType.MouseButton1, Enum.UserInputType.MouseMovement, Enum.UserInputType.Touch
+    table.insert(conns, frame.InputBegan:Connect(function(input)
+        if input.UserInputType == MB1 or input.UserInputType == TOUCH then
+            dragInput, dragStart, startPos = input, input.Position, frame.Position
+        end
+    end))
+    table.insert(conns, UIS.InputChanged:Connect(function(input)
+        if not dragInput then return end
+        if input == dragInput or (dragInput.UserInputType == MB1 and input.UserInputType == MOVE) then
+            local d = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end))
+    table.insert(conns, UIS.InputEnded:Connect(function(input)
+        if not dragInput then return end
+        if input == dragInput or (dragInput.UserInputType == MB1 and input.UserInputType == MB1) then
+            dragInput = nil
+        end
+    end))
+
+    -- ===== refresh =====
+    local lastText = ""
+    local collapsed = false
+    local TITLE = '<font color="#008CFF"><b>Live Session</b></font>'
+
+    local function refresh()
+        local txt
+        if collapsed then
+            txt = TITLE
+        else
+            local main = readMain()
+
+            local f = readFloor()
+            if f and f > S.topFloor then S.topFloor = f end
+
+            -- weather: server data first (name + time left), HUD label as fallback; expired weather shows "-"
+            local weather = "-"
+            if PC.getWeatherInfo then
+                local okW, wn, wl, sw = pcall(PC.getWeatherInfo)
+                if okW and wn then
+                    weather = esc(wn)
+                    if wl then weather = weather .. " (" .. fmtTime(math.floor(wl)) .. ")" end
+                    if sw and sw.speed then weather = weather .. " " .. sw.speed .. "x speed" end
+                    if sw and sw.luck then weather = weather .. " " .. sw.luck .. "x luck" end
+                end
+            end
+
+            -- the Pity Roll block returns 9999 (MaxPity - 1) when the roll bar shows 10,000x+ = pity is full
+            local okP, pity = pcall(function() return PC.getPity and PC.getPity() end)
+            local pityText = "-"
+            if okP and type(pity) == "number" then
+                pityText = pity >= 9999 and '<font color="#3CDC50">READY</font>' or (math.floor(pity) .. "/10000")
+            end
+
+            local level = main and textAt(main, { "Bottom", "skillPointBarContainer", "levelLabel" }) or "-"
+            local pots = activePotions(main)
+            local drunk = hooked.potion and S.potions or S.potSeen
+            local crafted = (embedded or hooked.craft) and tostring(S.crafts) or "-"
+
+            -- rolls left to the next level (from rollResult: the HUD label lags behind)
+            local nextLvl = "-"
+            if rollInfo.total and rollInfo.need then
+                nextLvl = commas(math.max(rollInfo.need - rollInfo.total, 0)) .. " rolls"
+            end
+
+            -- server luck (the server sends it every second)
+            local luckText = "-"
+            if luckInfo.mult and luckInfo.left then
+                local left = luckInfo.left - (os.clock() - luckInfo.at)
+                if left > 0 then luckText = luckInfo.mult .. "x (" .. fmtTime(math.floor(left)) .. ")" end
+            end
+
+            txt = table.concat({
+                TITLE,
+                "Time: " .. fmtTime(os.time() - S.start),
+                "Bosses beaten: " .. S.bosses,
+                "Tower floor: " .. (f and tostring(f) or "-") .. "  (best " .. S.topFloor .. ")",
+                "Tower cards: " .. (towerCards and commas(towerCards) or "-"),
+                "Potions drunk: " .. drunk .. "  |  active: " .. (pots and tostring(pots) or "-"),
+                "Crafted: " .. crafted,
+                "Pity: " .. pityText,
+                "Weather: " .. weather,
+                "Server luck: " .. luckText,
+                "Next level: " .. nextLvl,
+                esc(level),
+            }, "\n")
+        end
+        if txt ~= lastText then
+            lastText = txt
+            content.Text = txt
+        end
+    end
+
+    local function resetCounters()
+        S.start, S.bosses, S.potions, S.potSeen, S.crafts, S.topFloor = os.time(), 0, 0, 0, 0, 0
+        lastText = ""
+        pcall(refresh)
+        if embedded then
+            pcall(function() RF:Notify({ Title = "Tracker", Content = "Counters reset", Duration = 3 }) end)
+        end
+    end
+
+    table.insert(conns, minBtn.MouseButton1Click:Connect(function()
+        collapsed = not collapsed
+        minBtn.Text = collapsed and "+" or "-"
+        pcall(refresh)
+    end))
+    table.insert(conns, resetBtn.MouseButton1Click:Connect(resetCounters))
+
+    task.spawn(function()
+        while trackToken == myToken do
+            if gui.Enabled then pcall(refresh) end
+            task.wait(1)
+        end
+    end)
+
+    -- ===== menu tab (only when pasted inside the main script) =====
+    if embedded then
+        local ok, err = pcall(function()
+            local TrackTab = Win:CreateTab("Tracker", 4483362458)
+            TrackTab:CreateSection("Live tracker")
+            TrackTab:CreateToggle({
+                Name = "Show live tracker",
+                CurrentValue = true,
+                Flag = "TrackerShow",
+                Callback = function(v) gui.Enabled = v end,
+            })
+            TrackTab:CreateButton({ Name = "Reset session counters", Callback = resetCounters })
+            TrackTab:CreateParagraph({
+                Title = "Tip",
+                Content = "Drag the panel to move it. R = reset, - = minimize. Counters are for this session only.",
+            })
+        end)
+        if not ok then warn("[Tracker] tab: " .. tostring(err)) end
+    else
+        print("[Tracker] running standalone (panel only). Paste it inside the main script for the menu tab + potion/craft/pity hooks.")
+    end
+end)() end
 
 Rayfield:LoadConfiguration()
 
