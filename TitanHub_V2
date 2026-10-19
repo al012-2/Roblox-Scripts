@@ -1432,7 +1432,7 @@ do
         "SmartFarm5", "SmartFarm6", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
         "AutoClaimQuests", "AutoClaimIndex", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
         "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions",
-        "HalloweenAutoBoss", "AutoHalloweenQuests", "AutoHalloweenUpgrades", "AutoEndless", "AutoPrestigeTower",
+        "HalloweenAutoBoss", "AutoHalloweenQuests", "AutoHalloweenUpgrades", "UnlockSecretRooms", "AutoEndless", "AutoPrestigeTower",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -2358,6 +2358,219 @@ do
         Callback = function(list)
             SecretDiffs = {}
             for _, d in ipairs(list) do SecretDiffs[d] = true end
+        end,
+    })
+
+    -- ===== Secret Rooms & Hidden Bosses (left box below Fine tune) =====
+    local unlockTok = 0
+    table.insert(activeConnections, { Disconnect = function() unlockTok += 1 end })
+
+    local function unlockAllSecrets()
+        -- 1) World 6 (Hueco Mundo): unlock AizenSecretRoom door & remove seal
+        pcall(function() player:SetAttribute("BeatMirrorTraitor", true) end)
+        local hm = workspace:FindFirstChild("HuecoMundo")
+        local aizenRoom = hm and hm:FindFirstChild("AizenSecretRoom")
+        local door = aizenRoom and aizenRoom:FindFirstChild("Door")
+        if door then
+            for _, leafName in ipairs({ "LeftLeaf", "RightLeaf" }) do
+                local leaf = door:FindFirstChild(leafName)
+                if leaf then
+                    for _, d in ipairs(leaf:GetDescendants()) do
+                        if d:IsA("BasePart") then d.CanCollide = false end
+                    end
+                end
+            end
+            local seal = door:FindFirstChild("Seal")
+            if seal then
+                for _, d in ipairs(seal:GetDescendants()) do
+                    if d:IsA("BasePart") then
+                        d.Transparency = 1
+                        d.CanCollide = false
+                    elseif d:IsA("PointLight") or d:IsA("ParticleEmitter") then
+                        d.Enabled = false
+                    end
+                end
+            end
+        end
+
+        -- 2) Halloween Event: unhide Faceless Prophet (halloween_friend) & open Strange Stone / SecretStoneRoom / SecretGrave
+        pcall(function() player:SetAttribute("HalloweenSecretReady", true) end)
+        pcall(function()
+            local cs = game:GetService("CollectionService")
+            for _, stone in ipairs(cs:GetTagged("hwSecretStone")) do
+                pcall(function() stone:SetAttribute("Idle", true) end)
+                for _, d in ipairs(stone:GetDescendants()) do
+                    if d:IsA("BasePart") then
+                        d.CanCollide = false
+                        d.Transparency = 0.5
+                    elseif d:IsA("ProximityPrompt") then
+                        d.Enabled = true
+                    end
+                end
+                if stone:IsA("BasePart") then
+                    stone.CanCollide = false
+                    stone.Transparency = 0.5
+                end
+            end
+        end)
+        local hw = workspace:FindFirstChild("HalloweenEvent")
+        if hw then
+            local secAreas = hw:FindFirstChild("07_Secret_Areas")
+            if secAreas then
+                local stoneRoom = secAreas:FindFirstChild("SecretStoneRoom")
+                local holeZone = stoneRoom and stoneRoom:FindFirstChild("HoleZone")
+                if holeZone then
+                    pcall(function() holeZone:SetAttribute("Open", true) end)
+                    if holeZone:IsA("BasePart") then holeZone.CanCollide = false end
+                end
+            end
+            local evNpcs = hw:FindFirstChild("EventNPCs")
+            local bosses = evNpcs and evNpcs:FindFirstChild("Bosses")
+            if bosses then
+                for _, m in ipairs(bosses:GetChildren()) do
+                    if m:IsA("Model") and (m:GetAttribute("bossId") == "halloween_friend" or m.Name == "Faceless Prophet") then
+                        for _, d in ipairs(m:GetDescendants()) do
+                            if d:IsA("BasePart") then
+                                d.LocalTransparencyModifier = 0
+                            elseif d:IsA("ProximityPrompt") then
+                                d.Enabled = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local function setCharGraveDigger()
+        local char = player.Character
+        if not char then return end
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("BasePart") then
+                pcall(function() d.CollisionGroup = "GraveDigger" end)
+            end
+        end
+    end
+
+    local function tpToTargetPart(part)
+        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if not (root and part) then return false end
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = part.CFrame + Vector3.new(0, 3.5, 0)
+        return true
+    end
+
+    local function tpToPos(pos)
+        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if not root then return false end
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = CFrame.new(pos)
+        return true
+    end
+
+    BossTab:CreateSection("Secret Rooms & Hidden Bosses")
+
+    BossTab:CreateButton({
+        Name = "Unlock Secret Rooms & Hidden Bosses Now",
+        Callback = function()
+            unlockAllSecrets()
+            setCharGraveDigger()
+            Rayfield:Notify({
+                Title = "Secret Rooms",
+                Content = "Unlocked Aizen Secret Room + Strange Stone hole & Faceless Prophet!",
+                Duration = 4,
+            })
+        end,
+    })
+
+    BossTab:CreateToggle({
+        Name = "Auto Keep Secret Rooms Unlocked",
+        CurrentValue = false,
+        Flag = "UnlockSecretRooms",
+        Callback = function(Value)
+            unlockTok += 1
+            local my = unlockTok
+            if not Value then return end
+            task.spawn(function()
+                while unlockTok == my do
+                    unlockAllSecrets()
+                    task.wait(3)
+                end
+            end)
+        end,
+    })
+
+    BossTab:CreateButton({
+        Name = "Teleport: Aizen Secret Room (World 6)",
+        Callback = function()
+            task.spawn(function()
+                if not nearWorldBosses("6") then
+                    forceTeleportToWorld("6")
+                    task.wait(1)
+                end
+                unlockAllSecrets()
+                local hm = workspace:FindFirstChild("HuecoMundo")
+                local room = hm and hm:FindFirstChild("AizenSecretRoom")
+                local interior = room and room:FindFirstChild("Interior")
+                local shrine = interior and interior:FindFirstChild("OrbShrine")
+                local orb = (shrine and shrine:FindFirstChild("FloatingOrb"))
+                    or (room and room:FindFirstChildWhichIsA("BasePart", true))
+                if orb and tpToTargetPart(orb) then
+                    Rayfield:Notify({ Title = "Secret Rooms", Content = "Teleported to Aizen Secret Room", Duration = 3 })
+                else
+                    Rayfield:Notify({ Title = "Secret Rooms", Content = "AizenSecretRoom not loaded yet (enter World 6 first)", Duration = 4 })
+                end
+            end)
+        end,
+    })
+
+    BossTab:CreateButton({
+        Name = "Teleport: Faceless Prophet Room (Halloween)",
+        Callback = function()
+            task.spawn(function()
+                if not nearWorldBosses("halloween") then
+                    forceTeleportToWorld("halloween")
+                    task.wait(1)
+                end
+                unlockAllSecrets()
+                setCharGraveDigger()
+                -- Teleport directly inside the underground room in front of Faceless Prophet (pos=4787, 178.5, -4815)
+                tpToPos(Vector3.new(4787, 179.5, -4811))
+                task.wait(0.4)
+                unlockAllSecrets()
+                setCharGraveDigger()
+                local model = findBossModel("halloween_friend")
+                if model then
+                    local ok, piv = pcall(function() return model:GetPivot().Position end)
+                    if ok then tpToPos(piv + Vector3.new(0, 2, 4)) end
+                end
+                Rayfield:Notify({ Title = "Secret Rooms", Content = "Teleported underground to Faceless Prophet!", Duration = 3 })
+            end)
+        end,
+    })
+
+    BossTab:CreateButton({
+        Name = "Teleport: Primordial Dread Crypt (Halloween)",
+        Callback = function()
+            task.spawn(function()
+                if not nearWorldBosses("halloween") then
+                    forceTeleportToWorld("halloween")
+                    task.wait(1)
+                end
+                unlockAllSecrets()
+                setCharGraveDigger()
+                -- Teleport directly inside the underground crypt in front of Primordial Dread (pos=4760.7, 149.8, -4814)
+                tpToPos(Vector3.new(4760.7, 151, -4809))
+                task.wait(0.4)
+                unlockAllSecrets()
+                setCharGraveDigger()
+                local model = findBossModel("halloween_darkness")
+                if model then
+                    local ok, piv = pcall(function() return model:GetPivot().Position end)
+                    if ok then tpToPos(piv + Vector3.new(0, 2, 4)) end
+                end
+                Rayfield:Notify({ Title = "Secret Rooms", Content = "Teleported underground to Primordial Dread!", Duration = 3 })
+            end)
         end,
     })
 end
