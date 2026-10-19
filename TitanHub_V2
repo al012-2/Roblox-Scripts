@@ -138,13 +138,7 @@ function TabClass:CreateDropdown(cfg)
     end
 
     if multi then setValue(init) end
-    return {
-        Set = function(_, list) setValue(list or {}) end,
-        Refresh = function()
-            local d = LOptions[idx]
-            if d and d.SetValues then pcall(function() d:SetValues() end) end
-        end,
-    }
+    return { Set = function(_, list) setValue(list or {}) end }
 end
 
 function Rayfield:CreateWindow(cfg)
@@ -622,7 +616,6 @@ local function pressTeleportMenuButton(keyword, tabName)
 end
 
 local lastRaidNotify = 0
-local onWorld6Refreshed
 
 local function refreshWorld6Data()
     if scanWorld6() then
@@ -632,7 +625,6 @@ local function refreshWorld6Data()
                 table.insert(AllBossList, b)
             end
         end
-        if onWorld6Refreshed then onWorld6Refreshed() end
     end
 end
 
@@ -1431,8 +1423,7 @@ do
         "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
         "SmartFarm5", "SmartFarm6", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
         "AutoClaimQuests", "AutoClaimIndex", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
-        "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions",
-        "HalloweenAutoBoss", "AutoHalloweenQuests", "AutoHalloweenUpgrades", "UnlockSecretRooms", "AutoEndless", "AutoPrestigeTower",
+        "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions", "HalloweenAutoBoss", "HalloweenAutoPrayer", "HalloweenAutoDoors", "AutoEndless", "AutoPrestigeTower",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -1815,7 +1806,7 @@ local function runKaijuRaidFarm()
                 for _, boss in ipairs(BossHierarchy["raid"]) do
                     if not alive() then break end
                     if SelectedRaidBosses[boss] then
-                        if attemptBoss(boss, diff, alive, "raid", FarmWalk) then
+                        if attemptBoss(boss, diff, alive, "raid", true) then
                             didAny = true
                         end
                     end
@@ -2119,40 +2110,13 @@ for _, diff in ipairs(DiffList) do
     })
 end
 
-onWorld6Refreshed = function()
-    local added = false
-    for _, boss in ipairs(BossHierarchy["6"]) do
-        local label = WorldShort["6"] .. " - " .. (BossDisplayName[boss] or titleCase(boss))
-        if not LabelToBoss[label] then
-            table.insert(BossLabels, label)
-            LabelToBoss[label] = boss
-            added = true
-        end
-    end
-    if added then
-        for _, diff in ipairs(DiffList) do
-            local dd = DiffDropdowns[diff]
-            if dd and dd.Refresh then dd:Refresh() end
-        end
-    end
-end
-
 -- ==================== Roll & Tower tab ====================
 local RollTab = Window:CreateTab("Roll & Tower", 4483362458)
 RollTab:CreateSection("Roll & Tower")
 RollTab:CreateButton({ Name = "Toggle Auto Roll", Callback = function() if autoRollRemote then autoRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Toggle Quick Roll", Callback = function() if quickRollRemote then quickRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Equip Best Cards", Callback = function() if equipBestRemote then equipBestRemote:FireServer() end end })
-RollTab:CreateButton({
-    Name = "Claim Daily Reward + Group Chest",
-    Callback = function()
-        if not claimDailyRemote then return end
-        pcall(function() claimDailyRemote:FireServer("login") end)
-        task.wait(0.25)
-        pcall(function() claimDailyRemote:FireServer("gift", true) end)
-        Rayfield:Notify({ Title = "Daily Reward", Content = "Sent daily login + group gift claim", Duration = 3 })
-    end,
-})
+RollTab:CreateButton({ Name = "Claim Daily Reward", Callback = function() if claimDailyRemote then claimDailyRemote:FireServer() end end })
 
 -- ==================== NPCs tab ====================
 local NpcTab = Window:CreateTab("NPCs", 4483362458)
@@ -2358,219 +2322,6 @@ do
         Callback = function(list)
             SecretDiffs = {}
             for _, d in ipairs(list) do SecretDiffs[d] = true end
-        end,
-    })
-
-    -- ===== Secret Rooms & Hidden Bosses (left box below Fine tune) =====
-    local unlockTok = 0
-    table.insert(activeConnections, { Disconnect = function() unlockTok += 1 end })
-
-    local function unlockAllSecrets()
-        -- 1) World 6 (Hueco Mundo): unlock AizenSecretRoom door & remove seal
-        pcall(function() player:SetAttribute("BeatMirrorTraitor", true) end)
-        local hm = workspace:FindFirstChild("HuecoMundo")
-        local aizenRoom = hm and hm:FindFirstChild("AizenSecretRoom")
-        local door = aizenRoom and aizenRoom:FindFirstChild("Door")
-        if door then
-            for _, leafName in ipairs({ "LeftLeaf", "RightLeaf" }) do
-                local leaf = door:FindFirstChild(leafName)
-                if leaf then
-                    for _, d in ipairs(leaf:GetDescendants()) do
-                        if d:IsA("BasePart") then d.CanCollide = false end
-                    end
-                end
-            end
-            local seal = door:FindFirstChild("Seal")
-            if seal then
-                for _, d in ipairs(seal:GetDescendants()) do
-                    if d:IsA("BasePart") then
-                        d.Transparency = 1
-                        d.CanCollide = false
-                    elseif d:IsA("PointLight") or d:IsA("ParticleEmitter") then
-                        d.Enabled = false
-                    end
-                end
-            end
-        end
-
-        -- 2) Halloween Event: unhide Faceless Prophet (halloween_friend) & open Strange Stone / SecretStoneRoom / SecretGrave
-        pcall(function() player:SetAttribute("HalloweenSecretReady", true) end)
-        pcall(function()
-            local cs = game:GetService("CollectionService")
-            for _, stone in ipairs(cs:GetTagged("hwSecretStone")) do
-                pcall(function() stone:SetAttribute("Idle", true) end)
-                for _, d in ipairs(stone:GetDescendants()) do
-                    if d:IsA("BasePart") then
-                        d.CanCollide = false
-                        d.Transparency = 0.5
-                    elseif d:IsA("ProximityPrompt") then
-                        d.Enabled = true
-                    end
-                end
-                if stone:IsA("BasePart") then
-                    stone.CanCollide = false
-                    stone.Transparency = 0.5
-                end
-            end
-        end)
-        local hw = workspace:FindFirstChild("HalloweenEvent")
-        if hw then
-            local secAreas = hw:FindFirstChild("07_Secret_Areas")
-            if secAreas then
-                local stoneRoom = secAreas:FindFirstChild("SecretStoneRoom")
-                local holeZone = stoneRoom and stoneRoom:FindFirstChild("HoleZone")
-                if holeZone then
-                    pcall(function() holeZone:SetAttribute("Open", true) end)
-                    if holeZone:IsA("BasePart") then holeZone.CanCollide = false end
-                end
-            end
-            local evNpcs = hw:FindFirstChild("EventNPCs")
-            local bosses = evNpcs and evNpcs:FindFirstChild("Bosses")
-            if bosses then
-                for _, m in ipairs(bosses:GetChildren()) do
-                    if m:IsA("Model") and (m:GetAttribute("bossId") == "halloween_friend" or m.Name == "Faceless Prophet") then
-                        for _, d in ipairs(m:GetDescendants()) do
-                            if d:IsA("BasePart") then
-                                d.LocalTransparencyModifier = 0
-                            elseif d:IsA("ProximityPrompt") then
-                                d.Enabled = true
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    local function setCharGraveDigger()
-        local char = player.Character
-        if not char then return end
-        for _, d in ipairs(char:GetDescendants()) do
-            if d:IsA("BasePart") then
-                pcall(function() d.CollisionGroup = "GraveDigger" end)
-            end
-        end
-    end
-
-    local function tpToTargetPart(part)
-        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-        if not (root and part) then return false end
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.CFrame = part.CFrame + Vector3.new(0, 3.5, 0)
-        return true
-    end
-
-    local function tpToPos(pos)
-        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-        if not root then return false end
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.CFrame = CFrame.new(pos)
-        return true
-    end
-
-    BossTab:CreateSection("Secret Rooms & Hidden Bosses")
-
-    BossTab:CreateButton({
-        Name = "Unlock Secret Rooms & Hidden Bosses Now",
-        Callback = function()
-            unlockAllSecrets()
-            setCharGraveDigger()
-            Rayfield:Notify({
-                Title = "Secret Rooms",
-                Content = "Unlocked Aizen Secret Room + Strange Stone hole & Faceless Prophet!",
-                Duration = 4,
-            })
-        end,
-    })
-
-    BossTab:CreateToggle({
-        Name = "Auto Keep Secret Rooms Unlocked",
-        CurrentValue = false,
-        Flag = "UnlockSecretRooms",
-        Callback = function(Value)
-            unlockTok += 1
-            local my = unlockTok
-            if not Value then return end
-            task.spawn(function()
-                while unlockTok == my do
-                    unlockAllSecrets()
-                    task.wait(3)
-                end
-            end)
-        end,
-    })
-
-    BossTab:CreateButton({
-        Name = "Teleport: Aizen Secret Room (World 6)",
-        Callback = function()
-            task.spawn(function()
-                if not nearWorldBosses("6") then
-                    forceTeleportToWorld("6")
-                    task.wait(1)
-                end
-                unlockAllSecrets()
-                local hm = workspace:FindFirstChild("HuecoMundo")
-                local room = hm and hm:FindFirstChild("AizenSecretRoom")
-                local interior = room and room:FindFirstChild("Interior")
-                local shrine = interior and interior:FindFirstChild("OrbShrine")
-                local orb = (shrine and shrine:FindFirstChild("FloatingOrb"))
-                    or (room and room:FindFirstChildWhichIsA("BasePart", true))
-                if orb and tpToTargetPart(orb) then
-                    Rayfield:Notify({ Title = "Secret Rooms", Content = "Teleported to Aizen Secret Room", Duration = 3 })
-                else
-                    Rayfield:Notify({ Title = "Secret Rooms", Content = "AizenSecretRoom not loaded yet (enter World 6 first)", Duration = 4 })
-                end
-            end)
-        end,
-    })
-
-    BossTab:CreateButton({
-        Name = "Teleport: Faceless Prophet Room (Halloween)",
-        Callback = function()
-            task.spawn(function()
-                if not nearWorldBosses("halloween") then
-                    forceTeleportToWorld("halloween")
-                    task.wait(1)
-                end
-                unlockAllSecrets()
-                setCharGraveDigger()
-                -- Teleport directly inside the underground room in front of Faceless Prophet (pos=4787, 178.5, -4815)
-                tpToPos(Vector3.new(4787, 179.5, -4811))
-                task.wait(0.4)
-                unlockAllSecrets()
-                setCharGraveDigger()
-                local model = findBossModel("halloween_friend")
-                if model then
-                    local ok, piv = pcall(function() return model:GetPivot().Position end)
-                    if ok then tpToPos(piv + Vector3.new(0, 2, 4)) end
-                end
-                Rayfield:Notify({ Title = "Secret Rooms", Content = "Teleported underground to Faceless Prophet!", Duration = 3 })
-            end)
-        end,
-    })
-
-    BossTab:CreateButton({
-        Name = "Teleport: Primordial Dread Crypt (Halloween)",
-        Callback = function()
-            task.spawn(function()
-                if not nearWorldBosses("halloween") then
-                    forceTeleportToWorld("halloween")
-                    task.wait(1)
-                end
-                unlockAllSecrets()
-                setCharGraveDigger()
-                -- Teleport directly inside the underground crypt in front of Primordial Dread (pos=4760.7, 149.8, -4814)
-                tpToPos(Vector3.new(4760.7, 151, -4809))
-                task.wait(0.4)
-                unlockAllSecrets()
-                setCharGraveDigger()
-                local model = findBossModel("halloween_darkness")
-                if model then
-                    local ok, piv = pcall(function() return model:GetPivot().Position end)
-                    if ok then tpToPos(piv + Vector3.new(0, 2, 4)) end
-                end
-                Rayfield:Notify({ Title = "Secret Rooms", Content = "Teleported underground to Primordial Dread!", Duration = 3 })
-            end)
         end,
     })
 end
@@ -2791,143 +2542,185 @@ do
         end,
     })
 
-    -- ===== Halloween Quests & Candy Upgrades (halloweenRequest / halloweenUpgrade) =====
-    local hwQuestTok, hwUpgTok = 0, 0
-    table.insert(activeConnections, { Disconnect = function() hwQuestTok += 1; hwUpgTok += 1 end })
+    -- ===== Reaper Statue prayer: walk to each statue and press its own ProximityPrompt =====
+    -- No remotes are guessed: the game's own prompt handler sends the real request, and we stay in range.
+    local PrayerTypes = { ReaperStatue = true }
 
-    local UpgradeDefs = {
-        { label = "Battle Speed", id = "speed", base = 1000, growth = 1.4, max = 20 },
-        { label = "Luck",         id = "luck",  base = 2000, growth = 1.4, max = 20 },
-        { label = "Candy Gain",   id = "candy", base = 3000, growth = 1.4, max = 20 },
-    }
-    local UpgradeLabels = { "Battle Speed", "Luck", "Candy Gain" }
-    local SelectedUpgrades = { ["Battle Speed"] = true, ["Luck"] = true, ["Candy Gain"] = true }
-
-    local hwInfoMod
-    pcall(function()
-        local m = Rep:FindFirstChild("Modules") and Rep.Modules:FindFirstChild("halloweenInfo")
-        if m then hwInfoMod = require(m) end
-    end)
-
-    local function upgradeCost(def, lvl)
-        if hwInfoMod and type(hwInfoMod.upgradePrice) == "function" and hwInfoMod.upgradeById then
-            local ok, p = pcall(hwInfoMod.upgradePrice, hwInfoMod.upgradeById[def.id] or def, lvl)
-            if ok and type(p) == "number" then return p end
+    -- movement follows Auto Farm > Movement (Teleport / Walk / Walk > Teleport)
+    local function reachTarget(pos, model, alive)
+        if FarmWalk == false then
+            return teleportNear(pos, 1, model)
         end
-        return math.floor(def.base * (def.growth ^ lvl) + 0.5)
+        local reached = walkNearBoss(pos, 1, model, alive, FarmWalk == "hybrid" and WalkTimeout or nil)
+        if not reached and FarmWalk == "hybrid" and alive() and isCharAlive() then
+            reached = teleportNear(pos, 1, model)
+        end
+        return reached
     end
 
-    local function claimHalloweenQuests(notifyEmpty)
-        local r = Rep:FindFirstChild("halloweenRequest")
-        if not r then
-            if notifyEmpty then Rayfield:Notify({ Title = "Halloween Quests", Content = "halloweenRequest remote not found", Duration = 3 }) end
-            return 0
-        end
-        local ok, data = pcall(function() return r:InvokeServer("quests") end)
-        if not (ok and type(data) == "table" and type(data.quests) == "table") then return 0 end
-        local claimed = 0
-        for _, q in ipairs(data.quests) do
-            if type(q) == "table" and not q.claimed and type(q.progress) == "number" and type(q.goal) == "number" and q.progress >= q.goal then
-                local okC, res = pcall(function() return r:InvokeServer("claimQuest", q.id) end)
-                if okC and type(res) == "table" and res.ok then
-                    claimed += 1
+    -- The prompt stays enabled while a statue is resting, so we read the game's own message
+    -- ("The statue is resting... Come back in M:SS") to know how long to leave it alone.
+    local function restingLabels()
+        local set = {}
+        local pgui = player:FindFirstChild("PlayerGui")
+        if not pgui then return set end
+        for _, d in ipairs(pgui:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Visible then
+                local t = d.Text
+                if t:find("resting", 1, true) and t:find("Come back in", 1, true) then
+                    set[d] = t
                 end
-                task.wait(0.3)
             end
         end
-        if claimed > 0 then
-            Rayfield:Notify({ Title = "Halloween Quests", Content = "Claimed " .. claimed .. " Halloween quest(s)!", Duration = 4 })
-        elseif notifyEmpty then
-            Rayfield:Notify({ Title = "Halloween Quests", Content = "No completed Halloween quests ready to claim", Duration = 3 })
-        end
-        return claimed
+        return set
     end
 
-    local function buyHalloweenUpgrades(alive)
-        local r = Rep:FindFirstChild("halloweenUpgrade")
-        if not r then return 0 end
-        local bought = 0
-        for _, def in ipairs(UpgradeDefs) do
+    -- seconds from the newest "resting" message that appeared since `before`, or nil
+    local function newRestingSeconds(before)
+        local best
+        for lbl, text in pairs(restingLabels()) do
+            if before[lbl] == nil or before[lbl] ~= text then
+                local m, sec = text:match("(%d+):(%d+)")
+                if m then
+                    local v = tonumber(m) * 60 + tonumber(sec)
+                    best = best and math.min(best, v) or v
+                end
+            end
+        end
+        return best
+    end
+
+    local function collectStatues()
+        local out = {}
+        local hw = workspace:FindFirstChild("HalloweenEvent")
+        local folder = hw and hw:FindFirstChild("Statues", true) or workspace:FindFirstChild("Statues", true)
+        if not folder then return out end
+        for _, m in ipairs(folder:GetChildren()) do
+            if PrayerTypes[m.Name] then
+                local prompt = m:FindFirstChildWhichIsA("ProximityPrompt", true)
+                if prompt then table.insert(out, { model = m, prompt = prompt }) end
+            end
+        end
+        return out
+    end
+
+    local prayerNext = setmetatable({}, { __mode = "k" })
+    local doorNext = setmetatable({}, { __mode = "k" })
+    local DoPrayer, DoDoors = false, false
+
+    -- one pass over the reaper statues; returns true if something was pressed
+    local function prayerPass(alive)
+        local didAny = false
+        for _, st in ipairs(collectStatues()) do
             if not alive() then break end
-            if SelectedUpgrades[def.label] then
-                while alive() do
-                    local lvl = tonumber(player:GetAttribute("HwUpgrade_" .. def.id)) or 0
-                    local candies = tonumber(player:GetAttribute("Candies")) or 0
-                    if lvl >= def.max or candies < upgradeCost(def, lvl) then break end
-                    local ok, res = pcall(function() return r:InvokeServer("buy", def.id) end)
-                    if not (ok and res) then break end
-                    bought += 1
-                    task.wait(0.35)
+            if st.prompt.Parent and st.prompt.Enabled and os.clock() >= (prayerNext[st.model] or 0) then
+                local ok, pos = pcall(function() return st.model:GetPivot().Position end)
+                if ok and reachTarget(pos, st.model, alive) and alive() then
+                    task.wait(0.3)
+                    if fireproximityprompt then
+                        local before = restingLabels()
+                        pcall(function() fireproximityprompt(st.prompt) end)
+                        didAny = true
+                        task.wait(0.8)
+                        local secs = newRestingSeconds(before)
+                        -- resting message -> wait exactly that long; no message -> prayer accepted, retry in 60s
+                        prayerNext[st.model] = os.clock() + (secs and (secs + 3) or 60)
+                    end
+                    task.wait(0.4)
                 end
             end
         end
-        return bought
+        return didAny
     end
 
-    HwTab:CreateSection("Quests & Upgrades (Candies)")
+    -- ===== Candy Doors (workspace.HalloweenEvent.CandyDoors.Door1..7) =====
+    -- Each door has a PromptPart with a ProximityPrompt and a ~30s cooldown timer.
+    local function collectDoors()
+        local out = {}
+        local hw = workspace:FindFirstChild("HalloweenEvent")
+        local folder = hw and hw:FindFirstChild("CandyDoors")
+        if not folder then return out end
+        for _, door in ipairs(folder:GetChildren()) do
+            local prompt = door:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt then
+                local part = prompt.Parent:IsA("BasePart") and prompt.Parent or door:FindFirstChild("PromptPart")
+                table.insert(out, { model = door, prompt = prompt, part = part })
+            end
+        end
+        return out
+    end
 
-    HwTab:CreateButton({
-        Name = "Claim Halloween Quests Now",
-        Callback = function() task.spawn(claimHalloweenQuests, true) end,
-    })
+    local function doorsPass(alive)
+        local didAny = false
+        for _, d in ipairs(collectDoors()) do
+            if not alive() then break end
+            if d.prompt.Parent and d.prompt.Enabled and os.clock() >= (doorNext[d.model] or 0) then
+                local ok, pos = pcall(function()
+                    return d.part and d.part.Position or d.model:GetPivot().Position
+                end)
+                if ok and reachTarget(pos, d.model, alive) and alive() then
+                    task.wait(0.3)
+                    if fireproximityprompt then
+                        pcall(function() fireproximityprompt(d.prompt) end)
+                        didAny = true
+                        doorNext[d.model] = os.clock() + 32 -- door cooldown is ~30s
+                    end
+                    task.wait(0.8)
+                end
+            end
+        end
+        return didAny
+    end
+
+    -- Prayer and Candy Doors share ONE loop, so both toggles can be on together
+    -- (they use the same character, so they run one after the other).
+    local extrasRunning = false
+    local function updateExtras()
+        if not (DoPrayer or DoDoors) then
+            if extrasRunning then
+                extrasRunning = false
+                stopMode("hwextras")
+            end
+            return
+        end
+        if extrasRunning then return end
+        extrasRunning = true
+        startMode("hwextras", function(alive)
+            while alive() and (DoPrayer or DoDoors) do
+                if not nearWorldBosses("halloween") then
+                    forceTeleportToWorld("halloween")
+                    task.wait(1.0)
+                end
+                local didAny = false
+                if DoPrayer and prayerPass(alive) then didAny = true end
+                if DoDoors and alive() and doorsPass(alive) then didAny = true end
+                task.wait(didAny and 1 or 4)
+            end
+            extrasRunning = false
+        end)
+    end
+
+    HwTab:CreateSection("Reaper Statues")
 
     HwTab:CreateToggle({
-        Name = "Auto Claim Halloween Quests (every 20s)",
+        Name = "Auto Prayer (Reaper Statues)",
         CurrentValue = false,
-        Flag = "AutoHalloweenQuests",
+        Flag = "HalloweenAutoPrayer",
         Callback = function(Value)
-            hwQuestTok += 1
-            local my = hwQuestTok
-            if not Value then return end
-            task.spawn(function()
-                while hwQuestTok == my and Rayfield.Loading do task.wait(0.3) end
-                while hwQuestTok == my do
-                    if player:GetAttribute("InHalloween") == true then
-                        claimHalloweenQuests(false)
-                    end
-                    for _ = 1, 20 do
-                        if hwQuestTok ~= my then return end
-                        task.wait(1)
-                    end
-                end
-            end)
+            DoPrayer = Value
+            updateExtras()
         end,
     })
 
-    HwTab:CreateDropdown({
-        Name = "Upgrades to buy",
-        Options = UpgradeLabels,
-        CurrentOption = UpgradeLabels,
-        MultipleOptions = true,
-        Flag = "HalloweenUpgradesPick",
-        Callback = function(list)
-            SelectedUpgrades = {}
-            for _, n in ipairs(list) do SelectedUpgrades[n] = true end
-        end,
-    })
+    HwTab:CreateSection("Candy Doors")
 
     HwTab:CreateToggle({
-        Name = "Auto Upgrade with Candies",
+        Name = "Auto Candy Doors",
         CurrentValue = false,
-        Flag = "AutoHalloweenUpgrades",
+        Flag = "HalloweenAutoDoors",
         Callback = function(Value)
-            hwUpgTok += 1
-            local my = hwUpgTok
-            if not Value then return end
-            local function alive() return hwUpgTok == my end
-            task.spawn(function()
-                while alive() and Rayfield.Loading do task.wait(0.3) end
-                while alive() do
-                    local n = buyHalloweenUpgrades(alive)
-                    if n > 0 then
-                        Rayfield:Notify({ Title = "Halloween Upgrades", Content = "Bought " .. n .. " upgrade level(s)!", Duration = 3 })
-                    end
-                    for _ = 1, 10 do
-                        if not alive() then return end
-                        task.wait(1)
-                    end
-                end
-            end)
+            DoDoors = Value
+            updateExtras()
         end,
     })
 end
@@ -5240,14 +5033,10 @@ do (function()
                 if left > 0 then luckText = luckInfo.mult .. "x (" .. fmtTime(math.floor(left)) .. ")" end
             end
 
-            local candies = LP and LP:GetAttribute("Candies")
-            local candyText = type(candies) == "number" and commas(candies) or "-"
-
             txt = table.concat({
                 TITLE,
                 "Time: " .. fmtTime(os.time() - S.start),
                 "Bosses beaten: " .. S.bosses,
-                "Candies: " .. candyText,
                 "Tower floor: " .. (f and tostring(f) or "-") .. "  (best " .. S.topFloor .. ")",
                 "Tower cards: " .. (towerCards and commas(towerCards) or "-"),
                 "Potions drunk: " .. drunk .. "  |  active: " .. (pots and tostring(pots) or "-"),
