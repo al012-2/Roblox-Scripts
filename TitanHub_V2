@@ -1431,7 +1431,8 @@ do
         "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
         "SmartFarm5", "SmartFarm6", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
         "AutoClaimQuests", "AutoClaimIndex", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
-        "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions", "HalloweenAutoBoss", "AutoEndless", "AutoPrestigeTower",
+        "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions",
+        "HalloweenAutoBoss", "AutoHalloweenQuests", "AutoHalloweenUpgrades", "AutoEndless", "AutoPrestigeTower",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -2142,7 +2143,16 @@ RollTab:CreateSection("Roll & Tower")
 RollTab:CreateButton({ Name = "Toggle Auto Roll", Callback = function() if autoRollRemote then autoRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Toggle Quick Roll", Callback = function() if quickRollRemote then quickRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Equip Best Cards", Callback = function() if equipBestRemote then equipBestRemote:FireServer() end end })
-RollTab:CreateButton({ Name = "Claim Daily Reward", Callback = function() if claimDailyRemote then claimDailyRemote:FireServer() end end })
+RollTab:CreateButton({
+    Name = "Claim Daily Reward + Group Chest",
+    Callback = function()
+        if not claimDailyRemote then return end
+        pcall(function() claimDailyRemote:FireServer("login") end)
+        task.wait(0.25)
+        pcall(function() claimDailyRemote:FireServer("gift", true) end)
+        Rayfield:Notify({ Title = "Daily Reward", Content = "Sent daily login + group gift claim", Duration = 3 })
+    end,
+})
 
 -- ==================== NPCs tab ====================
 local NpcTab = Window:CreateTab("NPCs", 4483362458)
@@ -2565,6 +2575,146 @@ do
         Callback = function(list)
             HwDiffs = {}
             for _, d in ipairs(list) do HwDiffs[d] = true end
+        end,
+    })
+
+    -- ===== Halloween Quests & Candy Upgrades (halloweenRequest / halloweenUpgrade) =====
+    local hwQuestTok, hwUpgTok = 0, 0
+    table.insert(activeConnections, { Disconnect = function() hwQuestTok += 1; hwUpgTok += 1 end })
+
+    local UpgradeDefs = {
+        { label = "Battle Speed", id = "speed", base = 1000, growth = 1.4, max = 20 },
+        { label = "Luck",         id = "luck",  base = 2000, growth = 1.4, max = 20 },
+        { label = "Candy Gain",   id = "candy", base = 3000, growth = 1.4, max = 20 },
+    }
+    local UpgradeLabels = { "Battle Speed", "Luck", "Candy Gain" }
+    local SelectedUpgrades = { ["Battle Speed"] = true, ["Luck"] = true, ["Candy Gain"] = true }
+
+    local hwInfoMod
+    pcall(function()
+        local m = Rep:FindFirstChild("Modules") and Rep.Modules:FindFirstChild("halloweenInfo")
+        if m then hwInfoMod = require(m) end
+    end)
+
+    local function upgradeCost(def, lvl)
+        if hwInfoMod and type(hwInfoMod.upgradePrice) == "function" and hwInfoMod.upgradeById then
+            local ok, p = pcall(hwInfoMod.upgradePrice, hwInfoMod.upgradeById[def.id] or def, lvl)
+            if ok and type(p) == "number" then return p end
+        end
+        return math.floor(def.base * (def.growth ^ lvl) + 0.5)
+    end
+
+    local function claimHalloweenQuests(notifyEmpty)
+        local r = Rep:FindFirstChild("halloweenRequest")
+        if not r then
+            if notifyEmpty then Rayfield:Notify({ Title = "Halloween Quests", Content = "halloweenRequest remote not found", Duration = 3 }) end
+            return 0
+        end
+        local ok, data = pcall(function() return r:InvokeServer("quests") end)
+        if not (ok and type(data) == "table" and type(data.quests) == "table") then return 0 end
+        local claimed = 0
+        for _, q in ipairs(data.quests) do
+            if type(q) == "table" and not q.claimed and type(q.progress) == "number" and type(q.goal) == "number" and q.progress >= q.goal then
+                local okC, res = pcall(function() return r:InvokeServer("claimQuest", q.id) end)
+                if okC and type(res) == "table" and res.ok then
+                    claimed += 1
+                end
+                task.wait(0.3)
+            end
+        end
+        if claimed > 0 then
+            Rayfield:Notify({ Title = "Halloween Quests", Content = "Claimed " .. claimed .. " Halloween quest(s)!", Duration = 4 })
+        elseif notifyEmpty then
+            Rayfield:Notify({ Title = "Halloween Quests", Content = "No completed Halloween quests ready to claim", Duration = 3 })
+        end
+        return claimed
+    end
+
+    local function buyHalloweenUpgrades(alive)
+        local r = Rep:FindFirstChild("halloweenUpgrade")
+        if not r then return 0 end
+        local bought = 0
+        for _, def in ipairs(UpgradeDefs) do
+            if not alive() then break end
+            if SelectedUpgrades[def.label] then
+                while alive() do
+                    local lvl = tonumber(player:GetAttribute("HwUpgrade_" .. def.id)) or 0
+                    local candies = tonumber(player:GetAttribute("Candies")) or 0
+                    if lvl >= def.max or candies < upgradeCost(def, lvl) then break end
+                    local ok, res = pcall(function() return r:InvokeServer("buy", def.id) end)
+                    if not (ok and res) then break end
+                    bought += 1
+                    task.wait(0.35)
+                end
+            end
+        end
+        return bought
+    end
+
+    HwTab:CreateSection("Quests & Upgrades (Candies)")
+
+    HwTab:CreateButton({
+        Name = "Claim Halloween Quests Now",
+        Callback = function() task.spawn(claimHalloweenQuests, true) end,
+    })
+
+    HwTab:CreateToggle({
+        Name = "Auto Claim Halloween Quests (every 20s)",
+        CurrentValue = false,
+        Flag = "AutoHalloweenQuests",
+        Callback = function(Value)
+            hwQuestTok += 1
+            local my = hwQuestTok
+            if not Value then return end
+            task.spawn(function()
+                while hwQuestTok == my and Rayfield.Loading do task.wait(0.3) end
+                while hwQuestTok == my do
+                    if player:GetAttribute("InHalloween") == true then
+                        claimHalloweenQuests(false)
+                    end
+                    for _ = 1, 20 do
+                        if hwQuestTok ~= my then return end
+                        task.wait(1)
+                    end
+                end
+            end)
+        end,
+    })
+
+    HwTab:CreateDropdown({
+        Name = "Upgrades to buy",
+        Options = UpgradeLabels,
+        CurrentOption = UpgradeLabels,
+        MultipleOptions = true,
+        Flag = "HalloweenUpgradesPick",
+        Callback = function(list)
+            SelectedUpgrades = {}
+            for _, n in ipairs(list) do SelectedUpgrades[n] = true end
+        end,
+    })
+
+    HwTab:CreateToggle({
+        Name = "Auto Upgrade with Candies",
+        CurrentValue = false,
+        Flag = "AutoHalloweenUpgrades",
+        Callback = function(Value)
+            hwUpgTok += 1
+            local my = hwUpgTok
+            if not Value then return end
+            local function alive() return hwUpgTok == my end
+            task.spawn(function()
+                while alive() and Rayfield.Loading do task.wait(0.3) end
+                while alive() do
+                    local n = buyHalloweenUpgrades(alive)
+                    if n > 0 then
+                        Rayfield:Notify({ Title = "Halloween Upgrades", Content = "Bought " .. n .. " upgrade level(s)!", Duration = 3 })
+                    end
+                    for _ = 1, 10 do
+                        if not alive() then return end
+                        task.wait(1)
+                    end
+                end
+            end)
         end,
     })
 end
@@ -4877,10 +5027,14 @@ do (function()
                 if left > 0 then luckText = luckInfo.mult .. "x (" .. fmtTime(math.floor(left)) .. ")" end
             end
 
+            local candies = LP and LP:GetAttribute("Candies")
+            local candyText = type(candies) == "number" and commas(candies) or "-"
+
             txt = table.concat({
                 TITLE,
                 "Time: " .. fmtTime(os.time() - S.start),
                 "Bosses beaten: " .. S.bosses,
+                "Candies: " .. candyText,
                 "Tower floor: " .. (f and tostring(f) or "-") .. "  (best " .. S.topFloor .. ")",
                 "Tower cards: " .. (towerCards and commas(towerCards) or "-"),
                 "Potions drunk: " .. drunk .. "  |  active: " .. (pots and tostring(pots) or "-"),
