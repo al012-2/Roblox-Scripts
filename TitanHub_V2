@@ -138,7 +138,13 @@ function TabClass:CreateDropdown(cfg)
     end
 
     if multi then setValue(init) end
-    return { Set = function(_, list) setValue(list or {}) end }
+    return {
+        Set = function(_, list) setValue(list or {}) end,
+        Refresh = function()
+            local d = LOptions[idx]
+            if d and d.SetValues then pcall(function() d:SetValues() end) end
+        end,
+    }
 end
 
 function Rayfield:CreateWindow(cfg)
@@ -616,6 +622,7 @@ local function pressTeleportMenuButton(keyword, tabName)
 end
 
 local lastRaidNotify = 0
+local onWorld6Refreshed
 
 local function refreshWorld6Data()
     if scanWorld6() then
@@ -625,6 +632,7 @@ local function refreshWorld6Data()
                 table.insert(AllBossList, b)
             end
         end
+        if onWorld6Refreshed then onWorld6Refreshed() end
     end
 end
 
@@ -1806,7 +1814,7 @@ local function runKaijuRaidFarm()
                 for _, boss in ipairs(BossHierarchy["raid"]) do
                     if not alive() then break end
                     if SelectedRaidBosses[boss] then
-                        if attemptBoss(boss, diff, alive, "raid", true) then
+                        if attemptBoss(boss, diff, alive, "raid", FarmWalk) then
                             didAny = true
                         end
                     end
@@ -2108,6 +2116,24 @@ for _, diff in ipairs(DiffList) do
           end
        end,
     })
+end
+
+onWorld6Refreshed = function()
+    local added = false
+    for _, boss in ipairs(BossHierarchy["6"]) do
+        local label = WorldShort["6"] .. " - " .. (BossDisplayName[boss] or titleCase(boss))
+        if not LabelToBoss[label] then
+            table.insert(BossLabels, label)
+            LabelToBoss[label] = boss
+            added = true
+        end
+    end
+    if added then
+        for _, diff in ipairs(DiffList) do
+            local dd = DiffDropdowns[diff]
+            if dd and dd.Refresh then dd:Refresh() end
+        end
+    end
 end
 
 -- ==================== Roll & Tower tab ====================
