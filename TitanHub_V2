@@ -284,7 +284,8 @@ local AllWorldsAndRaid = {"1", "2", "3", "4", "5", "6", "raid", "halloween"}
 
 -- Raid-specific settings
 local RaidWalkMode = true
-local FarmWalk = false        -- global movement style: false = teleport to boss, true = walk
+local FarmWalk = false        -- movement style: false = teleport, true = walk, "hybrid" = walk then teleport
+local WalkTimeout = 7         -- seconds of walking before the hybrid mode teleports
 local TravelViaMenu = true     -- world travel through the Teleport menu remote (no portals)
 local RaidDifficultyLadder = true
 local RaidSingleDiff = "Normal"
@@ -957,12 +958,13 @@ local function teleportNear(targetPosition, attempt, bossModel)
 end
 
 -- Walk to the boss naturally (no instant teleport)
-local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
+local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue, timeout)
     local char = player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not (hum and root) then return false end
 
+    local deadline = timeout and (os.clock() + timeout) or math.huge
     local destination = getSafeSpotNearBoss(targetPosition, attempt, bossModel)
     local distToTarget = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(destination.X, 0, destination.Z)).Magnitude
 
@@ -985,6 +987,7 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
         local waypoints = path:GetWaypoints()
         for i = 2, #waypoints do
             if not shouldContinue() or not isCharAlive() then return false end
+            if os.clock() > deadline then break end
             local wp = waypoints[i]
             if wp.Action == Enum.PathWaypointAction.Jump then
                 hum.Jump = true
@@ -993,6 +996,7 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
             local stepStart = os.clock()
             while os.clock() - stepStart < 2.2 do
                 if not shouldContinue() or not isCharAlive() then return false end
+                if os.clock() > deadline then break end
                 local d = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(wp.Position.X, 0, wp.Position.Z)).Magnitude
                 if d <= 4.5 then break end
                 task.wait(0.08)
@@ -1004,6 +1008,7 @@ local function walkNearBoss(targetPosition, attempt, bossModel, shouldContinue)
         local lastCheck = os.clock()
         while os.clock() - walkStart < 20 do
             if not shouldContinue() or not isCharAlive() then return false end
+            if os.clock() > deadline then break end
             hum:MoveTo(destination)
             local horizDist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(destination.X, 0, destination.Z)).Magnitude
             if horizDist <= 6.5 then
@@ -1063,7 +1068,12 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
         local pos = targetPart.Parent and targetPart.Position or targetModel:GetPivot().Position
         local reached = false
         if useWalk then
-            reached = walkNearBoss(pos, attempt, targetModel, shouldContinue)
+            reached = walkNearBoss(pos, attempt, targetModel, shouldContinue,
+                useWalk == "hybrid" and WalkTimeout or nil)
+            -- walking failed / timed out (building, wall, stuck): teleport next to the boss instead
+            if not reached and useWalk == "hybrid" and shouldContinue() and isCharAlive() then
+                reached = teleportNear(pos, attempt, targetModel)
+            end
         else
             reached = teleportNear(pos, attempt, targetModel)
         end
@@ -1611,12 +1621,25 @@ FarmTab:CreateSection("Movement")
 
 FarmTab:CreateDropdown({
     Name = "Farm style (how to reach bosses)",
-    Options = { "Teleport", "Walk" },
+    Options = { "Teleport", "Walk", "Walk > Teleport" },
     CurrentOption = { "Teleport" },
     Flag = "FarmMoveMode",
     Callback = function(Option)
         local v = type(Option) == "table" and Option[1] or Option
-        FarmWalk = (v == "Walk")
+        if v == "Walk" then FarmWalk = true
+        elseif v == "Walk > Teleport" then FarmWalk = "hybrid"
+        else FarmWalk = false end
+    end,
+})
+
+FarmTab:CreateDropdown({
+    Name = "Walk time before teleport (sec)",
+    Options = { "4", "6", "7", "10", "15" },
+    CurrentOption = { "7" },
+    Flag = "WalkTimeoutSec",
+    Callback = function(Option)
+        local v = type(Option) == "table" and Option[1] or Option
+        WalkTimeout = tonumber(v) or 7
     end,
 })
 
@@ -1783,7 +1806,7 @@ local function runKaijuRaidFarm()
                 for _, boss in ipairs(BossHierarchy["raid"]) do
                     if not alive() then break end
                     if SelectedRaidBosses[boss] then
-                        if attemptBoss(boss, diff, alive, "raid", FarmWalk) then
+                        if attemptBoss(boss, diff, alive, "raid", true) then
                             didAny = true
                         end
                     end
