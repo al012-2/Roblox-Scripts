@@ -951,6 +951,44 @@ local function teleportNear(targetPosition, attempt, bossModel)
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return false end
+    -- Underground bosses (secretBosses, Halloween hidden bosses like Primordial Dread / Faceless Prophet):
+    -- the ground raycast finds no proper floor and the character falls, then the game sends us back.
+    -- So we land at the boss's own height and hold still briefly.
+    local function isUndergroundBoss()
+        if not bossModel then return false end
+        local bn = workspace:FindFirstChild("bossNpcs")
+        local sf = bn and bn:FindFirstChild("secretBosses")
+        if sf and bossModel:IsDescendantOf(sf) then return true end
+        local id = bossModel:GetAttribute("bossId")
+        if id == "halloween_friend" or id == "halloween_darkness" then return true end
+        local n = bossModel.Name
+        if n == "Primordial Dread" or n == "Faceless Prophet" then return true end
+        -- generic check: is there solid ground clearly ABOVE the boss?
+        local ignoreList = { char }
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl.Character then table.insert(ignoreList, pl.Character) end
+        end
+        table.insert(ignoreList, bossModel)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = ignoreList
+        params.RespectCanCollide = true
+        local hit = workspace:Raycast(Vector3.new(targetPosition.X, targetPosition.Y + 150, targetPosition.Z), Vector3.new(0, -150, 0), params)
+        return hit ~= nil and hit.Position.Y > targetPosition.Y + 12
+    end
+
+    if isUndergroundBoss() then
+        local ang = math.random() * math.pi * 2
+        local spot = Vector3.new(targetPosition.X + math.cos(ang) * 5, targetPosition.Y, targetPosition.Z + math.sin(ang) * 5)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = CFrame.new(spot)
+        root.Anchored = true
+        task.delay(1.5, function()
+            if root.Parent then root.Anchored = false end
+        end)
+        return true
+    end
+
     local spot = getSafeSpotNearBoss(targetPosition, attempt, bossModel)
     root.AssemblyLinearVelocity = Vector3.zero
     root.CFrame = CFrame.new(spot)
@@ -1665,7 +1703,8 @@ FarmTab:CreateToggle({
 local SkipUntil = {}
 
 local function attemptBoss(boss, diff, alive, worldKey, useWalk)
-    useWalk = useWalk or FarmWalk
+    if useWalk == "teleport" then useWalk = false   -- explicit teleport (ignore the global Farm style)
+    elseif not useWalk then useWalk = FarmWalk end
     local k = boss .. "|" .. diff
     if SkipUntil[k] and os.clock() < SkipUntil[k] then return false end
     if not recoverIfDead(worldKey, alive) then return false end
@@ -2225,6 +2264,7 @@ QuestTab:CreateToggle({
 -- ==================== Secret Bosses ====================
 do
     local SecretSelected, SecretDiffs = {}, { Normal = true }
+    local SecretMove = "teleport" -- "teleport" = direct, true = walk only, "hybrid" = walk then teleport
     local SecretNames, SecretIdOf = {}, {}
 
     local function addSecret(name, id)
@@ -2276,7 +2316,8 @@ do
                             if SecretDiffs[diff] then
                                 if findBossModel(id) then
                                     warned[name] = nil
-                                    if attemptBoss(id, diff, alive, "secret", false) then didAny = true end
+                                    -- secret bosses: Walk only, or Walk > Teleport (walk first, teleport next to the boss on timeout)
+                                    if attemptBoss(id, diff, alive, "secret", SecretMove) then didAny = true end
                                 elseif not warned[name] then
                                     warned[name] = true
                                     Rayfield:Notify({ Title = "Secret Bosses", Content = name .. " not found in workspace right now (not spawned / not loaded)", Duration = 5 })
@@ -2314,6 +2355,19 @@ do
     })
 
     BossTab:CreateDropdown({
+        Name = "Secret boss movement",
+        Options = { "Teleport", "Walk only", "Walk > Teleport" },
+        CurrentOption = { "Teleport" },
+        Flag = "SecretMoveMode",
+        Callback = function(Option)
+            local v = type(Option) == "table" and Option[1] or Option
+            if v == "Walk only" then SecretMove = true
+            elseif v == "Walk > Teleport" then SecretMove = "hybrid"
+            else SecretMove = "teleport" end
+        end,
+    })
+
+    BossTab:CreateDropdown({
         Name = "Secret boss difficulties",
         Options = DiffList,
         CurrentOption = { "Normal" },
@@ -2326,7 +2380,7 @@ do
     })
 end
 
--- ==================== Halloween Event (Custom Boss tab) ====================
+-- ==================== Halloween Event (own tab) ====================
 do
     local ALL_MAIN = "All Main Bosses (1-5)"
     local ALL_GHOSTS = "All Ghosts (1-5)"
@@ -2558,39 +2612,39 @@ do
         return reached
     end
 
-    -- The prompt stays enabled while a statue is resting, so we read the game's own message
-    -- ("The statue is resting... Come back in M:SS") to know how long to leave it alone.
-    local function restingLabels()
-        local set = {}
-        local pgui = player:FindFirstChild("PlayerGui")
-        if not pgui then return set end
-        for _, d in ipairs(pgui:GetDescendants()) do
-            if d:IsA("TextLabel") and d.Visible then
-                local t = d.Text
-                if t:find("resting", 1, true) and t:find("Come back in", 1, true) then
-                    set[d] = t
-                end
+    -- The prompt stays enabled while a statue is resting, but the server tells us how long:
+    -- sendUI("message", "The statue is resting... Come back in M:SS")  (seen in the console log).
+    -- We listen to that event instead of scanning the GUI (cheaper, no lag).
+    local restingMsg = { t = -1, secs = nil }
+    onRemoteEvent("sendUI", function(kind, text)
+        if kind == "message" and type(text) == "string" and text:find("Come back in", 1, true) then
+            local m, sec = text:match("(%d+):(%d+)")
+            if m then
+                restingMsg.t = os.clock()
+                restingMsg.secs = tonumber(m) * 60 + tonumber(sec)
             end
         end
-        return set
-    end
+    end)
 
-    -- seconds from the newest "resting" message that appeared since `before`, or nil
+    local function restingLabels() return os.clock() end -- marker taken just before pressing the prompt
+
+    -- seconds from a "resting" message that arrived after `before`, or nil
     local function newRestingSeconds(before)
-        local best
-        for lbl, text in pairs(restingLabels()) do
-            if before[lbl] == nil or before[lbl] ~= text then
-                local m, sec = text:match("(%d+):(%d+)")
-                if m then
-                    local v = tonumber(m) * 60 + tonumber(sec)
-                    best = best and math.min(best, v) or v
-                end
-            end
-        end
-        return best
+        if restingMsg.t >= before then return restingMsg.secs end
+        return nil
     end
 
+    local statueCache, statueCacheAt = {}, -100
     local function collectStatues()
+        -- the map scan is recursive, so only redo it every 20s (or when a cached statue disappeared)
+        if os.clock() - statueCacheAt < 20 then
+            local valid = true
+            for _, st in ipairs(statueCache) do
+                if not st.prompt.Parent then valid = false break end
+            end
+            if valid then return statueCache end
+        end
+        statueCacheAt = os.clock()
         local out = {}
         local hw = workspace:FindFirstChild("HalloweenEvent")
         local folder = hw and hw:FindFirstChild("Statues", true) or workspace:FindFirstChild("Statues", true)
@@ -2601,6 +2655,7 @@ do
                 if prompt then table.insert(out, { model = m, prompt = prompt }) end
             end
         end
+        statueCache = out
         return out
     end
 
@@ -2635,7 +2690,16 @@ do
 
     -- ===== Candy Doors (workspace.HalloweenEvent.CandyDoors.Door1..7) =====
     -- Each door has a PromptPart with a ProximityPrompt and a ~30s cooldown timer.
+    local doorCache, doorCacheAt = {}, -100
     local function collectDoors()
+        if os.clock() - doorCacheAt < 20 then
+            local valid = true
+            for _, d in ipairs(doorCache) do
+                if not d.prompt.Parent then valid = false break end
+            end
+            if valid then return doorCache end
+        end
+        doorCacheAt = os.clock()
         local out = {}
         local hw = workspace:FindFirstChild("HalloweenEvent")
         local folder = hw and hw:FindFirstChild("CandyDoors")
@@ -2647,6 +2711,7 @@ do
                 table.insert(out, { model = door, prompt = prompt, part = part })
             end
         end
+        doorCache = out
         return out
     end
 
