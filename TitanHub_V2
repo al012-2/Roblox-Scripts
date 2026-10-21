@@ -46,7 +46,7 @@ local GroupOf = {
     ["Custom Boss"] = "Bosses", ["Secret Bosses"] = "Bosses", ["Halloween"] = "Bosses",
     ["Roll & Tower"] = "Roll & Tower", ["Infinity Tower"] = "Roll & Tower",
     ["Prestige Tower"] = "Roll & Tower", ["Endless Raid"] = "Roll & Tower",
-    ["Potions"] = "Items", ["Crafting"] = "Items", ["Raid Shop"] = "Items",
+    ["Potions"] = "Items", ["Crafting"] = "Items", ["Raid Shop"] = "Items", ["Candy Shop"] = "Items",
     ["NPCs"] = "Misc", ["Quests"] = "Misc", ["Server & Rejoin"] = "Misc",
 }
 local GroupIcons = {
@@ -3662,13 +3662,21 @@ end)() end
 do (function()
     local PotionsTab = Window:CreateTab("Potions", 4483362458)
 
-    -- names taken from the game's own UI (RaidShopFrame > potions: cells)
-    -- NOT included on purpose: "Skill Tree Reset" (destructive) and "Weather Reroll" (not a buff potion)
+    -- names taken from the game's own UI (RaidShopFrame > potions: cells & Halloween Candy Shop)
+    -- NOT included on purpose: "Skill Tree Reset" (destructive) and "Weather Reroll" / "Blood Moon Reroll" (not a timed buff potion)
     local PotionNames = {
         "Luck Potion I", "Luck Potion II", "Luck Potion III", "Luck Potion IV",
         "Speed Potion I", "Speed Potion II", "Speed Potion III", "Speed Potion IV",
         "Battle Potion I", "Battle Potion II", "Battle Potion III", "Battle Potion IV",
         "Boss Potion", "Raid Potion",
+        "Pumpkin Luck Potion", "Witch's Brew", "Pumpkin Battle Potion",
+    }
+
+    -- Halloween Candy Shop potions last 30 minutes (1800s) each
+    local CustomDuration = {
+        ["Pumpkin Luck Potion"] = 1800,
+        ["Witch's Brew"] = 1800,
+        ["Pumpkin Battle Potion"] = 1800,
     }
 
     local SelectedPotions = {}
@@ -3937,6 +3945,7 @@ do (function()
 
     -- seconds left on a potion
     local function remainingOf(name)
+        local dur = CustomDuration[name] or PotionInterval
         local timers, works = readHud()
         local last = lastDrink[name]
         local since = last and (os.time() - last) or math.huge
@@ -3944,11 +3953,11 @@ do (function()
         if hud then return hud end
         if works and seenInHud[name] then
             -- this potion's timer is normally visible, so "no icon" means it ran out
-            if since < 6 then return PotionInterval end -- just drunk, the HUD can lag a moment
+            if since < 6 then return dur end -- just drunk, the HUD can lag a moment
             return 0
         end
         -- icon never seen / HUD unreadable: fall back to our own drink time
-        if last then return math.max(PotionInterval - since, 0) end
+        if last then return math.max(dur - since, 0) end
         return 0
     end
 
@@ -4448,6 +4457,220 @@ do (function()
     ShopTab:CreateParagraph({
         Title = "Spends currency",
         Content = "Each purchase costs raid-shop currency. Buying stops at the max per restock, and a refused purchase pauses that potion for 15 minutes.",
+    })
+end)() end
+
+-- ==================== Candy Shop (Halloween auto buy boosts) ====================
+-- raidShopRequest captured with Cobalt:
+--   InvokeServer("buy", "halloween", "potions:<Item Name>", nil)
+-- own scope: adds no top-level locals
+do (function()
+    local HttpService = game:GetService("HttpService")
+    local CandyShopTab = Window:CreateTab("Candy Shop", 4483362458)
+
+    local shopRemote
+    task.spawn(function()
+        shopRemote = Rep:WaitForChild("raidShopRequest", 180)
+    end)
+
+    local ShopId = "halloween"
+    local CandyBuyNames = {
+        "Pumpkin Luck Potion",
+        "Witch's Brew",
+        "Pumpkin Battle Potion",
+        "Blood Moon Reroll",
+    }
+    local Selected = {}
+    local MaxBuys = 10                 -- Candy Shop potions have 10/10 stock (Blood Moon Reroll has 100/100)
+    local CYCLE = 24 * 3600 + 60       -- Candy Shop restocks every 24 hours
+    local RETRY_AFTER_FAIL = 900       -- after a refused purchase, wait 15 minutes before trying again
+    local candyBuyToken = 0
+
+    getgenv().TitanCandyShop = getgenv().TitanCandyShop or { bought = {}, nextTry = {}, cycleStart = os.time() }
+    local State = getgenv().TitanCandyShop
+
+    table.insert(activeConnections, { Disconnect = function() candyBuyToken += 1 end })
+
+    local function rollCycle()
+        if os.time() - State.cycleStart >= CYCLE then
+            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+        end
+    end
+
+    local function show(v)
+        if type(v) == "table" then
+            local ok, s = pcall(function() return HttpService:JSONEncode(v) end)
+            if ok then return s end
+        end
+        return tostring(v)
+    end
+
+    local function refused(res)
+        if res == false then return true end
+        if type(res) == "table" and (res.success == false or res.ok == false or res.error ~= nil) then return true end
+        if type(res) == "string" then
+            local s = res:lower()
+            for _, kw in ipairs({ "not enough", "out of stock", "sold out", "insufficient", "fail", "error", "cannot", "invalid" }) do
+                if s:find(kw, 1, true) then return true end
+            end
+        end
+        return false
+    end
+
+    local function buyOne(name)
+        if not shopRemote then return false, "remote not ready" end
+        local ok, res = pcall(function()
+            return shopRemote:InvokeServer("buy", ShopId, "potions:" .. name, nil)
+        end)
+        if not ok then return false, tostring(res) end
+        warn("[Candy Shop] " .. name .. " -> " .. show(res))
+        if refused(res) then return false, res end
+        return true, res
+    end
+
+    local function hasSelection() return next(Selected) ~= nil end
+
+    local function buyCycle(alive)
+        rollCycle()
+        local total = 0
+        for _, name in ipairs(CandyBuyNames) do
+            if Selected[name] then
+                while alive() and (State.bought[name] or 0) < MaxBuys and (State.nextTry[name] or 0) <= os.time() do
+                    local ok = buyOne(name)
+                    if ok then
+                        State.bought[name] = (State.bought[name] or 0) + 1
+                        total += 1
+                        task.wait(0.7)
+                    else
+                        State.nextTry[name] = os.time() + RETRY_AFTER_FAIL
+                        break
+                    end
+                end
+            end
+        end
+        return total
+    end
+
+    local function dump(v, indent, depth)
+        indent, depth = indent or "", depth or 0
+        if type(v) ~= "table" or depth > 4 then
+            print(indent .. tostring(v))
+            return
+        end
+        for k, x in pairs(v) do
+            if type(x) == "table" then
+                print(indent .. tostring(k) .. " = {")
+                dump(x, indent .. "  ", depth + 1)
+                print(indent .. "}")
+            else
+                print(indent .. tostring(k) .. " = " .. tostring(x))
+            end
+        end
+    end
+
+    CandyShopTab:CreateSection("Potions to buy")
+
+    CandyShopTab:CreateDropdown({
+        Name = "Buy these Candy Shop boosts",
+        Options = CandyBuyNames,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "CandyShopPotionsPick",
+        Callback = function(list)
+            Selected = {}
+            for _, n in ipairs(list) do Selected[n] = true end
+        end,
+    })
+
+    CandyShopTab:CreateInput({
+        Name = "Max buys per item per restock",
+        Default = "10",
+        Placeholder = "e.g. 10 (or 100 for Reroll)",
+        Flag = "CandyShopMaxBuys",
+        Callback = function(v)
+            MaxBuys = math.clamp(math.floor(tonumber(v) or 10), 1, 100)
+        end,
+    })
+
+    CandyShopTab:CreateSection("Buy")
+
+    CandyShopTab:CreateButton({
+        Name = "Buy selected now (1 of each)",
+        Callback = function()
+            if not hasSelection() then
+                Rayfield:Notify({ Title = "Candy Shop", Content = "Pick at least one item first", Duration = 3 })
+                return
+            end
+            task.spawn(function()
+                rollCycle()
+                local n = 0
+                for _, name in ipairs(CandyBuyNames) do
+                    if Selected[name] then
+                        if buyOne(name) then
+                            State.bought[name] = (State.bought[name] or 0) + 1
+                            n += 1
+                        end
+                        task.wait(0.7)
+                    end
+                end
+                Rayfield:Notify({ Title = "Candy Shop", Content = "Purchase accepted for " .. n .. " item(s)", Duration = 4 })
+            end)
+        end,
+    })
+
+    CandyShopTab:CreateToggle({
+        Name = "Auto buy selected Candy Shop boosts",
+        CurrentValue = false,
+        Flag = "AutoBuyCandyShopPotions",
+        Callback = function(Value)
+            candyBuyToken += 1
+            local myToken = candyBuyToken
+            if not Value then return end
+            local function alive() return candyBuyToken == myToken end
+            task.spawn(function()
+                while alive() and Rayfield.Loading do task.wait(0.3) end
+                while alive() do
+                    if hasSelection() then
+                        local n = buyCycle(alive)
+                        if n > 0 then
+                            Rayfield:Notify({ Title = "Candy Shop", Content = "Bought " .. n .. " item(s) from the Halloween Candy Shop", Duration = 4 })
+                        end
+                    end
+                    task.wait(60)
+                end
+            end)
+        end,
+    })
+
+    CandyShopTab:CreateButton({
+        Name = "Reset buy counters",
+        Callback = function()
+            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+            Rayfield:Notify({ Title = "Candy Shop", Content = "Counters reset", Duration = 3 })
+        end,
+    })
+
+    CandyShopTab:CreateSection("Debug")
+
+    CandyShopTab:CreateButton({
+        Name = "Print Candy Shop data (F9)",
+        Callback = function()
+            task.spawn(function()
+                if not shopRemote then
+                    Rayfield:Notify({ Title = "Candy Shop", Content = "raidShopRequest not ready", Duration = 3 })
+                    return
+                end
+                local ok, data = pcall(function() return shopRemote:InvokeServer("get", ShopId) end)
+                print("[Candy Shop] get ok:", ok)
+                dump(data)
+                Rayfield:Notify({ Title = "Candy Shop", Content = "Candy Shop data printed in the F9 console", Duration = 4 })
+            end)
+        end,
+    })
+
+    CandyShopTab:CreateParagraph({
+        Title = "Spends Halloween Candies",
+        Content = "Buys from the Halloween Candy Shop ('halloween'). Potions have 10 stock per restock; Blood Moon Reroll has 100.",
     })
 end)() end
 
