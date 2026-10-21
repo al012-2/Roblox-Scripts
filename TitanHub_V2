@@ -1252,10 +1252,28 @@ end
 
 local ResultCounter = 0
 local LastBossCooldown = 300
+local BossResults = {}
+
+local function recordBossResult(boss, diff)
+    if type(boss) ~= "string" or boss == "" then return end
+    local nb = norm(boss)
+    BossResults[nb] = (BossResults[nb] or 0) + 1
+    if type(diff) == "string" and diff ~= "" then
+        local k = nb .. "|" .. norm(diff)
+        BossResults[k] = (BossResults[k] or 0) + 1
+    end
+end
+
 onRemoteEvent("bossResult", function(won, boss, diff, cd)
     ResultCounter += 1
     PerfCache.cd = {}
+    if type(won) == "table" then
+        boss = boss or won.boss or won.bossId or won.bossName or won.name
+        diff = diff or won.diff or won.difficulty
+        cd = cd or won.cd or won.cooldown
+    end
     if type(cd) == "number" then LastBossCooldown = cd end
+    recordBossResult(boss, diff)
 end)
 
 local BattleStarts, BattleEnds = 0, 0
@@ -1280,8 +1298,23 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
         or targetModel:FindFirstChildWhichIsA("BasePart", true)
     if not targetPart then return false end
 
+    local nb = norm(tostring(bossName))
+    local nd = norm(tostring(difficulty))
+    local bossKey = nb .. "|" .. nd
+    local altName = BossDisplayName[bossName]
+    local altNb = altName and norm(tostring(altName)) or nil
+    local altKey = altNb and (altNb .. "|" .. nd) or nil
+
+    local function bossResCount()
+        return (BossResults[bossKey] or 0)
+            + (altKey and (BossResults[altKey] or 0) or 0)
+            + (BossResults[nb] or 0)
+            + (altNb and (BossResults[altNb] or 0) or 0)
+    end
+
     local accepted = false
     local startsBefore, endsBefore, resultsBefore = BattleStarts, BattleEnds, ResultCounter
+    local bossResBefore = bossResCount()
 
     for attempt = 1, 3 do
         if not shouldContinue() then return false end
@@ -1304,6 +1337,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
         if not shouldContinue() then return false end
 
         startsBefore, endsBefore, resultsBefore = BattleStarts, BattleEnds, ResultCounter
+        bossResBefore = bossResCount()
         if challengeRemote then
             pcall(function() challengeRemote:FireServer(tostring(bossName), tostring(difficulty)) end)
         end
@@ -1311,6 +1345,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
         local t = os.clock()
         while os.clock() - t < 2 do
             if BattleStarts ~= startsBefore or ResultCounter ~= resultsBefore
+                or bossResCount() ~= bossResBefore
                 or isBossOnCooldown(bossName, difficulty) then
                 accepted = true
                 break
@@ -1324,7 +1359,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
 
     if WaitForBattle or forceWait then
         local t = os.clock()
-        while BattleEnds == endsBefore and os.clock() - t < 180 do
+        while bossResCount() == bossResBefore and ResultCounter == resultsBefore and os.clock() - t < 180 do
             if not shouldContinue() then break end
             task.wait(0.2)
         end
