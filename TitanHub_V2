@@ -1255,7 +1255,10 @@ local LastBossCooldown = 300
 local BossResults = {}
 
 local function recordBossResult(boss, diff)
-    if type(boss) ~= "string" or boss == "" then return end
+    if type(boss) ~= "string" or boss == "" then
+        BossResults["?"] = (BossResults["?"] or 0) + 1   -- result without a readable boss name
+        return
+    end
     local nb = norm(boss)
     BossResults[nb] = (BossResults[nb] or 0) + 1
     if type(diff) == "string" and diff ~= "" then
@@ -1310,10 +1313,11 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
             + (altKey and (BossResults[altKey] or 0) or 0)
             + (BossResults[nb] or 0)
             + (altNb and (BossResults[altNb] or 0) or 0)
+            + (BossResults["?"] or 0)
     end
 
     local accepted = false
-    local startsBefore, endsBefore, resultsBefore = BattleStarts, BattleEnds, ResultCounter
+    local startsBefore = BattleStarts
     local bossResBefore = bossResCount()
 
     for attempt = 1, 3 do
@@ -1336,7 +1340,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
         task.wait(0.45 + attempt * 0.15)
         if not shouldContinue() then return false end
 
-        startsBefore, endsBefore, resultsBefore = BattleStarts, BattleEnds, ResultCounter
+        startsBefore = BattleStarts
         bossResBefore = bossResCount()
         if challengeRemote then
             pcall(function() challengeRemote:FireServer(tostring(bossName), tostring(difficulty)) end)
@@ -1344,7 +1348,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
 
         local t = os.clock()
         while os.clock() - t < 2 do
-            if BattleStarts ~= startsBefore or ResultCounter ~= resultsBefore
+            if BattleStarts ~= startsBefore
                 or bossResCount() ~= bossResBefore
                 or isBossOnCooldown(bossName, difficulty) then
                 accepted = true
@@ -1358,8 +1362,9 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
     if not accepted then return false end
 
     if WaitForBattle or forceWait then
+        -- wait for THIS boss's own result; the tower's named results can't end this wait
         local t = os.clock()
-        while bossResCount() == bossResBefore and ResultCounter == resultsBefore and os.clock() - t < 180 do
+        while bossResCount() == bossResBefore and os.clock() - t < 180 do
             if not shouldContinue() then break end
             task.wait(0.2)
         end
