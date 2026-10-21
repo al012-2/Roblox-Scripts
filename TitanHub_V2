@@ -467,7 +467,7 @@ local AllWorldsAndRaid = {"1", "2", "3", "4", "5", "6", "raid", "halloween"}
 
 -- Raid-specific settings
 local RaidWalkMode = true
-local FarmWalk = false        -- movement style: false = teleport, true = walk, "hybrid" = walk then teleport
+local FarmWalk = "remote"     -- movement style: "remote" = fight from anywhere, "remote_world" = teleport to world only then fight from far, false = teleport to boss, true = walk, "hybrid" = walk then teleport
 local WalkTimeout = 7         -- seconds of walking before the hybrid mode teleports
 local TravelViaMenu = true     -- world travel through the Teleport menu remote (no portals)
 local RaidDifficultyLadder = true
@@ -552,7 +552,7 @@ local BossHierarchy = {
    ["3"] = {"dreamer", "insect_eater", "thread_demon", "moon_reaper", "worthy_fighter", "thriller_king"},
    ["4"] = {"leopard_assassin", "mochi_man", "sand_warlord", "string_emperor", "red_dog", "dragon_emperor"},
    ["5"] = {"blood_brother", "blooming_wrath", "volcano_head", "deadbeat_dad", "kindness_spreader", "curse_tyrant"},
-   ["6"] = {"mirror_traitor"}, -- Hueco Mundo: the rest is discovered from workspace.bossNpcs["6"] below
+   ["6"] = {"hollow_bat", "panther_king", "tidal_queen", "lone_wolf", "crescent_reaper", "mirror_traitor"},
    ["raid"] = {"kaiju_no_8", "mina_ashiro", "kikoru_shinomiya", "gen_narumi", "soshiro_hoshina"},
    ["halloween"] = {
        "halloween_scythe",
@@ -965,7 +965,9 @@ local function recoverIfDead(worldKey, alive)
     until isCharAlive() or not alive() or os.clock() - t > 30
     if not alive() or not isCharAlive() then return false end
     humanDelay(1.5, 2.0)
-    forceTeleportToWorld(worldKey)
+    if FarmWalk ~= "remote" and worldKey ~= "secret" then
+        forceTeleportToWorld(worldKey)
+    end
     return true
 end
 
@@ -1291,15 +1293,19 @@ end)
 
 local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, useWalk)
     shouldContinue = shouldContinue or function() return true end
+    local isRemote = (useWalk == "remote" or useWalk == "remote_world")
     if isBossOnCooldown(bossName, difficulty) then return false end
 
-    local targetModel = findBossModel(bossName)
-    if not targetModel then return false end
+    local targetModel, targetPart
+    if not isRemote then
+        targetModel = findBossModel(bossName)
+        if not targetModel then return false end
 
-    local targetPart = targetModel:FindFirstChild("HumanoidRootPart")
-        or targetModel:FindFirstChild("Head")
-        or targetModel:FindFirstChildWhichIsA("BasePart", true)
-    if not targetPart then return false end
+        targetPart = targetModel:FindFirstChild("HumanoidRootPart")
+            or targetModel:FindFirstChild("Head")
+            or targetModel:FindFirstChildWhichIsA("BasePart", true)
+        if not targetPart then return false end
+    end
 
     local nb = norm(tostring(bossName))
     local nd = norm(tostring(difficulty))
@@ -1320,25 +1326,30 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
     local startsBefore = BattleStarts
     local bossResBefore = bossResCount()
 
-    for attempt = 1, 3 do
+    for attempt = 1, (isRemote and 2 or 3) do
         if not shouldContinue() then return false end
 
-        local pos = targetPart.Parent and targetPart.Position or targetModel:GetPivot().Position
-        local reached = false
-        if useWalk then
-            reached = walkNearBoss(pos, attempt, targetModel, shouldContinue,
-                useWalk == "hybrid" and WalkTimeout or nil)
-            -- walking failed / timed out (building, wall, stuck): teleport next to the boss instead
-            if not reached and useWalk == "hybrid" and shouldContinue() and isCharAlive() then
+        if not isRemote then
+            local pos = targetPart.Parent and targetPart.Position or targetModel:GetPivot().Position
+            local reached = false
+            if useWalk then
+                reached = walkNearBoss(pos, attempt, targetModel, shouldContinue,
+                    useWalk == "hybrid" and WalkTimeout or nil)
+                -- walking failed / timed out (building, wall, stuck): teleport next to the boss instead
+                if not reached and useWalk == "hybrid" and shouldContinue() and isCharAlive() then
+                    reached = teleportNear(pos, attempt, targetModel)
+                end
+            else
                 reached = teleportNear(pos, attempt, targetModel)
             end
-        else
-            reached = teleportNear(pos, attempt, targetModel)
-        end
-        if not reached then return false end
+            if not reached then return false end
 
-        task.wait(0.45 + attempt * 0.15)
-        if not shouldContinue() then return false end
+            task.wait(0.45 + attempt * 0.15)
+            if not shouldContinue() then return false end
+        elseif attempt > 1 then
+            task.wait(0.25)
+            if not shouldContinue() then return false end
+        end
 
         startsBefore = BattleStarts
         bossResBefore = bossResCount()
@@ -1346,8 +1357,9 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
             pcall(function() challengeRemote:FireServer(tostring(bossName), tostring(difficulty)) end)
         end
 
+        local waitWindow = isRemote and 1.2 or 2.0
         local t = os.clock()
-        while os.clock() - t < 2 do
+        while os.clock() - t < waitWindow do
             if BattleStarts ~= startsBefore
                 or bossResCount() ~= bossResBefore
                 or isBossOnCooldown(bossName, difficulty) then
@@ -1785,7 +1797,8 @@ do
             local char = player.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local root = char and char:FindFirstChild("HumanoidRootPart")
-            if AutoJump and ActiveMode and hum and root and hum.Health > 0 then
+            local isWalkingMode = (FarmWalk == true or FarmWalk == "hybrid")
+            if AutoJump and ActiveMode and isWalkingMode and hum and root and hum.Health > 0 then
                 if not lastPos or (root.Position - lastPos).Magnitude > 1.5 then
                     lastPos, lastMove = root.Position, os.clock()
                 elseif os.clock() - lastMove > 2.5 and os.clock() - lastJump > 1.5 then
@@ -1882,12 +1895,14 @@ FarmTab:CreateSection("Movement")
 
 FarmTab:CreateDropdown({
     Name = "Farm style (how to reach bosses)",
-    Options = { "Teleport", "Walk", "Walk > Teleport" },
-    CurrentOption = { "Teleport" },
+    Options = { "Remote (No Move)", "Remote (World Only)", "Teleport", "Walk", "Walk > Teleport" },
+    CurrentOption = { "Remote (No Move)" },
     Flag = "FarmMoveMode",
     Callback = function(Option)
         local v = type(Option) == "table" and Option[1] or Option
-        if v == "Walk" then FarmWalk = true
+        if v == "Remote (No Move)" then FarmWalk = "remote"
+        elseif v == "Remote (World Only)" then FarmWalk = "remote_world"
+        elseif v == "Walk" then FarmWalk = true
         elseif v == "Walk > Teleport" then FarmWalk = "hybrid"
         else FarmWalk = false end
     end,
@@ -1922,12 +1937,37 @@ FarmTab:CreateToggle({
     Callback = function(Value) AutoJump = Value end,
 })
 
+FarmTab:CreateButton({
+    Name = "Open Game's AutoBoss UI",
+    Callback = function()
+        local ps = player:FindFirstChild("PlayerScripts")
+        local mod = ps and ps:FindFirstChild("autoBossClient", true)
+        if mod then
+            local ok, api = pcall(require, mod)
+            if ok and type(api) == "table" and type(api.open) == "function" then
+                pcall(api.open)
+                return
+            end
+        end
+        local pgui = player:FindFirstChild("PlayerGui")
+        local ui = pgui and pgui:FindFirstChild("AutoBossUI")
+        local panel = ui and ui:FindFirstChild("panel")
+        if ui and panel then
+            ui.Enabled = true
+            panel.Visible = not panel.Visible
+        else
+            Rayfield:Notify({ Title = "AutoBoss UI", Content = "AutoBossUI not found in PlayerGui", Duration = 4 })
+        end
+    end,
+})
+
 -- ==================== Farm logic ====================
 local SkipUntil = {}
 
 local function attemptBoss(boss, diff, alive, worldKey, useWalk)
     if useWalk == "teleport" then useWalk = false   -- explicit teleport (ignore the global Farm style)
     elseif not useWalk then useWalk = FarmWalk end
+    local isRemote = (useWalk == "remote" or useWalk == "remote_world")
     local k = boss .. "|" .. diff
     if SkipUntil[k] and os.clock() < SkipUntil[k] then return false end
     if not recoverIfDead(worldKey, alive) then return false end
@@ -1945,6 +1985,13 @@ local function attemptBoss(boss, diff, alive, worldKey, useWalk)
         return false
     end
     if not isCharAlive() then return false end
+
+    if isRemote then
+        -- When fighting from far away, the boss's BillboardGui may not be streamed in,
+        -- so if hitAndRunBoss confirmed the battle started/finished, mark cooldown directly.
+        SkipUntil[k] = os.clock() + math.max(LastBossCooldown - 5, 20)
+        return true
+    end
 
     task.wait(0.8)
     if isBossOnCooldown(boss, diff) then
@@ -1993,7 +2040,7 @@ end
 
 local function runSmartWorldFarm(worldKey)
     startMode(worldKey, function(alive)
-        forceTeleportToWorld(worldKey)
+        if FarmWalk ~= "remote" then forceTeleportToWorld(worldKey) end
         while alive() do
             local didAny = farmWorldOnce(worldKey, alive, nil, false)
             task.wait(didAny and 0.5 or 3)
@@ -2013,7 +2060,7 @@ local function runAllWorldsFarm()
             for _, worldKey in ipairs(WorldOrder) do
                 if not alive() then break end
                 if SelectedWorlds[worldKey] and worldHasWork(worldKey) then
-                    forceTeleportToWorld(worldKey)
+                    if FarmWalk ~= "remote" then forceTeleportToWorld(worldKey) end
                     if farmWorldOnce(worldKey, alive, nil, false) then didAny = true end
                 end
             end
@@ -2073,7 +2120,7 @@ local function runKaijuRaidFarm()
     startMode("raid_farm", function(alive)
         while alive() do
             local didAny = false
-            if not nearWorldBosses("raid") then
+            if FarmWalk ~= "remote" and not nearWorldBosses("raid") then
                 forceTeleportToWorld("raid")
                 if not nearWorldBosses("raid") then
                     task.wait(5)
@@ -2084,7 +2131,7 @@ local function runKaijuRaidFarm()
                 for _, boss in ipairs(BossHierarchy["raid"]) do
                     if not alive() then break end
                     if SelectedRaidBosses[boss] then
-                        if attemptBoss(boss, diff, alive, "raid", true) then
+                        if attemptBoss(boss, diff, alive, "raid", nil) then
                             didAny = true
                         end
                     end
@@ -2284,7 +2331,7 @@ local function runCustomBossFarm()
             for _, worldKey in ipairs(AllWorldsAndRaid) do
                 if not alive() then break end
                 if customWorldHasWork(worldKey) then
-                    forceTeleportToWorld(worldKey)
+                    if FarmWalk ~= "remote" then forceTeleportToWorld(worldKey) end
                     if customFarmWorldOnce(worldKey, alive) then didAny = true end
                 end
             end
@@ -2331,6 +2378,56 @@ ModeToggles["custom"] = BossTab:CreateToggle({
    Flag = "CustomAutoBoss",
    Callback = function(Value)
       if Value then runCustomBossFarm() else stopMode("custom") end
+   end,
+})
+
+BossTab:CreateButton({
+   Name = "Select All Beaten Bosses (Server autoBossList)",
+   Callback = function()
+      local rf = Rep:FindFirstChild("autoBossList")
+      if not rf then
+         Rayfield:Notify({ Title = "AutoBoss", Content = "autoBossList remote not found", Duration = 4 })
+         return
+      end
+      local ok, groups = pcall(rf.InvokeServer, rf)
+      if not (ok and type(groups) == "table") then
+         Rayfield:Notify({ Title = "AutoBoss", Content = "Could not fetch autoBossList from server", Duration = 4 })
+         return
+      end
+      local count = 0
+      for _, g in ipairs(groups) do
+         if type(g.bosses) == "table" then
+            for _, b in ipairs(g.bosses) do
+               if type(b.id) == "string" and type(b.beaten) == "table" then
+                  BossDiffs[b.id] = BossDiffs[b.id] or {}
+                  for idx, d in ipairs(DiffList) do
+                     if b.beaten[idx] == true then
+                        BossDiffs[b.id][d] = true
+                        count += 1
+                     else
+                        BossDiffs[b.id][d] = nil
+                     end
+                  end
+               end
+            end
+         end
+      end
+      for _, diff in ipairs(DiffList) do
+         local dd = DiffDropdowns[diff]
+         if dd then pcall(function() dd:Set(labelsForDiff(diff)) end) end
+      end
+      Rayfield:Notify({ Title = "Custom AutoBoss", Content = "Synced " .. tostring(count) .. " beaten boss difficulties from server!", Duration = 4 })
+   end,
+})
+
+BossTab:CreateButton({
+   Name = "Toggle Server AutoBoss All (*)",
+   Callback = function()
+      local sc = Rep:FindFirstChild("settingChange")
+      if sc then
+         pcall(function() sc:FireServer("autoBossFight", "*") end)
+         Rayfield:Notify({ Title = "Server AutoBoss", Content = "Sent settingChange('autoBossFight', '*')", Duration = 3 })
+      end
    end,
 })
 
@@ -2531,7 +2628,7 @@ QuestTab:CreateToggle({
 -- ==================== Secret Bosses ====================
 do
     local SecretSelected, SecretDiffs = {}, { Normal = true }
-    local SecretMove = "teleport" -- "teleport" = direct, true = walk only, "hybrid" = walk then teleport
+    local SecretMove = "remote" -- "remote" = from far, "teleport" = direct, true = walk only, "hybrid" = walk then teleport
     local SecretNames, SecretIdOf = {}, {}
 
     local function addSecret(name, id)
@@ -2554,9 +2651,8 @@ do
         end
     end
 
-    for _, n in ipairs({ "Crimson Phantom", "The Needle Hunter" }) do
-        addSecret(n, (n:lower():gsub("%s+", "_")))
-    end
+    addSecret("Crimson Phantom", "crimson_phantom")
+    addSecret("The Needle Hunter", "hornet")
     refreshSecret()
     table.sort(SecretNames)
 
@@ -2581,9 +2677,8 @@ do
                         for _, diff in ipairs(DiffList) do
                             if not alive() then break end
                             if SecretDiffs[diff] then
-                                if findBossModel(id) then
+                                if SecretMove == "remote" or findBossModel(id) then
                                     warned[name] = nil
-                                    -- secret bosses: Walk only, or Walk > Teleport (walk first, teleport next to the boss on timeout)
                                     if attemptBoss(id, diff, alive, "secret", SecretMove) then didAny = true end
                                 elseif not warned[name] then
                                     warned[name] = true
@@ -2625,12 +2720,13 @@ do
 
     SecretTab:CreateDropdown({
         Name = "Secret boss movement",
-        Options = { "Teleport", "Walk only", "Walk > Teleport" },
-        CurrentOption = { "Teleport" },
+        Options = { "Remote (No Move)", "Teleport", "Walk only", "Walk > Teleport" },
+        CurrentOption = { "Remote (No Move)" },
         Flag = "SecretMoveMode",
         Callback = function(Option)
             local v = type(Option) == "table" and Option[1] or Option
-            if v == "Walk only" then SecretMove = true
+            if v == "Remote (No Move)" then SecretMove = "remote"
+            elseif v == "Walk only" then SecretMove = true
             elseif v == "Walk > Teleport" then SecretMove = "hybrid"
             else SecretMove = "teleport" end
         end,
@@ -2785,7 +2881,7 @@ do
     local function runHalloween()
         startMode("halloween", function(alive)
             while alive() do
-                if not nearWorldBosses("halloween") then
+                if FarmWalk ~= "remote" and not nearWorldBosses("halloween") then
                     forceTeleportToWorld("halloween")
                     task.wait(1.0)
                 end
@@ -2796,7 +2892,7 @@ do
                     if id and isBossChosen(name, id) then
                         for _, diff in ipairs(DiffList) do
                             if not alive() then break end
-                            if HwDiffs[diff] and findBossModel(id) then
+                            if HwDiffs[diff] and (FarmWalk == "remote" or FarmWalk == "remote_world" or findBossModel(id)) then
                                 if attemptBoss(id, diff, alive, "halloween", FarmWalk) then
                                     didAny = true
                                 end
@@ -2872,7 +2968,7 @@ do
 
     -- movement follows Auto Farm > Movement (Teleport / Walk / Walk > Teleport)
     local function reachTarget(pos, model, alive)
-        if FarmWalk == false then
+        if FarmWalk ~= true and FarmWalk ~= "hybrid" then
             return teleportNear(pos, 1, model)
         end
         local reached = walkNearBoss(pos, 1, model, alive, FarmWalk == "hybrid" and WalkTimeout or nil)
@@ -3873,9 +3969,29 @@ do (function()
         return timers, works, rows
     end
 
+    -- ===== direct server active effects via sendUI("updateActiveEffects", data) =====
+    local serverEffects, serverEffectsAt = {}, 0
+    onRemoteEvent("sendUI", function(action, data)
+        if action ~= "updateActiveEffects" or type(data) ~= "table" then return end
+        local map = {}
+        for k, info in pairs(data) do
+            local pname = (type(info) == "table" and info.itemName) or k
+            local d = type(info) == "table" and tonumber(info.duration) or nil
+            if type(pname) == "string" and d then
+                map[pname] = d
+                seenInHud[pname] = true
+            end
+        end
+        serverEffects = map
+        serverEffectsAt = tick()
+    end)
+
     -- returns { [potion name] = seconds left }, and whether at least one real (ticking) timer was read.
     -- A label counts as a timer only after it was seen counting down, so item counts are never mistaken for time.
     local function readHud(force)
+        if serverEffectsAt > 0 and tick() - serverEffectsAt < 5 then
+            return serverEffects, true
+        end
         if not force and tick() - hudReadAt < 1.5 then return hudTimers, hudWorks end
         hudReadAt = tick()
         local container = getEffectsContainer()
