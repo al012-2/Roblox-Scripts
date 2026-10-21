@@ -7,15 +7,17 @@ if getgenv().TitanLoaded then
     pcall(getgenv().TitanLoaded)
 end
 
--- ==================== Linoria UI ====================
--- Pin to a specific commit: replace "main" with a commit hash from
--- https://github.com/mstudio45/LinoriaLib/commits/main (after you verified that version works)
-local LINORIA_REF = "main"
-local repo = "https://raw.githubusercontent.com/mstudio45/LinoriaLib/" .. LINORIA_REF .. "/"
+-- ==================== Obsidian UI ====================
+-- Uses deividcomsono/Obsidian (modern successor to LinoriaLib with search, icons, mobile support & themes)
+local OBSIDIAN_REF = "main"
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/" .. OBSIDIAN_REF .. "/"
 local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
 local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
 local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
 local LOptions, LToggles = Library.Options, Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
 
 local Rayfield = {}
 Rayfield.Loading = false
@@ -36,7 +38,66 @@ end
 local TabClass = {}
 TabClass.__index = TabClass
 
+-- Related tabs are merged into one top-level tab. Each original tab becomes a "tabbox" (left / right column)
+-- and each of its sections becomes a sub-tab inside it, so you click a section instead of scrolling.
+local WIN_H = 820
+local GroupOf = {
+    ["Auto Farm"] = "Farm", ["Kaiju Raid"] = "Farm",
+    ["Custom Boss"] = "Bosses", ["Secret Bosses"] = "Bosses", ["Halloween"] = "Bosses",
+    ["Roll & Tower"] = "Roll & Tower", ["Infinity Tower"] = "Roll & Tower",
+    ["Prestige Tower"] = "Roll & Tower", ["Endless Raid"] = "Roll & Tower",
+    ["Potions"] = "Items", ["Crafting"] = "Items", ["Raid Shop"] = "Items",
+    ["NPCs"] = "Misc", ["Quests"] = "Misc", ["Server & Rejoin"] = "Misc",
+}
+local GroupIcons = {
+    ["Farm"] = "swords",
+    ["Bosses"] = "skull",
+    ["Roll & Tower"] = "dice-5",
+    ["Items"] = "flask-conical",
+    ["Misc"] = "compass",
+    ["Tracker"] = "activity",
+}
+local Groups = {}
+
+-- short sub-tab names (the buttons are narrow, long names overlap)
+local ShortNames = {
+    ["battle settings"] = "Battle", ["difficulty"] = "Diff", ["movement"] = "Move", ["smart farm"] = "Worlds",
+    ["raid control"] = "Control", ["raid bosses & difficulty"] = "Bosses",
+    ["control"] = "Control", ["quick setup"] = "Quick", ["secret bosses"] = "Secret", ["bosses"] = "Bosses",
+    ["reaper statues"] = "Statues", ["candy doors"] = "Doors",
+    ["end the tower at a floor"] = "At floor", ["end the tower on weather"] = "Weather", ["manual"] = "Manual", ["auto run"] = "Auto",
+    ["potion selection"] = "Select", ["auto drink"] = "Drink", ["weather burst"] = "Burst", ["before ending the infinity tower"] = "Pre-end",
+    ["potions to buy"] = "Potions", ["potions to craft"] = "Potions", ["buy"] = "Buy", ["craft"] = "Craft", ["debug"] = "Debug",
+    ["roll & tower"] = "Roll", ["pity roll"] = "Pity", ["offline rolls"] = "Offline",
+    ["endless raid"] = "Endless", ["prestige tower"] = "Prestige",
+    ["private server & auto reconnect"] = "Server", ["actions"] = "Actions", ["live tracker"] = "Tracker",
+}
+
+local function shortTitle(t)
+    t = tostring(t):gsub("%s*%b()", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local mapped = ShortNames[t:lower()]
+    if mapped then return mapped end
+    t = t:gsub("^Fine:%s*", "")
+    if t == "Nightmare" then return "Night" end
+    if #t <= 9 then return t end
+    local first = t:match("%S+") or t
+    if #first <= 9 then return first end
+    return first:sub(1, 9)
+end
+
 function TabClass:_newBox(title)
+    if self._tabbox then
+        local name = shortTitle(title)
+        self._subCount = (self._subCount or 0) + 1
+        -- unique sub-tab names inside one tabbox
+        if self._subNames and self._subNames[name] then name = name .. " " .. self._subCount end
+        self._subNames = self._subNames or {}
+        self._subNames[name] = true
+        self._cur = self._tabbox:AddTab(name)
+        self._subs = self._subs or {}
+        table.insert(self._subs, self._cur)
+        return self._cur
+    end
     self._n += 1
     local box
     if self._n % 2 == 1 then
@@ -73,6 +134,7 @@ function TabClass:CreateInput(cfg)
         Default = cfg.Default or "",
         Numeric = false,
         Finished = false,
+        ClearTextOnFocus = false,
         Text = cfg.Name,
         Placeholder = cfg.Placeholder or "",
         Callback = function(v)
@@ -98,7 +160,7 @@ end
 
 function TabClass:CreateDropdown(cfg)
     local idx = nextIdx(cfg.Flag)
-    local values = cfg.Options
+    local values = cfg.Options or {}
     local multi = cfg.MultipleOptions == true
     local init = cfg.CurrentOption or {}
     local default
@@ -108,6 +170,7 @@ function TabClass:CreateDropdown(cfg)
         Values = values,
         Default = default,
         Multi = multi,
+        Searchable = #values >= 6,
         Text = cfg.Name,
         Callback = function(v)
             if not cfg.Callback then return end
@@ -141,25 +204,71 @@ function TabClass:CreateDropdown(cfg)
     return { Set = function(_, list) setValue(list or {}) end }
 end
 
+-- Stretch every sub-tab page with a blank spacer so the boxes reach the bottom of the (tall) window.
+local function fillGroups()
+    local contentH = WIN_H - 120
+    for _, grp in pairs(Groups) do
+        local perSide = { 0, 0 }
+        for _, e in ipairs(grp.objs or {}) do perSide[e.side] += 1 end
+        for _, e in ipairs(grp.objs or {}) do
+            local target = math.floor(contentH / math.max(1, perSide[e.side])) - 34
+            for _, sub in ipairs(e.obj._subs or {}) do
+                pcall(function()
+                    local layout = sub.Container and sub.Container:FindFirstChildOfClass("UIListLayout")
+                    local cur = layout and layout.AbsoluteContentSize.Y or 0
+                    if cur > 0 and target > cur and sub.AddBlank then
+                        sub:AddBlank(target - cur)
+                    end
+                end)
+            end
+        end
+    end
+end
+
 function Rayfield:CreateWindow(cfg)
     LWindow = Library:CreateWindow({
         Title = cfg.Name,
+        Footer = "Titan RNG Hub",
         Center = true,
         AutoShow = true,
         Resizable = true,
         ShowCustomCursor = false,
+        NotifySide = "Right",
         TabPadding = 8,
         MenuFadeTime = 0.2,
+        Size = UDim2.fromOffset(880, WIN_H), -- wide enough for the sub-tab buttons, still tall
     })
     local win = {}
     function win:CreateTab(name)
-        return setmetatable({ _tab = LWindow:AddTab(name), _name = name, _n = 0 }, TabClass)
+        local g = GroupOf[name]
+        -- fall back to plain tabs if this build has no Tabbox support
+        if g and not (Library.CreateWindow and LWindow.AddTab) then g = nil end
+        if g then
+            local grp = Groups[g]
+            if not grp then
+                grp = { tab = LWindow:AddTab(g, GroupIcons[g] or "folder"), n = 0 }
+                Groups[g] = grp
+            end
+            grp.n += 1
+            local box = (grp.n % 2 == 1) and grp.tab:AddLeftTabbox() or grp.tab:AddRightTabbox()
+            local obj = setmetatable({ _tabbox = box, _name = name, _n = 0 }, TabClass)
+            grp.objs = grp.objs or {}
+            table.insert(grp.objs, { obj = obj, side = (grp.n % 2 == 1) and 1 or 2 })
+            return obj
+        end
+        return setmetatable({ _tab = LWindow:AddTab(name, GroupIcons[name] or "layers"), _name = name, _n = 0 }, TabClass)
     end
     return win
 end
 
 function Rayfield:Notify(cfg)
-    Library:Notify((cfg.Title and (cfg.Title .. ": ") or "") .. (cfg.Content or ""), cfg.Duration or 4)
+    pcall(function()
+        Library:Notify({
+            Title = cfg.Title or "Titan Hub",
+            Description = cfg.Content or "",
+            Time = cfg.Duration or 4,
+        })
+    end)
 end
 
 function Rayfield:Destroy()
@@ -167,13 +276,73 @@ function Rayfield:Destroy()
 end
 
 function Rayfield:LoadConfiguration()
-    local settings = LWindow:AddTab("UI Settings")
+    local settings = LWindow:AddTab("UI Settings", "settings")
     if Rayfield.AfterSettings then
         local ok, err = pcall(Rayfield.AfterSettings)
         if not ok then warn("[Server tab] " .. tostring(err)) end
     end
+    task.delay(1.5, function() pcall(fillGroups) end) -- after the layout has measured every page
     local menu = settings:AddLeftGroupbox("Menu")
-    menu:AddButton("Unload", function() Library:Unload() end)
+    menu:AddButton({
+        Text = "Unload",
+        Func = function() Library:Unload() end,
+    })
+    -- UI scale (makes everything bigger / smaller)
+    menu:AddDropdown("UiScale", {
+        Values = { "50%", "75%", "100%", "125%", "150%", "175%", "200%" },
+        Default = "100%",
+        Text = "UI scale",
+        Callback = function(v)
+            local n = tonumber((tostring(v):gsub("%%", "")))
+            if n and Library.SetDPIScale then pcall(function() Library:SetDPIScale(n) end) end
+        end,
+    })
+    menu:AddDropdown("NotificationSide", {
+        Values = { "Left", "Right" },
+        Default = "Right",
+        Text = "Notification Side",
+        Callback = function(v)
+            if Library.SetNotifySide then pcall(function() Library:SetNotifySide(v) end) end
+        end,
+    })
+    if LWindow and LWindow.SetCornerRadius then
+        menu:AddSlider("UICornerSlider", {
+            Text = "Corner Radius",
+            Default = Library.CornerRadius or 6,
+            Min = 0,
+            Max = 20,
+            Rounding = 0,
+            Callback = function(v)
+                pcall(function() LWindow:SetCornerRadius(v) end)
+            end,
+        })
+    end
+    -- Window transparency: fades every Frame background of the menu (text stays solid)
+    local origT = setmetatable({}, { __mode = "k" })
+    local function applyTransparency(t)
+        local root = Library.ScreenGui
+        if not root then return end
+        local skip = Library.NotificationArea
+        for _, d in ipairs(root:GetDescendants()) do
+            if (d:IsA("Frame") or d:IsA("ScrollingFrame")) and not (skip and d:IsDescendantOf(skip)) then
+                if origT[d] == nil then origT[d] = d.BackgroundTransparency end
+                local o = origT[d]
+                if o < 1 then d.BackgroundTransparency = o + (1 - o) * t end
+            end
+        end
+    end
+    menu:AddSlider("UiTransparency", {
+        Text = "Transparency",
+        Default = 0,
+        Min = 0,
+        Max = 85,
+        Rounding = 0,
+        Suffix = "%",
+        Callback = function(v)
+            pcall(applyTransparency, (tonumber(v) or 0) / 100)
+        end,
+    })
+
     menu:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
     Library.ToggleKeybind = LOptions.MenuKeybind
 
@@ -249,11 +418,25 @@ function Rayfield:LoadConfiguration()
     task.delay(2.5, function() Rayfield.Loading = false end)
 end
 
+-- default look: dark violet with a bright accent (ThemeManager in UI Settings can still change it)
+pcall(function()
+    local scheme = Library.Scheme or Library
+    scheme.AccentColor = Color3.fromRGB(150, 95, 255)
+    scheme.MainColor = Color3.fromRGB(26, 23, 38)
+    scheme.BackgroundColor = Color3.fromRGB(17, 15, 26)
+    scheme.OutlineColor = Color3.fromRGB(62, 54, 92)
+    scheme.FontColor = Color3.fromRGB(240, 236, 255)
+    scheme.Red = Color3.fromRGB(255, 90, 110)
+end)
+
 local Window = Rayfield:CreateWindow({
    Name = "Titan RNG Hub",
    LoadingTitle = "Loading...",
    ConfigurationSaving = { Enabled = true, FolderName = "TitanRNG_Smart", FileName = "Config" }
 })
+pcall(function()
+    if Library.UpdateColorsUsingRegistry then Library:UpdateColorsUsingRegistry() end
+end)
 
 local Rep = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
@@ -1438,7 +1621,7 @@ do
     btn.Parent = gui
     Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
     local stroke = Instance.new("UIStroke", btn)
-    stroke.Color = Color3.fromRGB(0, 140, 255)
+    stroke.Color = Color3.fromRGB(150, 95, 255)
     stroke.Thickness = 2
 
     -- ===== OFF button: green = running, red = everything stopped =====
@@ -1778,13 +1961,18 @@ local function runSmartWorldFarm(worldKey)
     end)
 end
 
+do
+-- one rotation over the worlds picked in the dropdown (all worlds by default)
+local SelectedWorlds = {}
+for _, w in ipairs(WorldOrder) do SelectedWorlds[w] = true end
+
 local function runAllWorldsFarm()
     startMode("all", function(alive)
         while alive() do
             local didAny = false
             for _, worldKey in ipairs(WorldOrder) do
                 if not alive() then break end
-                if worldHasWork(worldKey) then
+                if SelectedWorlds[worldKey] and worldHasWork(worldKey) then
                     forceTeleportToWorld(worldKey)
                     if farmWorldOnce(worldKey, alive, nil, false) then didAny = true end
                 end
@@ -1797,7 +1985,7 @@ end
 FarmTab:CreateSection("Smart Farm (Worlds 1-6)")
 
 ModeToggles["all"] = FarmTab:CreateToggle({
-   Name = "Smart Farm: ALL Worlds (1-6 Rotate)",
+   Name = "Start Smart Farm",
    CurrentValue = false,
    Flag = "SmartFarmAll",
    Callback = function(Value)
@@ -1805,16 +1993,27 @@ ModeToggles["all"] = FarmTab:CreateToggle({
    end,
 })
 
+local WorldLabelToKey, WorldLabels = {}, {}
 for _, worldKey in ipairs(WorldOrder) do
-    local displayName = WorldAreaNames[worldKey] or ("World " .. worldKey)
-    ModeToggles[worldKey] = FarmTab:CreateToggle({
-       Name = "Smart Farm: " .. displayName,
-       CurrentValue = false,
-       Flag = "SmartFarm" .. worldKey,
-       Callback = function(Value)
-          if Value then runSmartWorldFarm(worldKey) else stopMode(worldKey) end
-       end,
-    })
+    local label = WorldAreaNames[worldKey] or ("World " .. worldKey)
+    WorldLabelToKey[label] = worldKey
+    table.insert(WorldLabels, label)
+end
+
+FarmTab:CreateDropdown({
+    Name = "Worlds to farm (pick one or more)",
+    Options = WorldLabels,
+    CurrentOption = WorldLabels,
+    MultipleOptions = true,
+    Flag = "FarmWorldsPick",
+    Callback = function(list)
+        SelectedWorlds = {}
+        for _, label in ipairs(list) do
+            local k = WorldLabelToKey[label]
+            if k then SelectedWorlds[k] = true end
+        end
+    end,
+})
 end
 
 -- ==================== Dedicated Kaiju Raid tab ====================
@@ -2097,37 +2296,65 @@ ModeToggles["custom"] = BossTab:CreateToggle({
 
 BossTab:CreateSection("Quick setup (Normal up to...)")
 
-for _, worldKey in ipairs(AllWorldsAndRaid) do
-    local worldName = WorldAreaNames[worldKey] or ("World " .. worldKey)
+do
+    local qsWorldLabels, qsLabelToKey = { "All Worlds" }, {}
+    for _, worldKey in ipairs(AllWorldsAndRaid) do
+        local label = WorldAreaNames[worldKey] or ("World " .. worldKey)
+        qsLabelToKey[label] = worldKey
+        table.insert(qsWorldLabels, label)
+    end
+    local qsWorld, qsLevel = "All Worlds", "Nightmare"
+
     BossTab:CreateDropdown({
-       Name = worldName,
-       Options = {"-", "Clear", "Normal", "Hard", "Extreme", "Nightmare"},
-       CurrentOption = {"-"},
-       MultipleOptions = false,
-       Callback = function(Option)
-          local choice = type(Option) == "table" and Option[1] or Option
-          if choice == "-" or choice == nil then return end
-          for _, boss in ipairs(BossHierarchy[worldKey]) do
-              local set = {}
-              if choice ~= "Clear" then
-                  for _, d in ipairs(DiffList) do
-                      set[d] = true
-                      if d == choice then break end
-                  end
-              end
-              BossDiffs[boss] = set
-          end
-          for _, diff in ipairs(DiffList) do
-              local dd = DiffDropdowns[diff]
-              if dd then pcall(function() dd:Set(labelsForDiff(diff)) end) end
-          end
-       end,
+        Name = "World",
+        Options = qsWorldLabels,
+        CurrentOption = { "All Worlds" },
+        Callback = function(Option)
+            qsWorld = type(Option) == "table" and Option[1] or Option
+        end,
+    })
+
+    BossTab:CreateDropdown({
+        Name = "Run Normal up to",
+        Options = { "Clear", "Normal", "Hard", "Extreme", "Nightmare" },
+        CurrentOption = { "Nightmare" },
+        Callback = function(Option)
+            qsLevel = type(Option) == "table" and Option[1] or Option
+        end,
+    })
+
+    BossTab:CreateButton({
+        Name = "Apply to selected world",
+        Callback = function()
+            local worlds = {}
+            if qsWorld == "All Worlds" then
+                for _, w in ipairs(AllWorldsAndRaid) do table.insert(worlds, w) end
+            elseif qsLabelToKey[qsWorld] then
+                worlds = { qsLabelToKey[qsWorld] }
+            end
+            for _, worldKey in ipairs(worlds) do
+                for _, boss in ipairs(BossHierarchy[worldKey]) do
+                    local set = {}
+                    if qsLevel ~= "Clear" then
+                        for _, d in ipairs(DiffList) do
+                            set[d] = true
+                            if d == qsLevel then break end
+                        end
+                    end
+                    BossDiffs[boss] = set
+                end
+            end
+            for _, diff in ipairs(DiffList) do
+                local dd = DiffDropdowns[diff]
+                if dd then pcall(function() dd:Set(labelsForDiff(diff)) end) end
+            end
+            Rayfield:Notify({ Title = "Custom AutoBoss", Content = "Applied: " .. qsWorld .. " / up to " .. qsLevel, Duration = 3 })
+        end,
     })
 end
 
-BossTab:CreateSection("Fine tune (bosses per difficulty)")
-
 for _, diff in ipairs(DiffList) do
+    BossTab:CreateSection("Fine: " .. diff)
     DiffDropdowns[diff] = BossTab:CreateDropdown({
        Name = diff,
        Options = BossLabels,
@@ -2331,9 +2558,11 @@ do
         end)
     end
 
-    BossTab:CreateSection("Secret Bosses (workspace.bossNpcs.secretBosses)")
+    local SecretTab = Window:CreateTab("Secret Bosses", 4483362458)
 
-    ModeToggles["secret"] = BossTab:CreateToggle({
+    SecretTab:CreateSection("Secret Bosses (workspace.bossNpcs.secretBosses)")
+
+    ModeToggles["secret"] = SecretTab:CreateToggle({
         Name = "Auto Secret Bosses",
         CurrentValue = false,
         Flag = "SecretAutoBoss",
@@ -2342,7 +2571,7 @@ do
         end,
     })
 
-    BossTab:CreateDropdown({
+    SecretTab:CreateDropdown({
         Name = "Secret bosses to fight",
         Options = SecretNames,
         CurrentOption = {},
@@ -2354,7 +2583,7 @@ do
         end,
     })
 
-    BossTab:CreateDropdown({
+    SecretTab:CreateDropdown({
         Name = "Secret boss movement",
         Options = { "Teleport", "Walk only", "Walk > Teleport" },
         CurrentOption = { "Teleport" },
@@ -2367,7 +2596,7 @@ do
         end,
     })
 
-    BossTab:CreateDropdown({
+    SecretTab:CreateDropdown({
         Name = "Secret boss difficulties",
         Options = DiffList,
         CurrentOption = { "Normal" },
@@ -2596,6 +2825,7 @@ do
         end,
     })
 
+;(function() -- own function = own register budget (the main chunk was out of local registers)
     -- ===== Reaper Statue prayer: walk to each statue and press its own ProximityPrompt =====
     -- No remotes are guessed: the game's own prompt handler sends the real request, and we stay in range.
     local PrayerTypes = { ReaperStatue = true }
@@ -2788,6 +3018,7 @@ do
             updateExtras()
         end,
     })
+end)()
 end
 
 -- ==================== Auto Roll state helpers (used by Pity Roll) ====================
