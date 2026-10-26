@@ -5,6 +5,13 @@
     - Cooldown is per boss AND per difficulty; difficulties unlock in order,
       so "All difficulties" farms ASCENDING (Easy -> chosen) for every boss.
     - Boss box empty = bosses are read from StoryData (only the ones you unlocked).
+
+    Changes in this version:
+    1) AutoRejoin hook is now controlled by getgenv().BlockAutoRejoin (turned off on close)
+       and wrapped with newcclosure + checkcaller.
+    2) UIS connections (drag) are stored and disconnected on close / re-run.
+    3) Log trimming removes the oldest label reliably (stored in a table).
+    4) Gap now decays back toward the base value after a while without "slow down".
 ]]
 
 local Players         = game:GetService("Players")
@@ -20,6 +27,10 @@ local R  = RS:WaitForChild("RollRemotes")
 local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 if getgenv().StoryFarmGui then pcall(function() getgenv().StoryFarmGui:Destroy() end) end
 if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
+if getgenv().StoryFarmConns then
+    for _, c in ipairs(getgenv().StoryFarmConns) do pcall(function() c:Disconnect() end) end
+end
+getgenv().StoryFarmConns = {}
 getgenv().StoryFarm = false
 
 -- ==================== Anti-AFK (Fixed Hook) ====================
@@ -27,6 +38,8 @@ do
     getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
     local token = getgenv().AntiAfkToken
     if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
+
+    getgenv().BlockAutoRejoin = true
 
     getgenv().AntiAfkConn = lp.Idled:Connect(function()
         VU:CaptureController()
@@ -62,19 +75,23 @@ do
         end
     end)
 
-    -- Hook only once per session to prevent stacking
+    -- Hook only once per session; the flag decides whether it blocks or not
     if hookmetamethod and getnamecallmethod and not getgenv().AutoRejoinHooked then
         pcall(function()
             local AutoRejoin = R:WaitForChild("AutoRejoin", 5)
             if AutoRejoin then
                 getgenv().AutoRejoinHooked = true
                 local old
-                old = hookmetamethod(game, "__namecall", function(self, ...)
-                    if getgenv().AntiAfkToken and self == AutoRejoin and getnamecallmethod() == "FireServer" then
+                local function handler(self, ...)
+                    if getgenv().BlockAutoRejoin
+                        and self == AutoRejoin
+                        and not (checkcaller and checkcaller())
+                        and getnamecallmethod() == "FireServer" then
                         return
                     end
                     return old(self, ...)
-                end)
+                end
+                old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(handler) or handler)
             end
         end)
     end
@@ -99,7 +116,9 @@ local KNOWN = {
 local S = {
     Team = 1, FightDelay = 4, RetryDelay = 2, MaxDoneTries = 5,
     All = true,
+    BaseGap = 4,
     Gap = 4,
+    GapDecayEvery = 300, -- seconds without "slow down" before lowering the gap by 1
     AntiLag = false,
     SilentRoll = false,
 }
@@ -157,21 +176,22 @@ local minB   = button(bar, "-", UDim2.new(1, -62, 0, 5), UDim2.fromOffset(24, 24
 local body = new("Frame", { Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 1, -34),
     BackgroundTransparency = 1, Parent = win })
 
--- Dragging
+-- Dragging (connections are stored so they can be disconnected on close)
 do
+    local conns = getgenv().StoryFarmConns
     local dragging, startPos, startMouse
-    bar.InputBegan:Connect(function(i)
+    conns[#conns + 1] = bar.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging, startPos, startMouse = true, win.Position, i.Position
         end
     end)
-    UIS.InputChanged:Connect(function(i)
+    conns[#conns + 1] = UIS.InputChanged:Connect(function(i)
         if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
             local d = i.Position - startMouse
             win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
     end)
-    UIS.InputEnded:Connect(function(i)
+    conns[#conns + 1] = UIS.InputEnded:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
@@ -384,16 +404,17 @@ new("UIListLayout", { Padding = UDim.new(0, 1), Parent = logF })
 new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingTop = UDim.new(0, 4), Parent = logF })
 
 local logCount = 0
+local logLabels = {}
 local function log(msg, col)
     logCount += 1
-    new("TextLabel", { Text = os.date("%H:%M:%S") .. "  " .. msg, Size = UDim2.new(1, -8, 0, 0),
+    local lbl = new("TextLabel", { Text = os.date("%H:%M:%S") .. "  " .. msg, Size = UDim2.new(1, -8, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, TextColor3 = col or C.text,
         Font = Enum.Font.Code, TextSize = 12, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = logCount, Parent = logF })
-    if logCount > 60 then
-        for _, c in ipairs(logF:GetChildren()) do
-            if c:IsA("TextLabel") then c:Destroy() break end
-        end
+    logLabels[#logLabels + 1] = lbl
+    while #logLabels > 60 do
+        local oldest = table.remove(logLabels, 1)
+        if oldest then oldest:Destroy() end
     end
     task.defer(function() logF.CanvasPosition = Vector2.new(0, 1e6) end)
 end
@@ -476,6 +497,7 @@ pcall(function() SD = require(RS:WaitForChild("StoryData", 5)) end)
 
 local nextAt, runId, lastCall = {}, 0, 0
 local progress, progAt = {}, {}
+local lastSlow = 0 -- os.clock() of the last "slow down" (or last gap decay step)
 
 local function keyOf(world, boss, diff) return world .. "|" .. boss .. "|" .. diff end
 
@@ -565,6 +587,15 @@ local function tallyRewards(res)
     end
 end
 
+-- Lowers the gap by 1s every GapDecayEvery seconds without a "slow down"
+local function decayGap()
+    if S.Gap > S.BaseGap and (os.clock() - lastSlow) >= S.GapDecayEvery then
+        S.Gap = math.max(S.BaseGap, S.Gap - 1)
+        lastSlow = os.clock()
+        log("Gap decreased -> " .. S.Gap .. "s", C.dim)
+    end
+end
+
 local function fight(w, boss, diff, alive)
     local gap = S.Gap - (os.clock() - lastCall)
     if gap > 0 then task.wait(gap) end
@@ -602,6 +633,7 @@ local function fight(w, boss, diff, alive)
     local ml = m:lower()
     if ml:find("slow down") then
         S.Gap = math.min(S.Gap + 2, 15)
+        lastSlow = os.clock()
         return false, "slow down -> gap " .. S.Gap .. "s", 8, "slow"
     end
     local wait = parseWait(m)
@@ -624,6 +656,7 @@ local function startFarm()
     local my = runId
     local function alive() return getgenv().StoryFarm and runId == my end
     setRunning(true)
+    lastSlow = os.clock()
     log("Farm started", C.good)
     task.spawn(function()
         while getgenv().StoryFarm and runId == my do
@@ -648,6 +681,7 @@ local function startFarm()
                                     kills[w.World] = (kills[w.World] or 0) + 1
                                     if res then tallyRewards(res) end
                                     refreshStats()
+                                    decayGap()
                                     nextAt[key] = os.clock() + 3540
                                 else
                                     nextAt[key] = os.clock() + (cd or 60)
@@ -666,6 +700,7 @@ local function startFarm()
                 end
             end
             if not did then
+                decayGap()
                 local soonest
                 for _, t in pairs(nextAt) do
                     if t > os.clock() and (not soonest or t < soonest) then soonest = t end
@@ -695,12 +730,16 @@ minB.MouseButton1Click:Connect(function()
     statsP.Visible = not minimized
     win.Size = minimized and UDim2.fromOffset(460, 34) or UDim2.fromOffset(460, 580)
 end)
+
 closeB.MouseButton1Click:Connect(function()
     runId += 1
     getgenv().StoryFarm = false
+    getgenv().BlockAutoRejoin = false -- the hook stays installed but stops blocking
     getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
     if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
     if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
+    for _, c in ipairs(getgenv().StoryFarmConns or {}) do pcall(function() c:Disconnect() end) end
+    getgenv().StoryFarmConns = {}
     gui:Destroy()
 end)
 
