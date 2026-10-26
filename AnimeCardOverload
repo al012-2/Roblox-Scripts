@@ -1,5 +1,5 @@
 --[[
-    Story Auto Farm (UI + Anti-AFK)
+    Story Auto Farm (UI + Anti-AFK + Anti-Lag + Weather Monitor)
     - StartStoryBattle(world, boss, difficulty, team) + StoryFightDone(GrantId)
     - Difficulty: 1=Easy 2=Medium 3=Hard 4=Extreme 5=Nightmare 6=Insanity
     - Cooldown is per boss AND per difficulty; difficulties unlock in order,
@@ -7,24 +7,22 @@
     - Boss box empty = bosses are read from StoryData (only the ones you unlocked).
 ]]
 
-local Players = game:GetService("Players")
-local RS      = game:GetService("ReplicatedStorage")
-local UIS     = game:GetService("UserInputService")
-local VU      = game:GetService("VirtualUser")
-local lp      = Players.LocalPlayer
-local R       = RS:WaitForChild("RollRemotes")
+local Players         = game:GetService("Players")
+local RS              = game:GetService("ReplicatedStorage")
+local UIS             = game:GetService("UserInputService")
+local VU              = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
+local HttpService     = game:GetService("HttpService")
+
+local lp = Players.LocalPlayer
+local R  = RS:WaitForChild("RollRemotes")
 
 local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 if getgenv().StoryFarmGui then pcall(function() getgenv().StoryFarmGui:Destroy() end) end
+if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
 getgenv().StoryFarm = false
 
--- ==================== Anti-AFK ====================
--- Two separate idle systems exist:
---  1) Roblox's own 20 min kick  -> VirtualUser on Idled.
---  2) The game's AutoRejoinClient: 15 min without REAL input (UserInputService) ->
---     "Still there?" -> 30s -> rejoin. VirtualUser does not count as input for it,
---     so we press its "I'm here" button every minute, and drop its AutoRejoin
---     FireServer call as a second layer.
+-- ==================== Anti-AFK (Fixed Hook) ====================
 do
     getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
     local token = getgenv().AntiAfkToken
@@ -64,17 +62,20 @@ do
         end
     end)
 
-    if hookmetamethod and getnamecallmethod then
+    -- Hook only once per session to prevent stacking
+    if hookmetamethod and getnamecallmethod and not getgenv().AutoRejoinHooked then
         pcall(function()
             local AutoRejoin = R:WaitForChild("AutoRejoin", 5)
-            local old
-            old = hookmetamethod(game, "__namecall", function(self, ...)
-                if getgenv().AntiAfkToken == token and self == AutoRejoin
-                    and getnamecallmethod() == "FireServer" then
-                    return
-                end
-                return old(self, ...)
-            end)
+            if AutoRejoin then
+                getgenv().AutoRejoinHooked = true
+                local old
+                old = hookmetamethod(game, "__namecall", function(self, ...)
+                    if getgenv().AntiAfkToken and self == AutoRejoin and getnamecallmethod() == "FireServer" then
+                        return
+                    end
+                    return old(self, ...)
+                end)
+            end
         end)
     end
 end
@@ -85,24 +86,25 @@ local DIFF = {
     { "Extreme", "x9" }, { "Nightmare", "x13" }, { "Insanity", "x19" },
 }
 local WORLDS = {
-    -- Diff = highest difficulty to farm. Bosses empty = auto (from StoryData).
     { World = "Namek",          Diff = 6, On = true,  Bosses = "" },
     { World = "InfinityCastle", Diff = 6, On = true,  Bosses = "" },
     { World = "Leaf",           Diff = 6, On = false, Bosses = "" },
     { World = "Dressrosa",      Diff = 6, On = false, Bosses = "" },
     { World = "Fuyuki",         Diff = 6, On = false, Bosses = "" },
 }
-local KNOWN = {   -- used only if the StoryData lookup fails
+local KNOWN = {
     Namek = { "Vegeta", "Frieza", "Goku" },
     InfinityCastle = { "Muzan" },
 }
 local S = {
     Team = 1, FightDelay = 4, RetryDelay = 2, MaxDoneTries = 5,
-    All = true,   -- true: farm EVERY difficulty from Easy up to the chosen one
-    Gap = 4,      -- min seconds between StartStoryBattle calls (auto-increases on "Slow down")
+    All = true,
+    Gap = 4,
+    AntiLag = false,
+    SilentRoll = false,
 }
 
-local kills, rewards, wins = {}, {}, 0   -- session stats
+local kills, rewards, wins = {}, {}, 0
 
 -- ==================== UI helpers ====================
 local C = {
@@ -110,6 +112,7 @@ local C = {
     row = Color3.fromRGB(28, 28, 40), accent = Color3.fromRGB(128, 90, 255),
     text = Color3.fromRGB(230, 230, 240), dim = Color3.fromRGB(150, 150, 170),
     good = Color3.fromRGB(70, 200, 120), bad = Color3.fromRGB(230, 80, 90),
+    warn = Color3.fromRGB(240, 180, 60),
 }
 
 local function new(class, props)
@@ -140,7 +143,7 @@ local gui = new("ScreenGui", { Name = "StoryFarmUI", ResetOnSpawn = false,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = parentGui })
 getgenv().StoryFarmGui = gui
 
-local win = new("Frame", { Size = UDim2.fromOffset(460, 540), Position = UDim2.new(0.5, -230, 0.5, -250),
+local win = new("Frame", { Size = UDim2.fromOffset(460, 580), Position = UDim2.new(0.5, -230, 0.5, -230),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, Parent = gui })
 corner(win, 10); stroke(win, C.accent, 1.5)
 
@@ -175,20 +178,25 @@ do
     end)
 end
 
--- ==================== Stats panel (above the window) ====================
-local TeleportService = game:GetService("TeleportService")
-local PH = 100
+-- ==================== Stats & Weather Panel (above window) ====================
+local PH = 118
 local statsP = new("Frame", { Position = UDim2.new(0, 0, 0, -(PH + 8)), Size = UDim2.new(1, 0, 0, PH),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, Parent = win })
 corner(statsP, 10); stroke(statsP, C.accent, 1.5)
+
 label(statsP, "Session stats", UDim2.fromOffset(12, 6), UDim2.new(1, -250, 0, 24),
     { Font = Enum.Font.GothamBold, TextSize = 15 })
 local resetB  = button(statsP, "Reset",      UDim2.new(1, -240, 0, 6), UDim2.fromOffset(56, 24), C.row)
 local rejoinB = button(statsP, "Rejoin",     UDim2.new(1, -178, 0, 6), UDim2.fromOffset(70, 24), C.accent)
 local hopB    = button(statsP, "Server Hop", UDim2.new(1, -102, 0, 6), UDim2.fromOffset(94, 24), C.accent)
 resetB.TextSize = 13; rejoinB.TextSize = 13; hopB.TextSize = 13
-local killsL = label(statsP, "Bosses killed: 0", UDim2.fromOffset(12, 32), UDim2.new(1, -24, 0, 18),
+
+local killsL = label(statsP, "Bosses killed: 0", UDim2.fromOffset(12, 32), UDim2.new(0.55, -12, 0, 18),
     { TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd })
+
+local weatherL = label(statsP, "Weather: Checking...", UDim2.new(0.55, 0, 0, 32), UDim2.new(0.45, -12, 0, 18),
+    { TextSize = 13, TextColor3 = C.warn, TextXAlignment = Enum.TextXAlignment.Right })
+
 local rewF = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 54), Size = UDim2.new(1, -16, 1, -60),
     BackgroundColor3 = Color3.fromRGB(12, 12, 18), BorderSizePixel = 0, ScrollBarThickness = 3,
     CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = statsP })
@@ -205,7 +213,7 @@ local function refreshStats()
         if (kills[w.World] or 0) > 0 then parts[#parts + 1] = w.World .. " " .. kills[w.World] end
     end
     killsL.Text = ("Bosses killed: %d%s"):format(wins,
-        #parts > 0 and ("   |   " .. table.concat(parts, "  ·  ")) or "")
+        #parts > 0 and (" | " .. table.concat(parts, " · ")) or "")
 
     local names = {}
     for n in pairs(rewards) do names[#names + 1] = n end
@@ -221,9 +229,6 @@ resetB.MouseButton1Click:Connect(function()
     refreshStats()
 end)
 
-local HttpService = game:GetService("HttpService")
-
--- re-run this script (and auto-start) after a teleport, if it is saved in the executor workspace
 local function queueRerun()
     pcall(function()
         if queue_on_teleport and isfile and isfile("StoryAutoFarm.lua") then
@@ -343,7 +348,7 @@ for idx, w in ipairs(WORLDS) do
     box:GetPropertyChangedSignal("Text"):Connect(function() w.Bosses = box.Text end)
 end
 
--- ==================== Controls + log ====================
+-- ==================== Controls + Extra Features + Log ====================
 local teamB = button(body, "Team " .. S.Team, UDim2.fromOffset(8, 304), UDim2.fromOffset(90, 34), C.row)
 teamB.MouseButton1Click:Connect(function()
     S.Team = S.Team % 4 + 1
@@ -361,10 +366,17 @@ end)
 
 local startB = button(body, "START", UDim2.fromOffset(282, 304), UDim2.new(1, -290, 0, 34), C.good)
 
-local status = label(body, "Idle", UDim2.fromOffset(10, 346), UDim2.new(1, -20, 0, 18),
+-- Second Row Controls (Anti-Lag & Silent Auto Roll)
+local antiLagB = button(body, "Anti-Lag: OFF", UDim2.fromOffset(8, 344), UDim2.fromOffset(218, 28), C.row)
+antiLagB.TextSize = 13
+
+local silentRollB = button(body, "Silent Roll: OFF", UDim2.fromOffset(234, 344), UDim2.new(1, -242, 0, 28), C.row)
+silentRollB.TextSize = 13
+
+local status = label(body, "Idle", UDim2.fromOffset(10, 378), UDim2.new(1, -20, 0, 18),
     { TextColor3 = C.dim, TextSize = 13 })
 
-local logF = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 368), Size = UDim2.new(1, -16, 1, -376),
+local logF = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 400), Size = UDim2.new(1, -16, 1, -408),
     BackgroundColor3 = Color3.fromRGB(12, 12, 18), BorderSizePixel = 0, ScrollBarThickness = 4,
     CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = body })
 corner(logF, 6)
@@ -385,6 +397,78 @@ local function log(msg, col)
     end
     task.defer(function() logF.CanvasPosition = Vector2.new(0, 1e6) end)
 end
+
+-- ==================== Anti-Lag & Silent Roll Logic ====================
+local function toggleEventConnections(ev, enable)
+    if ev and getconnections then
+        for _, conn in ipairs(getconnections(ev.OnClientEvent)) do
+            pcall(function()
+                if enable then conn:Enable() else conn:Disable() end
+            end)
+        end
+    end
+end
+
+antiLagB.MouseButton1Click:Connect(function()
+    S.AntiLag = not S.AntiLag
+    antiLagB.Text = "Anti-Lag: " .. (S.AntiLag and "ON" or "OFF")
+    antiLagB.BackgroundColor3 = S.AntiLag and C.accent or C.row
+
+    local enableEvents = not S.AntiLag
+    toggleEventConnections(RS:FindFirstChild("HitAnnounce"), enableEvents)
+    toggleEventConnections(RS:FindFirstChild("NewCardAlert"), enableEvents)
+    toggleEventConnections(R:FindFirstChild("PlayerRolled"), enableEvents)
+    toggleEventConnections(R:FindFirstChild("PlayerShowcase"), enableEvents)
+
+    log("Anti-Lag (Mute Roll/Hit Events): " .. (S.AntiLag and "ON" or "OFF"), S.AntiLag and C.good or C.dim)
+end)
+
+silentRollB.MouseButton1Click:Connect(function()
+    S.SilentRoll = not S.SilentRoll
+    silentRollB.Text = "Silent Roll: " .. (S.SilentRoll and "ON" or "OFF")
+    silentRollB.BackgroundColor3 = S.SilentRoll and C.accent or C.row
+
+    pcall(function()
+        if S.SilentRoll then
+            R.SetAutoRollPopup:FireServer(false)
+            R.SetAutoRollEnabled:FireServer(true)
+        else
+            R.SetAutoRollEnabled:FireServer(false)
+        end
+    end)
+    log("Silent Auto-Roll: " .. (S.SilentRoll and "ON" or "OFF"), S.SilentRoll and C.good or C.dim)
+end)
+
+-- ==================== Weather Monitor ====================
+local function updateWeatherUI(data)
+    if type(data) == "table" then
+        local wName = data.Name or data.Weather or "Clear"
+        local mult = data.LuckMultiplier or data.Luck or 1
+        weatherL.Text = ("Weather: %s (x%s)"):format(tostring(wName), tostring(mult))
+        weatherL.TextColor3 = (tonumber(mult) or 1) > 1 and C.good or C.dim
+    elseif type(data) == "string" then
+        weatherL.Text = "Weather: " .. data
+    end
+end
+
+task.spawn(function()
+    pcall(function()
+        local wData = R.GetWeather:InvokeServer()
+        if wData then updateWeatherUI(wData) end
+    end)
+end)
+
+pcall(function()
+    local wEv = R:WaitForChild("WeatherChanged", 5)
+    if wEv then
+        getgenv().WeatherConn = wEv.OnClientEvent:Connect(function(data)
+            updateWeatherUI(data)
+            if type(data) == "table" and data.Name then
+                log(("Weather changed -> %s (x%s Luck)"):format(tostring(data.Name), tostring(data.LuckMultiplier or 1)), C.warn)
+            end
+        end)
+    end
+end)
 
 -- ==================== Farm logic ====================
 local SD
@@ -415,7 +499,6 @@ local function dumpTable(t)
     return table.concat(o, ", ")
 end
 
--- GetStoryProgress = number of bosses beaten in that world (cached 60s)
 local function getProgress(world)
     if (progAt[world] or 0) + 60 < os.clock() then
         progAt[world] = os.clock()
@@ -425,7 +508,6 @@ local function getProgress(world)
     return progress[world]
 end
 
--- bosses unlock in order: boss i is available once i-1 bosses are beaten
 local function autoBosses(world)
     local out = {}
     pcall(function()
@@ -457,7 +539,6 @@ local function addReward(name, amount)
     rewards[name] = (rewards[name] or 0) + (tonumber(amount) or 1)
 end
 
--- WinItems = { {Potion="500 Pack", Amount=3}, ... } ; fallback: parse WinPackText ("+3x 500 Pack")
 local function tallyRewards(res)
     local got = false
     pcall(function()
@@ -484,7 +565,6 @@ local function tallyRewards(res)
     end
 end
 
--- returns: ok, info, cooldownSeconds, kind, res  (kind: cd | locked | lost | slow | err | unknown)
 local function fight(w, boss, diff, alive)
     local gap = S.Gap - (os.clock() - lastCall)
     if gap > 0 then task.wait(gap) end
@@ -568,7 +648,7 @@ local function startFarm()
                                     kills[w.World] = (kills[w.World] or 0) + 1
                                     if res then tallyRewards(res) end
                                     refreshStats()
-                                    nextAt[key] = os.clock() + 3540   -- ~1h cooldown; server corrects us if early
+                                    nextAt[key] = os.clock() + 3540
                                 else
                                     nextAt[key] = os.clock() + (cd or 60)
                                     if kind == "locked" then
@@ -577,7 +657,7 @@ local function startFarm()
                                         end
                                         break
                                     elseif kind ~= "cd" then
-                                        break   -- lost / slow / error: don't push to harder difficulties now
+                                        break
                                     end
                                 end
                             end
@@ -613,17 +693,18 @@ minB.MouseButton1Click:Connect(function()
     minimized = not minimized
     body.Visible = not minimized
     statsP.Visible = not minimized
-    win.Size = minimized and UDim2.fromOffset(460, 34) or UDim2.fromOffset(460, 540)
+    win.Size = minimized and UDim2.fromOffset(460, 34) or UDim2.fromOffset(460, 580)
 end)
 closeB.MouseButton1Click:Connect(function()
     runId += 1
     getgenv().StoryFarm = false
     getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
     if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
+    if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
     gui:Destroy()
 end)
 
-log("Ready. Anti-AFK on. All difficulties = Easy up to the chosen one", C.dim)
+log("Ready. Anti-AFK on. Anti-Lag & Weather Monitor loaded.", C.dim)
 
 if getgenv().StoryFarmAutoStart then
     getgenv().StoryFarmAutoStart = nil
