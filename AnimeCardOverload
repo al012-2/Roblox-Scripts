@@ -12,14 +12,29 @@
     2) UIS connections (drag) are stored and disconnected on close / re-run.
     3) Log trimming removes the oldest label reliably (stored in a table).
     4) Gap now decays back toward the base value after a while without "slow down".
+    5) Up to 2 fights at the same time (Fights button). All remote calls share one
+       throttle, and each boss/difficulty is claimed by only one worker at a time.
+    6) StoryFightDone is called on the remote named in the reply (GrantRemote), like the game does.
+    7) "Towers" tab: Battle Tower auto-farm (Limitless / Malevolent / ...). It starts hidden runs
+       through the game's own functions, so the game's AFK-rejoin watcher never fights with us.
 ]]
 
+-- v2 changes:
+-- 9)  A lost fight now also pauses the higher difficulties of that boss (they are locked anyway).
+-- 10) Settings (worlds, difficulty, bosses, team, fights, all-diffs, towers) are saved to
+--     StoryAutoFarmSettings.json every 10s and on close, and loaded on start.
+-- 11) Cooldowns are saved too, so after Rejoin / Server Hop no requests are wasted on bosses
+--     that are still cooling down.
+-- 12) "3D Render" button turns off 3D rendering (big CPU/GPU saver for AFK farming).
+-- 13) Auto re-run after Rejoin uses getgenv().StoryFarmFile (default "StoryAutoFarm.lua"),
+--     so a different file name works: getgenv().StoryFarmFile = "MyName.lua" before running.
 local Players         = game:GetService("Players")
 local RS              = game:GetService("ReplicatedStorage")
 local UIS             = game:GetService("UserInputService")
 local VU              = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
 local HttpService     = game:GetService("HttpService")
+local RunService      = game:GetService("RunService")
 
 local lp = Players.LocalPlayer
 local R  = RS:WaitForChild("RollRemotes")
@@ -32,6 +47,7 @@ if getgenv().StoryFarmConns then
 end
 getgenv().StoryFarmConns = {}
 getgenv().StoryFarm = false
+getgenv().TowerFarm = false
 
 -- ==================== Anti-AFK (Fixed Hook) ====================
 do
@@ -121,9 +137,36 @@ local S = {
     GapDecayEvery = 300, -- seconds without "slow down" before lowering the gap by 1
     AntiLag = false,
     SilentRoll = false,
+    Workers = 2, -- how many fights run at the same time (1 or 2)
 }
 
 local kills, rewards, wins = {}, {}, 0
+local tparts = 0 -- tower parts cleared this session
+
+local TW, TS
+local SCRIPT_FILE = getgenv().StoryFarmFile or "StoryAutoFarm.lua"
+local CFG_FILE = "StoryAutoFarmSettings.json"
+local CFG = {}
+pcall(function()
+    if isfile and readfile and isfile(CFG_FILE) then
+        local d = HttpService:JSONDecode(readfile(CFG_FILE))
+        if type(d) == "table" then CFG = d end
+    end
+end)
+do
+    local cw = type(CFG.Worlds) == "table" and CFG.Worlds or {}
+    for _, w in ipairs(WORLDS) do
+        local c = cw[w.World]
+        if type(c) == "table" then
+            if type(c.On) == "boolean" then w.On = c.On end
+            if type(c.Diff) == "number" and DIFF[c.Diff] then w.Diff = c.Diff end
+            if type(c.Bosses) == "string" then w.Bosses = c.Bosses end
+        end
+    end
+    if type(CFG.Team) == "number" and CFG.Team >= 1 and CFG.Team <= 4 then S.Team = CFG.Team end
+    if type(CFG.All) == "boolean" then S.All = CFG.All end
+    if CFG.Workers == 1 or CFG.Workers == 2 then S.Workers = CFG.Workers end
+end
 
 -- ==================== UI helpers ====================
 local C = {
@@ -232,8 +275,9 @@ local function refreshStats()
     for _, w in ipairs(WORLDS) do
         if (kills[w.World] or 0) > 0 then parts[#parts + 1] = w.World .. " " .. kills[w.World] end
     end
-    killsL.Text = ("Bosses killed: %d%s"):format(wins,
-        #parts > 0 and (" | " .. table.concat(parts, " · ")) or "")
+    killsL.Text = ("Bosses killed: %d%s%s"):format(wins,
+        #parts > 0 and (" | " .. table.concat(parts, " · ")) or "",
+        tparts > 0 and (" | Tower parts " .. tparts) or "")
 
     local names = {}
     for n in pairs(rewards) do names[#names + 1] = n end
@@ -245,15 +289,15 @@ local function refreshStats()
 end
 
 resetB.MouseButton1Click:Connect(function()
-    wins, kills, rewards = 0, {}, {}
+    wins, kills, rewards, tparts = 0, {}, {}, 0
     refreshStats()
 end)
 
 local function queueRerun()
     pcall(function()
-        if queue_on_teleport and isfile and isfile("StoryAutoFarm.lua") then
-            queue_on_teleport(('getgenv().StoryFarmAutoStart=%s; loadstring(readfile("StoryAutoFarm.lua"))()')
-                :format(tostring(getgenv().StoryFarm == true)))
+        if queue_on_teleport and isfile and isfile(SCRIPT_FILE) then
+            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; loadstring(readfile(%q))()')
+                :format(SCRIPT_FILE, tostring(getgenv().StoryFarm == true), tostring(getgenv().TowerFarm == true), SCRIPT_FILE))
         end
     end)
 end
@@ -331,11 +375,16 @@ hopB.MouseButton1Click:Connect(function()
     end)
 end)
 
+-- ==================== Panes (Story / Towers) ====================
+local storyPane = new("Frame", { Size = UDim2.new(1, 0, 0, 376), BackgroundTransparency = 1, Parent = body })
+local towerPane = new("Frame", { Size = UDim2.new(1, 0, 0, 376), BackgroundTransparency = 1,
+    Visible = false, Parent = body })
+
 -- ==================== World rows ====================
 for idx, w in ipairs(WORLDS) do
     local y = 8 + (idx - 1) * 58
     local row = new("Frame", { Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 52),
-        BackgroundColor3 = C.row, BorderSizePixel = 0, Parent = body })
+        BackgroundColor3 = C.row, BorderSizePixel = 0, Parent = storyPane })
     corner(row, 8)
 
     local chk = button(row, w.On and "✓" or "", UDim2.fromOffset(8, 6), UDim2.fromOffset(24, 24),
@@ -369,29 +418,43 @@ for idx, w in ipairs(WORLDS) do
 end
 
 -- ==================== Controls + Extra Features + Log ====================
-local teamB = button(body, "Team " .. S.Team, UDim2.fromOffset(8, 304), UDim2.fromOffset(90, 34), C.row)
+local teamB = button(storyPane, "Team " .. S.Team, UDim2.fromOffset(8, 304), UDim2.fromOffset(68, 34), C.row)
+teamB.TextSize = 13
 teamB.MouseButton1Click:Connect(function()
     S.Team = S.Team % 4 + 1
     teamB.Text = "Team " .. S.Team
 end)
 
-local allB = button(body, "All difficulties: ON", UDim2.fromOffset(104, 304), UDim2.fromOffset(170, 34), C.accent)
+local fightsB = button(storyPane, "Fights: " .. S.Workers, UDim2.fromOffset(80, 304), UDim2.fromOffset(84, 34), C.accent)
+fightsB.TextSize = 13
+
+local allB = button(storyPane, "All diffs: " .. (S.All and "ON" or "OFF"), UDim2.fromOffset(168, 304), UDim2.fromOffset(106, 34), S.All and C.accent or C.row)
 allB.TextSize = 13
 allB.MouseButton1Click:Connect(function()
     S.All = not S.All
-    allB.Text = "All difficulties: " .. (S.All and "ON" or "OFF")
+    allB.Text = "All diffs: " .. (S.All and "ON" or "OFF")
     allB.BackgroundColor3 = S.All and C.accent or C.row
     for _, w in ipairs(WORLDS) do w.refresh() end
 end)
 
-local startB = button(body, "START", UDim2.fromOffset(282, 304), UDim2.new(1, -290, 0, 34), C.good)
+local startB = button(storyPane, "START", UDim2.fromOffset(282, 304), UDim2.new(1, -290, 0, 34), C.good)
 
 -- Second Row Controls (Anti-Lag & Silent Auto Roll)
-local antiLagB = button(body, "Anti-Lag: OFF", UDim2.fromOffset(8, 344), UDim2.fromOffset(218, 28), C.row)
+local antiLagB = button(storyPane, "Anti-Lag: OFF", UDim2.fromOffset(8, 344), UDim2.fromOffset(142, 28), C.row)
 antiLagB.TextSize = 13
 
-local silentRollB = button(body, "Silent Roll: OFF", UDim2.fromOffset(234, 344), UDim2.new(1, -242, 0, 28), C.row)
+local silentRollB = button(storyPane, "Silent Roll: OFF", UDim2.fromOffset(154, 344), UDim2.fromOffset(142, 28), C.row)
 silentRollB.TextSize = 13
+
+local renderB = button(storyPane, "3D Render: ON", UDim2.fromOffset(300, 344), UDim2.new(1, -308, 0, 28), C.row)
+renderB.TextSize = 13
+local render3d = true
+renderB.MouseButton1Click:Connect(function()
+    render3d = not render3d
+    pcall(function() RunService:Set3dRenderingEnabled(render3d) end)
+    renderB.Text = "3D Render: " .. (render3d and "ON" or "OFF")
+    renderB.BackgroundColor3 = render3d and C.row or C.accent
+end)
 
 local status = label(body, "Idle", UDim2.fromOffset(10, 378), UDim2.new(1, -20, 0, 18),
     { TextColor3 = C.dim, TextSize = 13 })
@@ -495,7 +558,43 @@ end)
 local SD
 pcall(function() SD = require(RS:WaitForChild("StoryData", 5)) end)
 
-local nextAt, runId, lastCall = {}, 0, 0
+local nextAt, runId = {}, 0
+do
+    local cd = type(CFG.Cooldowns) == "table" and CFG.Cooldowns or {}
+    local nowT = os.time()
+    for k, exp in pairs(cd) do
+        if type(exp) == "number" and exp > nowT then nextAt[k] = os.clock() + (exp - nowT) end
+    end
+end
+
+local function saveSettings()
+    if not writefile then return end
+    pcall(function()
+        local d = { Worlds = {}, Team = S.Team, All = S.All, Workers = S.Workers,
+            Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First }
+        for _, w in ipairs(WORLDS) do
+            d.Worlds[w.World] = { On = w.On, Diff = w.Diff, Bosses = w.Bosses }
+        end
+        local nowC, nowT = os.clock(), os.time()
+        for k, t in pairs(nextAt) do
+            if t > nowC and t - nowC < 86400 then d.Cooldowns[k] = nowT + math.floor(t - nowC) end
+        end
+        for _, tw in ipairs(TW or {}) do d.Towers[tw.Id] = tw.On end
+        writefile(CFG_FILE, HttpService:JSONEncode(d))
+    end)
+end
+local inFlight = {}  -- keys of fights currently running
+local wstatus = {}   -- per-worker status text
+local nextSlot = 0   -- shared throttle: next time a remote call is allowed
+
+-- One shared throttle for every worker so two fights never trip "slow down" together
+local function throttle(alive)
+    local now = os.clock()
+    local slot = math.max(now, nextSlot)
+    nextSlot = slot + S.Gap
+    if slot > now then task.wait(slot - now) end
+    return (not alive) or alive()
+end
 local progress, progAt = {}, {}
 local lastSlow = 0 -- os.clock() of the last "slow down" (or last gap decay step)
 
@@ -597,10 +696,7 @@ local function decayGap()
 end
 
 local function fight(w, boss, diff, alive)
-    local gap = S.Gap - (os.clock() - lastCall)
-    if gap > 0 then task.wait(gap) end
-    if alive and not alive() then return false, "stopped", 0, "stop" end
-    lastCall = os.clock()
+    if not throttle(alive) then return false, "stopped", 0, "stop" end
 
     local r = table.pack(pcall(function()
         return R.StartStoryBattle:InvokeServer(w.World, boss, diff, S.Team)
@@ -613,10 +709,13 @@ local function fight(w, boss, diff, alive)
             return false, "lost (Winner=" .. tostring(res.Winner) .. ")", 600, "lost"
         end
         task.wait(S.FightDelay)
+        throttle()
         for _ = 1, S.MaxDoneTries do
-            local ok, done = pcall(function() return R.StoryFightDone:InvokeServer(res.GrantId) end)
+            local ok, done = pcall(function()
+                local rem = R:FindFirstChild(res.GrantRemote or "StoryFightDone") or R.StoryFightDone
+                return rem:InvokeServer(res.GrantId)
+            end)
             if ok and done then
-                lastCall = os.clock()
                 local pack = type(res.WinPackText) == "string" and (" " .. res.WinPackText) or ""
                 return true, "WIN" .. pack .. " (claimed)", nil, nil, res
             end
@@ -651,67 +750,107 @@ local function setRunning(on)
     if not on then status.Text = "Idle" end
 end
 
+local function updateStatus()
+    local parts = {}
+    for i = 1, 2 do
+        if wstatus[i] then parts[#parts + 1] = wstatus[i] end
+    end
+    status.Text = table.concat(parts, "  ||  ") .. (" | wins %d"):format(wins)
+end
+
+-- Picks the first job that is off cooldown and not already running, and claims it
+local function pickJob()
+    for _, w in ipairs(WORLDS) do
+        if w.On then
+            for _, boss in ipairs(bossList(w)) do
+                local lo = S.All and 1 or w.Diff
+                for diff = lo, w.Diff do
+                    local key = keyOf(w.World, boss, diff)
+                    if not inFlight[key] and (nextAt[key] or 0) <= os.clock() then
+                        inFlight[key] = true
+                        return w, boss, diff, key
+                    end
+                end
+            end
+        end
+    end
+end
+
+local spawnWorker -- set by startFarm so the Fights button can add a worker mid-run
+
 local function startFarm()
     runId += 1
     local my = runId
     local function alive() return getgenv().StoryFarm and runId == my end
+    local act = {}
+    inFlight = {}
+    wstatus = {}
     setRunning(true)
     lastSlow = os.clock()
-    log("Farm started", C.good)
-    task.spawn(function()
-        while getgenv().StoryFarm and runId == my do
-            local did = false
-            for _, w in ipairs(WORLDS) do
-                if w.On then
-                    for _, boss in ipairs(bossList(w)) do
-                        local lo = S.All and 1 or w.Diff
-                        for diff = lo, w.Diff do
-                            if not (getgenv().StoryFarm and runId == my) then return end
-                            local key = keyOf(w.World, boss, diff)
-                            if (nextAt[key] or 0) <= os.clock() then
-                                status.Text = ("Fighting %s / %s [%s] | wins %d"):format(
-                                    w.World, boss, DIFF[diff][1], wins)
-                                local ok, info, cd, kind, res = fight(w, boss, diff, alive)
-                                if kind == "stop" then return end
-                                log(("%s/%s [%s] %s"):format(w.World, boss, DIFF[diff][1], tostring(info)),
-                                    ok and C.good or C.dim)
-                                did = true
-                                if ok then
-                                    wins += 1
-                                    kills[w.World] = (kills[w.World] or 0) + 1
-                                    if res then tallyRewards(res) end
-                                    refreshStats()
-                                    decayGap()
-                                    nextAt[key] = os.clock() + 3540
-                                else
-                                    nextAt[key] = os.clock() + (cd or 60)
-                                    if kind == "locked" then
-                                        for d2 = diff, w.Diff do
-                                            nextAt[keyOf(w.World, boss, d2)] = os.clock() + (cd or 600)
-                                        end
-                                        break
-                                    elseif kind ~= "cd" then
-                                        break
-                                    end
-                                end
+    log(("Farm started (%d fight%s at once)"):format(S.Workers, S.Workers > 1 and "s" or ""), C.good)
+
+    spawnWorker = function(idx)
+        if act[idx] then return end
+        act[idx] = true
+        task.spawn(function()
+            while alive() and idx <= S.Workers do
+                local w, boss, diff, key = pickJob()
+                if not w then
+                    decayGap()
+                    local soonest
+                    for _, t in pairs(nextAt) do
+                        if t > os.clock() and (not soonest or t < soonest) then soonest = t end
+                    end
+                    if idx == 1 then
+                        wstatus[1] = "#1 " .. (soonest
+                            and ("All on cooldown, next in %ds"):format(math.ceil(soonest - os.clock()))
+                            or (next(inFlight) and "Waiting for the other fight" or "No bosses available"))
+                    else
+                        wstatus[idx] = nil
+                    end
+                    if alive() then updateStatus() end
+                    task.wait(2)
+                else
+                    wstatus[idx] = ("#%d %s/%s [%s]"):format(idx, w.World, boss, DIFF[diff][1])
+                    updateStatus()
+                    local ok, info, cd, kind, res = fight(w, boss, diff, alive)
+                    inFlight[key] = nil
+                    if kind == "stop" then break end
+                    log(("#%d %s/%s [%s] %s"):format(idx, w.World, boss, DIFF[diff][1], tostring(info)),
+                        ok and C.good or C.dim)
+                    if ok then
+                        wins += 1
+                        kills[w.World] = (kills[w.World] or 0) + 1
+                        if res then tallyRewards(res) end
+                        refreshStats()
+                        decayGap()
+                        nextAt[key] = os.clock() + 3540
+                    else
+                        nextAt[key] = os.clock() + (cd or 60)
+                        if kind == "locked" or kind == "lost" then
+                            for d2 = diff, w.Diff do
+                                nextAt[keyOf(w.World, boss, d2)] = os.clock() + (cd or 600)
                             end
                         end
                     end
                 end
             end
-            if not did then
-                decayGap()
-                local soonest
-                for _, t in pairs(nextAt) do
-                    if t > os.clock() and (not soonest or t < soonest) then soonest = t end
-                end
-                status.Text = (soonest and ("All on cooldown, next in %ds"):format(math.ceil(soonest - os.clock()))
-                    or "No bosses available") .. (" | wins %d"):format(wins)
-                task.wait(2)
-            end
-        end
-    end)
+            wstatus[idx] = nil
+            act[idx] = nil
+            if alive() then updateStatus() end
+        end)
+    end
+
+    for i = 1, S.Workers do spawnWorker(i) end
 end
+
+fightsB.MouseButton1Click:Connect(function()
+    S.Workers = S.Workers % 2 + 1
+    fightsB.Text = "Fights: " .. S.Workers
+    if getgenv().StoryFarm and spawnWorker then
+        for i = 1, S.Workers do spawnWorker(i) end
+    end
+end)
 
 startB.MouseButton1Click:Connect(function()
     if getgenv().StoryFarm then
@@ -723,6 +862,350 @@ startB.MouseButton1Click:Connect(function()
     end
 end)
 
+-- ==================== Battle Towers ====================
+-- Runs go through the game's own functions (hidden battle, same path as the AFK rejoin),
+-- so the game's client never starts a second loop on the same run.
+local GG = _G
+pcall(function()
+    local g = getrenv and getrenv()._G
+    if type(g) == "table" and (g.ResumeTowerWithRetry or g.StartTowerFight or g.GetAfkRun) then GG = g end
+end)
+
+local BTD
+pcall(function() BTD = require(RS:WaitForChild("BattleTowerData", 5)) end)
+
+TW = {}
+do
+    local src = (BTD and BTD.Towers) or {
+        { Id = "Limitless", Name = "Limitless Tower", Parts = 25 },
+        { Id = "Malevolent", Name = "Malevolent Tower", Parts = 25 },
+    }
+    for i, t in ipairs(src) do
+        if i > 4 then break end
+        TW[#TW + 1] = { Id = t.Id, Name = t.Name or t.Id, Parts = t.Parts or 25, On = (i == 1) }
+    end
+end
+
+TS = { Team = nil, First = true, MaxDeaths = 3 }
+if type(CFG.Towers) == "table" then
+    for _, tw in ipairs(TW) do
+        if type(CFG.Towers[tw.Id]) == "boolean" then tw.On = CFG.Towers[tw.Id] end
+    end
+end
+if type(CFG.TowerTeam) == "number" and CFG.TowerTeam >= 1 and CFG.TowerTeam <= 4 then TS.Team = CFG.TowerTeam end
+if type(CFG.TowerFirst) == "boolean" then TS.First = CFG.TowerFirst end
+local tGen = (getgenv().TowerGen or 0) + 1
+getgenv().TowerGen = tGen
+local tRun, tState, tStateAt, tStale = 0, nil, 0, false
+local tNext, tDeaths = {}, {}
+local currentTower
+
+local function fmtWait(sec)
+    sec = tonumber(sec) or 0
+    if sec == math.huge then return "a long time" end
+    sec = math.max(0, math.floor(sec))
+    local h = math.floor(sec / 3600)
+    local m = math.floor((sec % 3600) / 60)
+    if h > 0 then return h .. "h " .. m .. "m" end
+    if m > 0 then return m .. "m" end
+    return sec .. "s"
+end
+
+local function refreshTowerState(force)
+    if not (force or tStale) and tState and os.clock() - tStateAt < 30 then return end
+    tStale = false
+    local ok, res = pcall(function() return R.GetBattleTowers:InvokeServer() end)
+    if ok and type(res) == "table" then tState, tStateAt = res, os.clock() end
+end
+
+-- first part that can be started now, soonest repeat wait (seconds), parts cleared
+local function towerStatus(tw)
+    local st = tState and tState.Towers and tState.Towers[tw.Id]
+    local cleared = st and tonumber(st.Cleared) or 0
+    local top = math.min(tw.Parts, TS.First and (cleared + 1) or cleared)
+    local ready, soonest
+    for p = 1, top do
+        local wait = 0
+        if p <= cleared then
+            local r = st and st.RepeatIn and tonumber(st.RepeatIn[tostring(p)])
+            if r then wait = r - (os.clock() - tStateAt) end
+        end
+        if wait <= 0 then
+            ready = ready or p
+        elseif not soonest or wait < soonest then
+            soonest = wait
+        end
+    end
+    return ready, soonest, cleared
+end
+
+-- ---- UI ----
+for idx, tw in ipairs(TW) do
+    local y = 8 + (idx - 1) * 58
+    local row = new("Frame", { Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 52),
+        BackgroundColor3 = C.row, BorderSizePixel = 0, Parent = towerPane })
+    corner(row, 8)
+    local chk = button(row, tw.On and "✓" or "", UDim2.fromOffset(8, 6), UDim2.fromOffset(24, 24),
+        tw.On and C.good or Color3.fromRGB(60, 60, 78))
+    chk.MouseButton1Click:Connect(function()
+        tw.On = not tw.On
+        chk.Text = tw.On and "✓" or ""
+        chk.BackgroundColor3 = tw.On and C.good or Color3.fromRGB(60, 60, 78)
+    end)
+    label(row, tw.Name, UDim2.fromOffset(40, 6), UDim2.new(1, -48, 0, 24),
+        { Font = Enum.Font.GothamBold, TextSize = 15 })
+    tw.info = label(row, "Loading...", UDim2.fromOffset(10, 32), UDim2.new(1, -20, 0, 16),
+        { TextSize = 12, TextColor3 = C.dim, Font = Enum.Font.Code, TextTruncate = Enum.TextTruncate.AtEnd })
+end
+
+local tTeamB = button(towerPane, "Team: " .. (TS.Team and tostring(TS.Team) or "Auto"), UDim2.fromOffset(8, 304), UDim2.fromOffset(110, 34), C.row)
+tTeamB.TextSize = 13
+tTeamB.MouseButton1Click:Connect(function()
+    if TS.Team == nil then TS.Team = 1
+    elseif TS.Team >= 4 then TS.Team = nil
+    else TS.Team += 1 end
+    tTeamB.Text = "Team: " .. (TS.Team and tostring(TS.Team) or "Auto")
+end)
+
+local tFirstB = button(towerPane, "First clears: " .. (TS.First and "ON" or "OFF"), UDim2.fromOffset(122, 304), UDim2.fromOffset(150, 34), TS.First and C.accent or C.row)
+tFirstB.TextSize = 13
+tFirstB.MouseButton1Click:Connect(function()
+    TS.First = not TS.First
+    tFirstB.Text = "First clears: " .. (TS.First and "ON" or "OFF")
+    tFirstB.BackgroundColor3 = TS.First and C.accent or C.row
+end)
+
+local tStartB = button(towerPane, "START", UDim2.fromOffset(282, 304), UDim2.new(1, -290, 0, 34), C.good)
+
+local tSpeedB = button(towerPane, "Max Battle Speed", UDim2.fromOffset(8, 344), UDim2.fromOffset(218, 28), C.row)
+tSpeedB.TextSize = 13
+local tEndB = button(towerPane, "End current run", UDim2.fromOffset(234, 344), UDim2.new(1, -242, 0, 28), C.row)
+tEndB.TextSize = 13
+
+local tStatus = label(body, "Idle", UDim2.fromOffset(10, 378), UDim2.new(1, -20, 0, 18),
+    { TextColor3 = C.dim, TextSize = 13, Visible = false })
+
+local function updateTowerRows()
+    for _, tw in ipairs(TW) do
+        local ready, soonest, cleared = towerStatus(tw)
+        local txt = ("Cleared %d/%d"):format(cleared, tw.Parts)
+        local pausedFor = (tNext[tw.Id] or 0) - os.clock()
+        if pausedFor > 0 then
+            txt = txt .. " | paused " .. fmtWait(pausedFor)
+        elseif ready then
+            txt = txt .. " | ready: Part " .. ready
+        elseif soonest then
+            txt = txt .. " | next repeat in " .. fmtWait(soonest)
+        else
+            txt = txt .. " | nothing to run"
+        end
+        tw.info.Text = txt
+    end
+end
+
+-- ---- tabs ----
+local tabStory = button(bar, "Story", UDim2.fromOffset(150, 5), UDim2.fromOffset(66, 24), C.accent)
+local tabTower = button(bar, "Towers", UDim2.fromOffset(220, 5), UDim2.fromOffset(72, 24), C.row)
+tabStory.TextSize = 13
+tabTower.TextSize = 13
+local function showTab(name)
+    local story = name == "story"
+    storyPane.Visible = story
+    towerPane.Visible = not story
+    status.Visible = story
+    tStatus.Visible = not story
+    tabStory.BackgroundColor3 = story and C.accent or C.row
+    tabTower.BackgroundColor3 = story and C.row or C.accent
+    if not story then
+        refreshTowerState(false)
+        updateTowerRows()
+    end
+end
+tabStory.MouseButton1Click:Connect(function() showTab("story") end)
+tabTower.MouseButton1Click:Connect(function() showTab("tower") end)
+
+-- ---- results from the game's own tower flow ----
+if GG and type(GG.ShowBattleTowerResult) == "function" and not getgenv().TowerResultHooked then
+    getgenv().TowerResultHooked = true
+    local orig = GG.ShowBattleTowerResult
+    GG.ShowBattleTowerResult = function(...)
+        local cb = getgenv().TowerOnResult
+        if cb then pcall(cb, ...) end
+        return orig(...)
+    end
+end
+
+getgenv().TowerOnResult = function(res)
+    if type(res) ~= "table" then return end
+    local id = res.BattleTower or currentTower or "?"
+    if res.Died then
+        tDeaths[id] = (tDeaths[id] or 0) + 1
+        log(("[T] Defeated on %s Part %s wave %s (%d/%d)"):format(
+            tostring(id), tostring(res.Part), tostring(res.Wave), tDeaths[id], TS.MaxDeaths), C.bad)
+        if tDeaths[id] >= TS.MaxDeaths then
+            tDeaths[id] = 0
+            tNext[id] = os.clock() + 1800
+            log("[T] " .. tostring(id) .. " paused for 30m after repeated defeats - try another team", C.warn)
+        else
+            tNext[id] = os.clock() + 30
+        end
+        tStale = true
+    elseif res.AllOnCooldown then
+        local n = tonumber(res.NextReadyIn)
+        log("[T] All parts are cooling down" .. ((n and n < math.huge) and (", next in " .. fmtWait(n)) or ""), C.dim)
+        tStale = true
+    elseif res.Part then
+        tparts += 1
+        tDeaths[id] = 0
+        tStale = true
+        refreshStats()
+        log(("[T] %s Part %s cleared%s"):format(tostring(id), tostring(res.Part),
+            res.FirstClear and " (first clear)" or ""), C.good)
+    end
+    if res.Artifact then log("[T] Got artifact: " .. tostring(res.Artifact), C.good) end
+    if res.UnlockedCard then log("[T] Unlocked card: " .. tostring(res.UnlockedCard), C.good) end
+end
+
+-- is a battle tower run active? (id = that tower, nil = any battle tower)
+local function runInfo(id)
+    local ok, r = pcall(function() return GG.GetAfkRun and GG.GetAfkRun() end)
+    if not (ok and type(r) == "table") then return nil end
+    for _, e in ipairs({ r, r.Also }) do
+        if type(e) == "table" and type(e.Tower) == "string" then
+            if id == nil then
+                if BTD and BTD.Get and BTD.Get(e.Tower) then return e.Tower end
+            elseif e.Tower == id then
+                return e.Tower
+            end
+        end
+    end
+    return nil
+end
+
+local function runTower(tw, part, alive)
+    local opts = { Part = part }
+    if TS.Team then opts.Team = TS.Team end
+    GG.ResumeTowerWithRetry(true, tw.Id, opts)
+    local t0, seen = os.clock(), false
+    while alive() do
+        task.wait(2)
+        if runInfo(tw.Id) then
+            seen = true
+            tStatus.Text = ("Running %s from Part %d | parts cleared %d"):format(tw.Name, part, tparts)
+            updateTowerRows()
+        elseif seen then
+            return true
+        elseif os.clock() - t0 > 90 then
+            return false, "the run didn't start (see the game's error toast)"
+        end
+    end
+    return seen, "stopped"
+end
+
+local function setTRunning(on)
+    getgenv().TowerFarm = on
+    tStartB.Text = on and "STOP" or "START"
+    tStartB.BackgroundColor3 = on and C.bad or C.good
+    if not on then tStatus.Text = "Idle" end
+end
+
+local function startTowers()
+    if not (GG and GG.ResumeTowerWithRetry and GG.GetAfkRun) then
+        log("[T] Couldn't find the game's tower functions (_G.ResumeTowerWithRetry / GetAfkRun)", C.bad)
+        return
+    end
+    tRun += 1
+    local my = tRun
+    local function alive()
+        return getgenv().TowerFarm and tRun == my and getgenv().TowerGen == tGen
+    end
+    setTRunning(true)
+    log("[T] Tower farm started", C.good)
+    task.spawn(function()
+        while alive() do
+            refreshTowerState(false)
+            updateTowerRows()
+            local busy = false
+            for _, tw in ipairs(TW) do
+                if not alive() then break end
+                if tw.On and (tNext[tw.Id] or 0) <= os.clock() then
+                    local part = towerStatus(tw)
+                    if part then
+                        busy = true
+                        local other = runInfo(nil)
+                        if other then
+                            tStatus.Text = "A tower run is already active (" .. other .. "), waiting..."
+                            task.wait(10)
+                            break
+                        end
+                        currentTower = tw.Id
+                        log(("[T] Starting %s from Part %d"):format(tw.Name, part), C.text)
+                        local ok, why = runTower(tw, part, alive)
+                        currentTower = nil
+                        tStale = true
+                        if not alive() then break end
+                        if not ok then
+                            tNext[tw.Id] = os.clock() + 300
+                            log(("[T] %s: %s - retry in 5m"):format(tw.Name, tostring(why)), C.warn)
+                        end
+                        task.wait(5)
+                        break
+                    end
+                end
+            end
+            if not busy then
+                local soonest
+                for _, tw in ipairs(TW) do
+                    if tw.On then
+                        local _, s = towerStatus(tw)
+                        local n = (tNext[tw.Id] or 0) - os.clock()
+                        if n > 0 then s = math.min(s or math.huge, n) end
+                        if s and (not soonest or s < soonest) then soonest = s end
+                    end
+                end
+                tStatus.Text = soonest and ("Waiting, next tower run in " .. fmtWait(soonest)) or "No towers available"
+                task.wait(5)
+            end
+        end
+    end)
+end
+
+tStartB.MouseButton1Click:Connect(function()
+    if getgenv().TowerFarm then
+        tRun += 1
+        setTRunning(false)
+        log("[T] Stopped (a run already in progress finishes on its own)", C.bad)
+    else
+        startTowers()
+    end
+end)
+
+tSpeedB.MouseButton1Click:Connect(function()
+    if lp:GetAttribute("BattleSpeedUnlocked") ~= true then
+        log("[T] Battle speed isn't unlocked on this account", C.warn)
+        return
+    end
+    local mx = tonumber(lp:GetAttribute("MaxBattleSpeed")) or 1
+    if GG and type(GG.UpdateSetting) == "function" then
+        pcall(GG.UpdateSetting, "BattleSpeed", mx)
+        log("[T] Battle speed set to " .. mx .. "x", C.good)
+    else
+        log("[T] Couldn't reach the game's settings", C.bad)
+    end
+end)
+
+tEndB.MouseButton1Click:Connect(function()
+    local id = runInfo(nil)
+    if not id then
+        log("[T] No tower run is active", C.dim)
+        return
+    end
+    local ok = pcall(function() return R.EndTowerRun:InvokeServer(id) end)
+    tNext[id] = os.clock() + 600
+    tStale = true
+    log("[T] Ended " .. id .. (ok and "" or " (request failed)") .. " - paused 10m", ok and C.warn or C.bad)
+end)
+
 local minimized = false
 minB.MouseButton1Click:Connect(function()
     minimized = not minimized
@@ -732,9 +1215,14 @@ minB.MouseButton1Click:Connect(function()
 end)
 
 closeB.MouseButton1Click:Connect(function()
+    saveSettings()
+    pcall(function() RunService:Set3dRenderingEnabled(true) end)
     runId += 1
     getgenv().StoryFarm = false
     getgenv().BlockAutoRejoin = false -- the hook stays installed but stops blocking
+    tRun += 1
+    getgenv().TowerFarm = false
+    getgenv().TowerOnResult = nil
     getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
     if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
     if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
@@ -750,3 +1238,16 @@ if getgenv().StoryFarmAutoStart then
     log("Auto-start after rejoin in 8s", C.good)
     task.delay(8, startFarm)
 end
+
+if getgenv().TowerFarmAutoStart then
+    getgenv().TowerFarmAutoStart = nil
+    log("[T] Tower auto-start after rejoin in 12s", C.good)
+    task.delay(12, startTowers)
+end
+
+task.spawn(function()
+    while gui.Parent do
+        task.wait(10)
+        if gui.Parent then saveSettings() end
+    end
+end)
