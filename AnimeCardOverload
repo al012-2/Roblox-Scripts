@@ -1,0 +1,632 @@
+--[[
+    Story Auto Farm (UI + Anti-AFK)
+    - StartStoryBattle(world, boss, difficulty, team) + StoryFightDone(GrantId)
+    - Difficulty: 1=Easy 2=Medium 3=Hard 4=Extreme 5=Nightmare 6=Insanity
+    - Cooldown is per boss AND per difficulty; difficulties unlock in order,
+      so "All difficulties" farms ASCENDING (Easy -> chosen) for every boss.
+    - Boss box empty = bosses are read from StoryData (only the ones you unlocked).
+]]
+
+local Players = game:GetService("Players")
+local RS      = game:GetService("ReplicatedStorage")
+local UIS     = game:GetService("UserInputService")
+local VU      = game:GetService("VirtualUser")
+local lp      = Players.LocalPlayer
+local R       = RS:WaitForChild("RollRemotes")
+
+local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
+if getgenv().StoryFarmGui then pcall(function() getgenv().StoryFarmGui:Destroy() end) end
+getgenv().StoryFarm = false
+
+-- ==================== Anti-AFK ====================
+-- Two separate idle systems exist:
+--  1) Roblox's own 20 min kick  -> VirtualUser on Idled.
+--  2) The game's AutoRejoinClient: 15 min without REAL input (UserInputService) ->
+--     "Still there?" -> 30s -> rejoin. VirtualUser does not count as input for it,
+--     so we press its "I'm here" button every minute, and drop its AutoRejoin
+--     FireServer call as a second layer.
+do
+    getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
+    local token = getgenv().AntiAfkToken
+    if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
+
+    getgenv().AntiAfkConn = lp.Idled:Connect(function()
+        VU:CaptureController()
+        VU:ClickButton2(Vector2.new())
+    end)
+
+    local function pressStay()
+        local fired = false
+        pcall(function()
+            local stay = lp.PlayerGui.AutoRejoinUI.Root.StayButton
+            if getconnections then
+                for _, c in ipairs(getconnections(stay.MouseButton1Click)) do
+                    c:Fire()
+                    fired = true
+                end
+            end
+            if not fired and firesignal then
+                firesignal(stay.MouseButton1Click)
+                fired = true
+            end
+        end)
+        return fired
+    end
+
+    task.spawn(function()
+        while getgenv().AntiAfkToken == token do
+            pcall(function()
+                VU:CaptureController()
+                VU:ClickButton2(Vector2.new())
+            end)
+            pressStay()
+            task.wait(60)
+        end
+    end)
+
+    if hookmetamethod and getnamecallmethod then
+        pcall(function()
+            local AutoRejoin = R:WaitForChild("AutoRejoin", 5)
+            local old
+            old = hookmetamethod(game, "__namecall", function(self, ...)
+                if getgenv().AntiAfkToken == token and self == AutoRejoin
+                    and getnamecallmethod() == "FireServer" then
+                    return
+                end
+                return old(self, ...)
+            end)
+        end)
+    end
+end
+
+-- ==================== Settings ====================
+local DIFF = {
+    { "Easy", "x1" }, { "Medium", "x2.5" }, { "Hard", "x5" },
+    { "Extreme", "x9" }, { "Nightmare", "x13" }, { "Insanity", "x19" },
+}
+local WORLDS = {
+    -- Diff = highest difficulty to farm. Bosses empty = auto (from StoryData).
+    { World = "Namek",          Diff = 6, On = true,  Bosses = "" },
+    { World = "InfinityCastle", Diff = 6, On = true,  Bosses = "" },
+    { World = "Leaf",           Diff = 6, On = false, Bosses = "" },
+    { World = "Dressrosa",      Diff = 6, On = false, Bosses = "" },
+    { World = "Fuyuki",         Diff = 6, On = false, Bosses = "" },
+}
+local KNOWN = {   -- used only if the StoryData lookup fails
+    Namek = { "Vegeta", "Frieza", "Goku" },
+    InfinityCastle = { "Muzan" },
+}
+local S = {
+    Team = 1, FightDelay = 4, RetryDelay = 2, MaxDoneTries = 5,
+    All = true,   -- true: farm EVERY difficulty from Easy up to the chosen one
+    Gap = 4,      -- min seconds between StartStoryBattle calls (auto-increases on "Slow down")
+}
+
+local kills, rewards, wins = {}, {}, 0   -- session stats
+
+-- ==================== UI helpers ====================
+local C = {
+    bg = Color3.fromRGB(18, 18, 26), bar = Color3.fromRGB(28, 26, 44),
+    row = Color3.fromRGB(28, 28, 40), accent = Color3.fromRGB(128, 90, 255),
+    text = Color3.fromRGB(230, 230, 240), dim = Color3.fromRGB(150, 150, 170),
+    good = Color3.fromRGB(70, 200, 120), bad = Color3.fromRGB(230, 80, 90),
+}
+
+local function new(class, props)
+    local i = Instance.new(class)
+    local parent = props.Parent
+    props.Parent = nil
+    for k, v in pairs(props) do i[k] = v end
+    i.Parent = parent
+    return i
+end
+local function corner(p, r) return new("UICorner", { CornerRadius = UDim.new(0, r), Parent = p }) end
+local function stroke(p, col, th) return new("UIStroke", { Color = col, Thickness = th, Parent = p }) end
+local function label(p, text, pos, size, props)
+    local o = { Text = text, Position = pos, Size = size, BackgroundTransparency = 1,
+        TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = p }
+    for k, v in pairs(props or {}) do o[k] = v end
+    return new("TextLabel", o)
+end
+local function button(p, text, pos, size, col)
+    local b = new("TextButton", { Text = text, Position = pos, Size = size, BackgroundColor3 = col,
+        TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14, AutoButtonColor = true, Parent = p })
+    corner(b, 6)
+    return b
+end
+
+local gui = new("ScreenGui", { Name = "StoryFarmUI", ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = parentGui })
+getgenv().StoryFarmGui = gui
+
+local win = new("Frame", { Size = UDim2.fromOffset(460, 540), Position = UDim2.new(0.5, -230, 0.5, -250),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0, Parent = gui })
+corner(win, 10); stroke(win, C.accent, 1.5)
+
+local bar = new("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C.bar, BorderSizePixel = 0, Parent = win })
+corner(bar, 10)
+label(bar, "Story Auto Farm", UDim2.fromOffset(12, 0), UDim2.new(1, -90, 1, 0),
+    { Font = Enum.Font.GothamBold, TextSize = 16 })
+local closeB = button(bar, "X", UDim2.new(1, -32, 0, 5), UDim2.fromOffset(24, 24), C.bad)
+local minB   = button(bar, "-", UDim2.new(1, -62, 0, 5), UDim2.fromOffset(24, 24), C.accent)
+
+local body = new("Frame", { Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 1, -34),
+    BackgroundTransparency = 1, Parent = win })
+
+-- Dragging
+do
+    local dragging, startPos, startMouse
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, startPos, startMouse = true, win.Position, i.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - startMouse
+            win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- ==================== Stats panel (above the window) ====================
+local TeleportService = game:GetService("TeleportService")
+local PH = 100
+local statsP = new("Frame", { Position = UDim2.new(0, 0, 0, -(PH + 8)), Size = UDim2.new(1, 0, 0, PH),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0, Parent = win })
+corner(statsP, 10); stroke(statsP, C.accent, 1.5)
+label(statsP, "Session stats", UDim2.fromOffset(12, 6), UDim2.new(1, -250, 0, 24),
+    { Font = Enum.Font.GothamBold, TextSize = 15 })
+local resetB  = button(statsP, "Reset",      UDim2.new(1, -240, 0, 6), UDim2.fromOffset(56, 24), C.row)
+local rejoinB = button(statsP, "Rejoin",     UDim2.new(1, -178, 0, 6), UDim2.fromOffset(70, 24), C.accent)
+local hopB    = button(statsP, "Server Hop", UDim2.new(1, -102, 0, 6), UDim2.fromOffset(94, 24), C.accent)
+resetB.TextSize = 13; rejoinB.TextSize = 13; hopB.TextSize = 13
+local killsL = label(statsP, "Bosses killed: 0", UDim2.fromOffset(12, 32), UDim2.new(1, -24, 0, 18),
+    { TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd })
+local rewF = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 54), Size = UDim2.new(1, -16, 1, -60),
+    BackgroundColor3 = Color3.fromRGB(12, 12, 18), BorderSizePixel = 0, ScrollBarThickness = 3,
+    CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = statsP })
+corner(rewF, 6)
+new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), PaddingTop = UDim.new(0, 3), Parent = rewF })
+local rewL = new("TextLabel", { Text = "No rewards yet", Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, TextColor3 = C.dim,
+    Font = Enum.Font.Code, TextSize = 12, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, Parent = rewF })
+
+local function refreshStats()
+    local parts = {}
+    for _, w in ipairs(WORLDS) do
+        if (kills[w.World] or 0) > 0 then parts[#parts + 1] = w.World .. " " .. kills[w.World] end
+    end
+    killsL.Text = ("Bosses killed: %d%s"):format(wins,
+        #parts > 0 and ("   |   " .. table.concat(parts, "  ·  ")) or "")
+
+    local names = {}
+    for n in pairs(rewards) do names[#names + 1] = n end
+    table.sort(names, function(a, b) return rewards[a] > rewards[b] end)
+    local out = {}
+    for _, n in ipairs(names) do out[#out + 1] = n .. " x" .. rewards[n] end
+    rewL.Text = #out > 0 and table.concat(out, "   ·   ") or "No rewards yet"
+    rewL.TextColor3 = #out > 0 and C.text or C.dim
+end
+
+resetB.MouseButton1Click:Connect(function()
+    wins, kills, rewards = 0, {}, {}
+    refreshStats()
+end)
+
+local HttpService = game:GetService("HttpService")
+
+-- re-run this script (and auto-start) after a teleport, if it is saved in the executor workspace
+local function queueRerun()
+    pcall(function()
+        if queue_on_teleport and isfile and isfile("StoryAutoFarm.lua") then
+            queue_on_teleport(('getgenv().StoryFarmAutoStart=%s; loadstring(readfile("StoryAutoFarm.lua"))()')
+                :format(tostring(getgenv().StoryFarm == true)))
+        end
+    end)
+end
+
+rejoinB.MouseButton1Click:Connect(function()
+    rejoinB.Text = "..."
+    queueRerun()
+    task.spawn(function()
+        local ok = pcall(function()
+            if #Players:GetPlayers() <= 1 then
+                TeleportService:Teleport(game.PlaceId, lp)
+            else
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp)
+            end
+        end)
+        if not ok then rejoinB.Text = "Rejoin" end
+    end)
+end)
+
+local function httpGet(url)
+    local req = (syn and syn.request) or http_request or request
+    if req then
+        local ok, res = pcall(req, { Url = url, Method = "GET" })
+        if ok and type(res) == "table" and res.Body then return res.Body end
+    end
+    local ok, body = pcall(function() return game:HttpGet(url) end)
+    if ok then return body end
+end
+
+local hopping = false
+hopB.MouseButton1Click:Connect(function()
+    if hopping then return end
+    hopping = true
+    hopB.Text = "Searching..."
+    task.spawn(function()
+        local target
+        local cursor = ""
+        for _ = 1, 3 do
+            local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true%s")
+                :format(game.PlaceId, cursor ~= "" and ("&cursor=" .. cursor) or "")
+            local body = httpGet(url)
+            local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+            if not (ok and type(data) == "table" and type(data.data) == "table") then break end
+            local pool = {}
+            for _, sv in ipairs(data.data) do
+                if sv.id ~= game.JobId and (sv.playing or 0) < (sv.maxPlayers or 0) - 1 then
+                    pool[#pool + 1] = sv.id
+                end
+            end
+            if #pool > 0 then
+                target = pool[math.random(1, math.min(#pool, 15))]
+                break
+            end
+            cursor = data.nextPageCursor or ""
+            if cursor == "" then break end
+        end
+
+        if not target then
+            hopB.Text = "No server"
+            task.wait(2)
+            hopB.Text = "Server Hop"
+            hopping = false
+            return
+        end
+
+        hopB.Text = "Hopping..."
+        queueRerun()
+        local ok = pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, target, lp) end)
+        if not ok then
+            hopB.Text = "Failed"
+            task.wait(2)
+        end
+        hopB.Text = "Server Hop"
+        hopping = false
+    end)
+end)
+
+-- ==================== World rows ====================
+for idx, w in ipairs(WORLDS) do
+    local y = 8 + (idx - 1) * 58
+    local row = new("Frame", { Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 52),
+        BackgroundColor3 = C.row, BorderSizePixel = 0, Parent = body })
+    corner(row, 8)
+
+    local chk = button(row, w.On and "✓" or "", UDim2.fromOffset(8, 6), UDim2.fromOffset(24, 24),
+        w.On and C.good or Color3.fromRGB(60, 60, 78))
+    chk.MouseButton1Click:Connect(function()
+        w.On = not w.On
+        chk.Text = w.On and "✓" or ""
+        chk.BackgroundColor3 = w.On and C.good or Color3.fromRGB(60, 60, 78)
+    end)
+
+    label(row, w.World, UDim2.fromOffset(40, 6), UDim2.fromOffset(170, 24),
+        { Font = Enum.Font.GothamBold, TextSize = 15 })
+
+    local db = button(row, "", UDim2.new(1, -198, 0, 6), UDim2.fromOffset(190, 24), C.accent)
+    db.TextSize = 13
+    w.refresh = function()
+        db.Text = (S.All and "Up to " or "Only ") .. DIFF[w.Diff][1] .. " (" .. DIFF[w.Diff][2] .. ")"
+    end
+    w.refresh()
+    db.MouseButton1Click:Connect(function()
+        w.Diff = w.Diff % #DIFF + 1
+        w.refresh()
+    end)
+
+    local box = new("TextBox", { Text = w.Bosses, PlaceholderText = "Bosses (empty = auto from game data)",
+        Position = UDim2.fromOffset(8, 32), Size = UDim2.new(1, -16, 0, 16), BackgroundColor3 = C.bg,
+        TextColor3 = C.text, PlaceholderColor3 = C.dim, Font = Enum.Font.Code, TextSize = 13,
+        ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, Parent = row })
+    corner(box, 4)
+    box:GetPropertyChangedSignal("Text"):Connect(function() w.Bosses = box.Text end)
+end
+
+-- ==================== Controls + log ====================
+local teamB = button(body, "Team " .. S.Team, UDim2.fromOffset(8, 304), UDim2.fromOffset(90, 34), C.row)
+teamB.MouseButton1Click:Connect(function()
+    S.Team = S.Team % 4 + 1
+    teamB.Text = "Team " .. S.Team
+end)
+
+local allB = button(body, "All difficulties: ON", UDim2.fromOffset(104, 304), UDim2.fromOffset(170, 34), C.accent)
+allB.TextSize = 13
+allB.MouseButton1Click:Connect(function()
+    S.All = not S.All
+    allB.Text = "All difficulties: " .. (S.All and "ON" or "OFF")
+    allB.BackgroundColor3 = S.All and C.accent or C.row
+    for _, w in ipairs(WORLDS) do w.refresh() end
+end)
+
+local startB = button(body, "START", UDim2.fromOffset(282, 304), UDim2.new(1, -290, 0, 34), C.good)
+
+local status = label(body, "Idle", UDim2.fromOffset(10, 346), UDim2.new(1, -20, 0, 18),
+    { TextColor3 = C.dim, TextSize = 13 })
+
+local logF = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 368), Size = UDim2.new(1, -16, 1, -376),
+    BackgroundColor3 = Color3.fromRGB(12, 12, 18), BorderSizePixel = 0, ScrollBarThickness = 4,
+    CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = body })
+corner(logF, 6)
+new("UIListLayout", { Padding = UDim.new(0, 1), Parent = logF })
+new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingTop = UDim.new(0, 4), Parent = logF })
+
+local logCount = 0
+local function log(msg, col)
+    logCount += 1
+    new("TextLabel", { Text = os.date("%H:%M:%S") .. "  " .. msg, Size = UDim2.new(1, -8, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, TextColor3 = col or C.text,
+        Font = Enum.Font.Code, TextSize = 12, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = logCount, Parent = logF })
+    if logCount > 60 then
+        for _, c in ipairs(logF:GetChildren()) do
+            if c:IsA("TextLabel") then c:Destroy() break end
+        end
+    end
+    task.defer(function() logF.CanvasPosition = Vector2.new(0, 1e6) end)
+end
+
+-- ==================== Farm logic ====================
+local SD
+pcall(function() SD = require(RS:WaitForChild("StoryData", 5)) end)
+
+local nextAt, runId, lastCall = {}, 0, 0
+local progress, progAt = {}, {}
+
+local function keyOf(world, boss, diff) return world .. "|" .. boss .. "|" .. diff end
+
+local function parseWait(msg)
+    if type(msg) ~= "string" then return nil end
+    local n, unit = msg:lower():match("wait%s+(%d+)%s*(%a+)")
+    n = tonumber(n)
+    if not n then return nil end
+    if unit:find("hour") then return n * 3600 end
+    if unit:find("min") then return n * 60 end
+    return n
+end
+
+local function dumpTable(t)
+    local o = {}
+    for k, v in pairs(t) do
+        if type(v) ~= "table" and type(v) ~= "function" then
+            o[#o + 1] = tostring(k) .. "=" .. tostring(v)
+        end
+    end
+    return table.concat(o, ", ")
+end
+
+-- GetStoryProgress = number of bosses beaten in that world (cached 60s)
+local function getProgress(world)
+    if (progAt[world] or 0) + 60 < os.clock() then
+        progAt[world] = os.clock()
+        local ok, n = pcall(function() return R.GetStoryProgress:InvokeServer(world) end)
+        if ok and type(n) == "number" then progress[world] = n end
+    end
+    return progress[world]
+end
+
+-- bosses unlock in order: boss i is available once i-1 bosses are beaten
+local function autoBosses(world)
+    local out = {}
+    pcall(function()
+        local st = SD.Stories[world]
+        local beaten = getProgress(world)
+        if beaten == nil then beaten = math.huge end
+        for i, id in ipairs(st.Order) do
+            if i <= beaten + 1 then out[#out + 1] = id end
+        end
+    end)
+    if #out == 0 then
+        for _, id in ipairs(KNOWN[world] or {}) do out[#out + 1] = id end
+    end
+    return out
+end
+
+local function bossList(w)
+    local out = {}
+    for name in string.gmatch(w.Bosses, "[^,]+") do
+        name = name:match("^%s*(.-)%s*$")
+        if name ~= "" then out[#out + 1] = name end
+    end
+    if #out == 0 then return autoBosses(w.World) end
+    return out
+end
+
+local function addReward(name, amount)
+    name = tostring(name)
+    rewards[name] = (rewards[name] or 0) + (tonumber(amount) or 1)
+end
+
+-- WinItems = { {Potion="500 Pack", Amount=3}, ... } ; fallback: parse WinPackText ("+3x 500 Pack")
+local function tallyRewards(res)
+    local got = false
+    pcall(function()
+        if type(res.WinItems) == "table" then
+            for _, it in pairs(res.WinItems) do
+                if type(it) == "table" then
+                    local name = it.Potion or it.Item or it.Name or it.Id or it.Kind
+                    if name then
+                        addReward(name, it.Amount or it.Count or it.Qty)
+                        got = true
+                    end
+                end
+            end
+        end
+    end)
+    if not got then
+        pcall(function()
+            if type(res.WinPackText) == "string" then
+                for amt, name in res.WinPackText:gmatch("(%d+)x%s*([^,+]+)") do
+                    addReward((name:gsub("%s+$", "")), amt)
+                end
+            end
+        end)
+    end
+end
+
+-- returns: ok, info, cooldownSeconds, kind, res  (kind: cd | locked | lost | slow | err | unknown)
+local function fight(w, boss, diff, alive)
+    local gap = S.Gap - (os.clock() - lastCall)
+    if gap > 0 then task.wait(gap) end
+    if alive and not alive() then return false, "stopped", 0, "stop" end
+    lastCall = os.clock()
+
+    local r = table.pack(pcall(function()
+        return R.StartStoryBattle:InvokeServer(w.World, boss, diff, S.Team)
+    end))
+    if not r[1] then return false, "error: " .. tostring(r[2]), 30, "err" end
+    local res, msg = r[2], r[3]
+
+    if type(res) == "table" and res.GrantId then
+        if res.Winner ~= "A" then
+            return false, "lost (Winner=" .. tostring(res.Winner) .. ")", 600, "lost"
+        end
+        task.wait(S.FightDelay)
+        for _ = 1, S.MaxDoneTries do
+            local ok, done = pcall(function() return R.StoryFightDone:InvokeServer(res.GrantId) end)
+            if ok and done then
+                lastCall = os.clock()
+                local pack = type(res.WinPackText) == "string" and (" " .. res.WinPackText) or ""
+                return true, "WIN" .. pack .. " (claimed)", nil, nil, res
+            end
+            task.wait(S.RetryDelay)
+        end
+        return false, "StoryFightDone failed", 30, "err"
+    end
+
+    if type(res) == "table" then
+        return false, "no GrantId: " .. dumpTable(res), 600, "lost"
+    end
+
+    local m = tostring(msg or res)
+    local ml = m:lower()
+    if ml:find("slow down") then
+        S.Gap = math.min(S.Gap + 2, 15)
+        return false, "slow down -> gap " .. S.Gap .. "s", 8, "slow"
+    end
+    local wait = parseWait(m)
+    if wait then return false, m, wait, "cd" end
+    if ml:find("beat") or ml:find("defeat") or ml:find("lock") or ml:find("unlock") or ml:find("first") then
+        return false, m, 600, "locked"
+    end
+    return false, m, 120, "unknown"
+end
+
+local function setRunning(on)
+    getgenv().StoryFarm = on
+    startB.Text = on and "STOP" or "START"
+    startB.BackgroundColor3 = on and C.bad or C.good
+    if not on then status.Text = "Idle" end
+end
+
+local function startFarm()
+    runId += 1
+    local my = runId
+    local function alive() return getgenv().StoryFarm and runId == my end
+    setRunning(true)
+    log("Farm started", C.good)
+    task.spawn(function()
+        while getgenv().StoryFarm and runId == my do
+            local did = false
+            for _, w in ipairs(WORLDS) do
+                if w.On then
+                    for _, boss in ipairs(bossList(w)) do
+                        local lo = S.All and 1 or w.Diff
+                        for diff = lo, w.Diff do
+                            if not (getgenv().StoryFarm and runId == my) then return end
+                            local key = keyOf(w.World, boss, diff)
+                            if (nextAt[key] or 0) <= os.clock() then
+                                status.Text = ("Fighting %s / %s [%s] | wins %d"):format(
+                                    w.World, boss, DIFF[diff][1], wins)
+                                local ok, info, cd, kind, res = fight(w, boss, diff, alive)
+                                if kind == "stop" then return end
+                                log(("%s/%s [%s] %s"):format(w.World, boss, DIFF[diff][1], tostring(info)),
+                                    ok and C.good or C.dim)
+                                did = true
+                                if ok then
+                                    wins += 1
+                                    kills[w.World] = (kills[w.World] or 0) + 1
+                                    if res then tallyRewards(res) end
+                                    refreshStats()
+                                    nextAt[key] = os.clock() + 3540   -- ~1h cooldown; server corrects us if early
+                                else
+                                    nextAt[key] = os.clock() + (cd or 60)
+                                    if kind == "locked" then
+                                        for d2 = diff, w.Diff do
+                                            nextAt[keyOf(w.World, boss, d2)] = os.clock() + (cd or 600)
+                                        end
+                                        break
+                                    elseif kind ~= "cd" then
+                                        break   -- lost / slow / error: don't push to harder difficulties now
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            if not did then
+                local soonest
+                for _, t in pairs(nextAt) do
+                    if t > os.clock() and (not soonest or t < soonest) then soonest = t end
+                end
+                status.Text = (soonest and ("All on cooldown, next in %ds"):format(math.ceil(soonest - os.clock()))
+                    or "No bosses available") .. (" | wins %d"):format(wins)
+                task.wait(2)
+            end
+        end
+    end)
+end
+
+startB.MouseButton1Click:Connect(function()
+    if getgenv().StoryFarm then
+        runId += 1
+        setRunning(false)
+        log("Stopped", C.bad)
+    else
+        startFarm()
+    end
+end)
+
+local minimized = false
+minB.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    body.Visible = not minimized
+    statsP.Visible = not minimized
+    win.Size = minimized and UDim2.fromOffset(460, 34) or UDim2.fromOffset(460, 540)
+end)
+closeB.MouseButton1Click:Connect(function()
+    runId += 1
+    getgenv().StoryFarm = false
+    getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
+    if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
+    gui:Destroy()
+end)
+
+log("Ready. Anti-AFK on. All difficulties = Easy up to the chosen one", C.dim)
+
+if getgenv().StoryFarmAutoStart then
+    getgenv().StoryFarmAutoStart = nil
+    log("Auto-start after rejoin in 8s", C.good)
+    task.delay(8, startFarm)
+end
