@@ -1,51 +1,48 @@
+-- 1. أوامر Cobalt الاختيارية (مستقلة عن السكربت الرئيسي)
+local Event1 = game:GetService("ReplicatedStorage").RollRemotes.GetUpgrades
+Event1:InvokeServer()
+
+local Event2 = game:GetService("ReplicatedStorage").RollRemotes.GetTraitData
+Event2:InvokeServer()
+
+local Event3 = game:GetService("ReplicatedStorage").RollRemotes.GetPacks
+Event3:InvokeServer()
+
+local Event4 = game:GetService("ReplicatedStorage").RollRemotes.GetExpeditions
+Event4:InvokeServer()
+
+local Event5 = game:GetService("ReplicatedStorage").RollRemotes.GetMergeCards
+Event5:InvokeServer()
+
+local Event6 = game:GetService("ReplicatedStorage").RollRemotes.FightAsura
+Event6:InvokeServer(1)
+
+
+-- 2. التعليق الكبير والتحقق من تحميل اللعبة
 --[[
-    Story Auto Farm (UI + Anti-AFK + Anti-Lag + Weather Monitor + Raid Logger)
+    Story Auto Farm (merged): Story + Battle Towers + Halloween Tower + Hard Tower + Auto Raid + Tickets
+
+    FARM SLOTS (the script enforces them, you don't have to remember):
+      Slot 1 "Story"     : Story farm
+      Slot 2 "Tower run" : Battle Towers / Halloween Tower / Hard Tower / Auto Raid  (only ONE of these)
+    So at most 2 farms run together (Story + one tower-type farm). Starting a farm whose slot is
+    taken shows "Can't start X: Y is running. Turn it off first." and X does not start.
+
     - StartStoryBattle(world, boss, difficulty, team) + StoryFightDone(GrantId)
     - Difficulty: 1=Easy 2=Medium 3=Hard 4=Extreme 5=Nightmare 6=Insanity
-    - Cooldown is per boss AND per difficulty; difficulties unlock in order,
-      so "All difficulties" farms ASCENDING (Easy -> chosen) for every boss.
-    - Boss box empty = bosses are read from StoryData (only the ones you unlocked).
-
-    Changes in this version:
-    1) AutoRejoin hook is now controlled by getgenv().BlockAutoRejoin (turned off on close)
-       and wrapped with newcclosure + checkcaller.
-    2) UIS connections (drag) are stored and disconnected on close / re-run.
-    3) Log trimming removes the oldest label reliably (stored in a table).
-    4) Gap now decays back toward the base value after a while without "slow down".
-    5) Up to 2 fights at the same time (Fights button). All remote calls share one
-       throttle, and each boss/difficulty is claimed by only one worker at a time.
-    6) StoryFightDone is called on the remote named in the reply (GrantRemote), like the game does.
-    7) "Towers" tab: Battle Tower auto-farm (Limitless / Malevolent / ...). It starts hidden runs
-       through the game's own functions, so the game's AFK-rejoin watcher never fights with us.
-    21) "Raid Logger" tab: logs every RaidRemotes InvokeServer call + reply + server events.
-        Play one raid by hand, press "Copy log" (or getgenv().RaidCopy()) and paste it.
+    - Cooldown is per boss AND per difficulty; "All difficulties" farms ASCENDING.
+    - Cooldowns are read from the server (GetStoryTicketState); settings are saved to
+      StoryAutoFarmSettings.json; after Rejoin / Server Hop the running farms start again.
+    - Halloween: GetTowerRunSummary("Halloween") + StartTowerRun("Halloween", {Part, Team}); the server
+      climbs the parts, the script only starts the next first-clear part when no run is active.
+    - Hard Tower: TowerNextFloor("Hard") floor by floor (the game's own auto-climb must be OFF).
+    - Raid Logger tab: logs RaidRemotes calls + replies (Copy log).
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- 19) "Hard Tower" tab: climbs the Hard Tower floor by floor with TowerNextFloor("Hard"),
---     checks GetTowerRunSummary("Hard") after every floor and stops by itself on defeat /
---     run end / stop-floor. Settings are saved and it can auto-start after Rejoin / Server Hop.
---     The game's own auto-climb must be OFF, and a Hard run must already be active.
--- 20) UI callbacks are nil-safe (no error if the library fires a callback while the UI is built).
--- 18) UI is now Obsidian (deividcomsono/Obsidian), loaded over HTTP at start.
--- v4 changes:
--- 15) Weak-units tracker: first loss retries after 15s, second loss pauses that difficulty and
---     everything above it and shows it in the red bar; "Retry Weak" clears it.
--- 16) Cooldowns are read from the server (GetStoryTicketState): bosses with nothing ready are skipped,
---     and locked difficulties are never probed (uses Cleared + 1).
--- 17) Auto Story Tickets: for fully cleared worlds, bosses are left to cool down and collected with one
---     ticket once "Min ready" are ready. The script records how the game calls UseStoryTicket
---     (press the game's "Use Ticket" once per world) and replays exactly that.
--- v2 changes:
--- 9)  A lost fight now also pauses the higher difficulties of that boss (they are locked anyway).
--- 10) Settings (worlds, difficulty, bosses, team, fights, all-diffs, towers) are saved to
---     StoryAutoFarmSettings.json every 10s and on close, and loaded on start.
--- 11) Cooldowns are saved too, so after Rejoin / Server Hop no requests are wasted on bosses
---     that are still cooling down.
--- 12) "3D Render" button turns off 3D rendering (big CPU/GPU saver for AFK farming).
--- 13) Auto re-run after Rejoin uses getgenv().StoryFarmFile (default "StoryAutoFarm.lua"),
---     so a different file name works: getgenv().StoryFarmFile = "MyName.lua" before running.
+
+-- 3. الخدمات والمتغيرات الأساسية وتنظيف النسخ القديمة
 local Players         = game:GetService("Players")
 local RS              = game:GetService("ReplicatedStorage")
 local UIS             = game:GetService("UserInputService")
@@ -57,7 +54,6 @@ local RunService      = game:GetService("RunService")
 local lp = Players.LocalPlayer
 local R  = RS:WaitForChild("RollRemotes")
 
-local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 if getgenv().StoryFarmGui then pcall(function() getgenv().StoryFarmGui:Destroy() end) end
 if getgenv().StoryFarmLib then pcall(function() getgenv().StoryFarmLib:Unload() end) end
 if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
@@ -68,8 +64,10 @@ getgenv().StoryFarmConns = {}
 getgenv().StoryFarm = false
 getgenv().TowerFarm = false
 getgenv().HardFarm = false
+getgenv().HalloweenFarm = false
 
--- ==================== Anti-AFK (Fixed Hook) ====================
+
+-- 4. قسم Anti-AFK
 do
     getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
     local token = getgenv().AntiAfkToken
@@ -111,7 +109,6 @@ do
         end
     end)
 
-    -- Hook only once per session; the flag decides whether it blocks or not
     if hookmetamethod and getnamecallmethod and not getgenv().AutoRejoinHooked then
         pcall(function()
             local AutoRejoin = R:WaitForChild("AutoRejoin", 5)
@@ -133,49 +130,51 @@ do
     end
 end
 
--- ==================== Settings ====================
+
+-- 5. قسم Settings
 local DIFF = {
     { "Easy", "x1" }, { "Medium", "x2.5" }, { "Hard", "x5" },
     { "Extreme", "x9" }, { "Nightmare", "x13" }, { "Insanity", "x19" },
 }
 local WORLDS = {
-    { World = "Namek",          Diff = 6, On = true,  Bosses = "" },
+    { World = "Namek",         Diff = 6, On = true,  Bosses = "" },
     { World = "InfinityCastle", Diff = 6, On = true,  Bosses = "" },
-    { World = "Leaf",           Diff = 6, On = false, Bosses = "" },
-    { World = "Dressrosa",      Diff = 6, On = false, Bosses = "" },
-    { World = "Fuyuki",         Diff = 6, On = false, Bosses = "" },
+    { World = "Leaf",          Diff = 6, On = false, Bosses = "" },
+    { World = "Dressrosa",     Diff = 6, On = false, Bosses = "" },
+    { World = "Fuyuki",        Diff = 6, On = false, Bosses = "" },
 }
 local KNOWN = {
-    Namek          = { "Zarbon", "Ginyu", "Vegeta", "Frieza", "Goku" },
+    Namek            = { "Zarbon", "Ginyu", "Vegeta", "Frieza", "Goku" },
     InfinityCastle = { "Nakime", "Akaza", "Douma", "Kokushibo", "Muzan" },
-    Leaf           = { "Deidara", "Hidan", "Obito", "Itachi", "Pain" },
-    Dressrosa      = { "Fujitora", "Sabo", "Lucy", "Law", "Doflamingo" },
-    Fuyuki         = { "Rider", "Lancer", "Archer", "Berserker", "Saber" },
+    Leaf             = { "Deidara", "Hidan", "Obito", "Itachi", "Pain" },
+    Dressrosa        = { "Fujitora", "Sabo", "Lucy", "Law", "Doflamingo" },
+    Fuyuki           = { "Rider", "Lancer", "Archer", "Berserker", "Saber" },
 }
 local S = {
     Team = 1, FightDelay = 4, RetryDelay = 2, MaxDoneTries = 5,
     All = true,
     BaseGap = 4,
     Gap = 4,
-    GapDecayEvery = 300, -- seconds without "slow down" before lowering the gap by 1
+    GapDecayEvery = 300,
     AntiLag = false,
     SilentRoll = false,
-    Workers = 2, -- how many fights run at the same time (1 or 2)
+    Workers = 2,
     Tickets = false,
     TicketMin = 10,
 }
-local HS = { Interval = 8, StopAt = 0 } -- Hard Tower: seconds per floor, stop at floor (0 = never)
+local HS = { Interval = 8, StopAt = 0 }
+local HW = { Team = 1 }
 
 local kills, rewards, wins = {}, {}, 0
-local tparts = 0 -- tower parts cleared this session
-local hclimbed = 0 -- Hard Tower floors climbed (saved between sessions)
-local raidClears = 0 -- raid clears (saved between sessions)
-local failCount = {} -- consecutive losses per boss|diff
-local weakList = {}  -- boss|diff that beat the player twice in a row
+local tparts = 0
+local hclimbed = 0
+local raidClears = 0
+local failCount = {}
+local weakList = {}
 
 local TW, TS
 local saveSettings
-local learned = {} -- world -> args the game sent to UseStoryTicket
+local learned = {}
 local SCRIPT_FILE = getgenv().StoryFarmFile or "StoryAutoFarm.lua"
 local CFG_FILE = "StoryAutoFarmSettings.json"
 local CFG = {}
@@ -196,6 +195,9 @@ do
         end
     end
     if type(CFG.Team) == "number" and CFG.Team >= 1 and CFG.Team <= 4 then S.Team = CFG.Team end
+    if type(CFG.HalloweenTeam) == "number" and CFG.HalloweenTeam >= 1 and CFG.HalloweenTeam <= 4 then
+        HW.Team = math.floor(CFG.HalloweenTeam)
+    end
     if type(CFG.All) == "boolean" then S.All = CFG.All end
     if CFG.Workers == 1 or CFG.Workers == 2 then S.Workers = CFG.Workers end
     if type(CFG.Tickets) == "boolean" then S.Tickets = CFG.Tickets end
@@ -208,7 +210,6 @@ do
     if type(CFG.HardStopAt) == "number" and CFG.HardStopAt >= 0 then
         HS.StopAt = math.floor(CFG.HardStopAt)
     end
-    -- counters saved from the last session
     if type(CFG.Stats) == "table" then
         local st = CFG.Stats
         wins = math.floor(tonumber(st.Wins) or 0)
@@ -226,7 +227,6 @@ do
             end
         end
     end
-    -- toggles that used to reset on every start (applied once the UI + handlers exist)
     S.SavedAntiLag    = CFG.AntiLag == true
     S.SavedSilentRoll = CFG.SilentRoll == true
     S.SavedNo3D       = CFG.Disable3D == true
@@ -236,7 +236,8 @@ do
     end)
 end
 
--- ==================== Obsidian UI ====================
+
+-- 6. قسم Obsidian UI
 local C = {
     text = Color3.fromRGB(230, 230, 240), dim = Color3.fromRGB(150, 150, 170),
     good = Color3.fromRGB(70, 200, 120), bad = Color3.fromRGB(230, 80, 90),
@@ -265,9 +266,8 @@ if not Library then
 end
 getgenv().StoryFarmLib = Library
 
-local H = {}            -- handlers filled in further down (the UI is built before the logic)
+local H = {}
 local unloaded = false
--- nil-safe call: a callback fired while the UI is still being built must not error
 local function hcall(name, v)
     local f = H[name]
     if f then f(v) end
@@ -280,15 +280,15 @@ local Window = Library:CreateWindow({
     ShowCustomCursor = false,
 })
 local Tabs = {
-    Story    = Window:AddTab("Story"),
-    Towers   = Window:AddTab("Towers"),
-    Hard     = Window:AddTab("Hard Tower"),
-    Tickets  = Window:AddTab("Tickets"),
-    Stats    = Window:AddTab("Stats"),
-    Settings = Window:AddTab("UI Settings"),
+    Story       = Window:AddTab("Story"),
+    Towers      = Window:AddTab("Towers"),
+    Halloween   = Window:AddTab("Halloween"),
+    Hard        = Window:AddTab("Hard Tower"),
+    Tickets     = Window:AddTab("Tickets"),
+    Stats       = Window:AddTab("Stats"),
+    Settings    = Window:AddTab("UI Settings"),
 }
 
--- Small adapters so the farm logic keeps using ".Text = ..." and "MouseButton1Click:Connect(...)"
 local function proxyLabel(lbl)
     return setmetatable({}, { __newindex = function(_, k, v)
         if k == "Text" then pcall(function() lbl:SetText(tostring(v)) end) end
@@ -305,13 +305,14 @@ local function mkButton(group, text)
         end })
 end
 
-local status, startB, logLbl, retryWeakB, weakL, weakBar, ticketToggle, ticketL
+local status, startB, logLbl, retryWeakB, weakL, weakBar, ticketToggle, ticketL, farmL
 local killsL, weatherL, rewL, resetB, rejoinB, hopB
 weakBar = setmetatable({}, { __newindex = function() end })
 
-do -- Story tab
+do
     local Control = Tabs.Story:AddLeftGroupbox("Control")
     status = proxyLabel(Control:AddLabel("Idle", true))
+    farmL = proxyLabel(Control:AddLabel("Running (0/2): nothing", true))
     startB = mkButton(Control, "START")
     Control:AddDropdown("StoryTeam", { Values = { "1", "2", "3", "4" }, Default = S.Team, Text = "Team",
         Callback = function(v) hcall("team", v) end })
@@ -346,7 +347,7 @@ do -- Story tab
     end
 end
 
-do -- Tickets tab
+do
     local TixBox = Tabs.Tickets:AddLeftGroupbox("Story tickets")
     ticketToggle = TixBox:AddToggle("TicketsOn", { Text = "Auto-use tickets", Default = S.Tickets,
         Callback = function(v) hcall("tickets", v) end })
@@ -357,7 +358,7 @@ do -- Tickets tab
     TixBox:AddLabel("For each world, press the game's own 'Use Ticket' once so the script learns how to call it.", true)
 end
 
-do -- Stats tab
+do
     local StatBox = Tabs.Stats:AddLeftGroupbox("Session")
     killsL = proxyLabel(StatBox:AddLabel("Bosses killed: 0", true))
     weatherL = proxyLabel(StatBox:AddLabel("Weather: Checking...", true))
@@ -369,7 +370,7 @@ do -- Stats tab
     hopB = mkButton(AccBox, "Server Hop")
 end
 
-do -- UI settings tab
+do
     local MenuBox = Tabs.Settings:AddLeftGroupbox("Menu")
     MenuBox:AddButton({ Text = "Unload script", Func = function() Library:Unload() end })
     pcall(function()
@@ -377,8 +378,14 @@ do -- UI settings tab
             { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
         Library.ToggleKeybind = Library.Options.MenuKeybind
     end)
+
+    local RulesBox = Tabs.Settings:AddRightGroupbox("Farm rules")
+    RulesBox:AddLabel("Two farm slots: ONE Story farm + ONE tower-type farm.", true)
+    RulesBox:AddLabel("Battle Towers, Halloween Tower, Hard Tower and Auto Raid share the tower slot, so only one of them can run. If you start a second one, the script tells you which one to turn off first.", true)
 end
 
+
+-- 7. دوال الإحصائيات وأزرار Rejoin وServer Hop
 local function refreshStats()
     local parts = {}
     for _, w in ipairs(WORLDS) do
@@ -394,7 +401,7 @@ local function refreshStats()
     table.sort(names, function(a, b) return rewards[a] > rewards[b] end)
     local out = {}
     for _, n in ipairs(names) do out[#out + 1] = n .. " x" .. rewards[n] end
-    rewL.Text = #out > 0 and table.concat(out, "   ·   ") or "No rewards yet"
+    rewL.Text = #out > 0 and table.concat(out, "    ·    ") or "No rewards yet"
 end
 
 resetB.MouseButton1Click:Connect(function()
@@ -402,15 +409,15 @@ resetB.MouseButton1Click:Connect(function()
     refreshStats()
     if saveSettings then pcall(saveSettings) end
 end)
-refreshStats() -- show the counters loaded from the last session
+refreshStats()
 
 local function queueRerun()
     if saveSettings then pcall(saveSettings) end
     pcall(function()
         if queue_on_teleport and isfile and isfile(SCRIPT_FILE) then
-            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; getgenv().HardFarmAutoStart=%s; loadstring(readfile(%q))()')
+            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; getgenv().HardFarmAutoStart=%s; getgenv().HalloweenFarmAutoStart=%s; loadstring(readfile(%q))()')
                 :format(SCRIPT_FILE, tostring(getgenv().StoryFarm == true), tostring(getgenv().TowerFarm == true),
-                    tostring(getgenv().HardFarm == true), SCRIPT_FILE))
+                    tostring(getgenv().HardFarm == true), tostring(getgenv().HalloweenFarm == true), SCRIPT_FILE))
         end
     end)
 end
@@ -488,7 +495,8 @@ hopB.MouseButton1Click:Connect(function()
     end)
 end)
 
--- ==================== Log + weak units ====================
+
+-- 8. قسم Log وWeak units
 local logLines = {}
 local function log(msg, col)
     logLines[#logLines + 1] = os.date("%H:%M:%S") .. "  " .. tostring(msg)
@@ -510,7 +518,47 @@ local function updateWeakUI()
 end
 updateWeakUI()
 
--- ==================== Anti-Lag & Silent Roll Logic ====================
+
+-- 9. قسم Farm slots
+local SLOT_OF = { Story = "STORY", Towers = "RUN", Halloween = "RUN", Hard = "RUN", Raid = "RUN" }
+local FARM_NAME = {
+    Story = "Story farm", Towers = "Battle Towers", Halloween = "Halloween Tower",
+    Hard = "Hard Tower", Raid = "Auto Raid",
+}
+local FARM_ORDER = { "Story", "Towers", "Halloween", "Hard", "Raid" }
+local slotUser = {}
+
+local function updateFarmUI()
+    local names = {}
+    for _, f in ipairs(FARM_ORDER) do
+        if slotUser[SLOT_OF[f]] == f then names[#names + 1] = FARM_NAME[f] end
+    end
+    farmL.Text = ("Running (%d/2): %s"):format(#names, #names > 0 and table.concat(names, " + ") or "nothing")
+end
+
+local function farmGate(name)
+    local slot = SLOT_OF[name]
+    local cur = slotUser[slot]
+    if cur and cur ~= name then
+        log(("Can't start %s: %s is running. Turn %s off first."):format(
+            FARM_NAME[name], FARM_NAME[cur], FARM_NAME[cur]), C.bad)
+        return false
+    end
+    slotUser[slot] = name
+    updateFarmUI()
+    return true
+end
+
+local function farmFree(name)
+    local slot = SLOT_OF[name]
+    if slotUser[slot] == name then
+        slotUser[slot] = nil
+        updateFarmUI()
+    end
+end
+
+
+-- 10. قسم Anti-Lag وSilent Roll
 local function toggleEventConnections(ev, enable)
     if ev and getconnections then
         for _, conn in ipairs(getconnections(ev.OnClientEvent)) do
@@ -553,7 +601,8 @@ H.render = function(v)
     pcall(function() RunService:Set3dRenderingEnabled(not v) end)
 end
 
--- ==================== Weather Monitor ====================
+
+-- 11. قسم Weather Monitor
 local function updateWeatherUI(data)
     if type(data) == "table" then
         local wName = data.Name or data.Weather or "Clear"
@@ -584,7 +633,8 @@ pcall(function()
     end
 end)
 
--- ==================== Farm logic ====================
+
+-- 12. قسم Farm logic (Story والتذاكر وينتهي بزر START)
 local SD
 pcall(function() SD = require(RS:WaitForChild("StoryData", 5)) end)
 
@@ -602,6 +652,7 @@ saveSettings = function()
     pcall(function()
         local d = { Worlds = {}, Team = S.Team, All = S.All, Workers = S.Workers,
             Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First,
+            HalloweenTeam = HW.Team,
             Tickets = S.Tickets, TicketMin = S.TicketMin,
             HardInterval = HS.Interval, HardStopAt = HS.StopAt,
             AntiLag = S.AntiLag == true, SilentRoll = S.SilentRoll == true, Disable3D = S.No3D == true,
@@ -620,11 +671,10 @@ saveSettings = function()
         writefile(CFG_FILE, HttpService:JSONEncode(d))
     end)
 end
-local inFlight = {}  -- keys of fights currently running
-local wstatus = {}   -- per-worker status text
-local nextSlot = 0   -- shared throttle: next time a remote call is allowed
+local inFlight = {}
+local wstatus = {}
+local nextSlot = 0
 
--- One shared throttle for every worker so two fights never trip "slow down" together
 local function throttle(alive)
     local now = os.clock()
     local slot = math.max(now, nextSlot)
@@ -633,7 +683,7 @@ local function throttle(alive)
     return (not alive) or alive()
 end
 local progress, progAt = {}, {}
-local lastSlow = 0 -- os.clock() of the last "slow down" (or last gap decay step)
+local lastSlow = 0
 
 local function keyOf(world, boss, diff) return world .. "|" .. boss .. "|" .. diff end
 
@@ -741,7 +791,6 @@ local function tallyRewards(res)
     end
 end
 
--- Lowers the gap by 1s every GapDecayEvery seconds without a "slow down"
 local function decayGap()
     if S.Gap > S.BaseGap and (os.clock() - lastSlow) >= S.GapDecayEvery then
         S.Gap = math.max(S.BaseGap, S.Gap - 1)
@@ -802,7 +851,10 @@ local function setRunning(on)
     getgenv().StoryFarm = on
     startB.Text = on and "STOP" or "START"
     startB.BackgroundColor3 = on and C.bad or C.good
-    if not on then status.Text = "Idle" end
+    if not on then
+        status.Text = "Idle"
+        farmFree("Story")
+    end
 end
 
 local function updateStatus()
@@ -813,8 +865,6 @@ local function updateStatus()
     status.Text = table.concat(parts, "  ||  ") .. (" | wins %d"):format(wins)
 end
 
--- Picks the first job that is off cooldown and not already running, and claims it
--- ==================== Server state (cooldowns) + Story Tickets ====================
 local qState, qStateAt = nil, 0
 local ticketsLeft
 local ticketNext = {}
@@ -837,7 +887,6 @@ local function stateBoss(world, boss)
     return type(info) == "table" and info or nil
 end
 
--- Bosses with nothing fightable (Ready == 0) are skipped until the world's next ReadyIn.
 local function applyState(st)
     local now = os.clock()
     for _, w in ipairs(WORLDS) do
@@ -873,8 +922,6 @@ local function refreshState(force)
     return qState
 end
 
--- A world is farmed with tickets (instead of single fights) when it is fully cleared,
--- the script has learned how to use a ticket there, and tickets are left.
 local function ticketMode(w)
     if not (S.Tickets and w.On and learned[w.World]) then return false end
     local ws = qState and qState.Worlds and qState.Worlds[w.World]
@@ -913,7 +960,6 @@ local function findWorld(v, d)
     end
 end
 
--- Called by the hook below when YOU press "Use Ticket" in the game: records the exact arguments.
 getgenv().TicketOnUse = function(a)
     local list = {}
     for i = 1, a.n do
@@ -1026,9 +1072,10 @@ local function pickJob()
     end
 end
 
-local spawnWorker -- set by startFarm so the Fights button can add a worker mid-run
+local spawnWorker
 
 local function startFarm()
+    if not farmGate("Story") then return end
     runId += 1
     local my = runId
     local function alive() return getgenv().StoryFarm and runId == my end
@@ -1147,9 +1194,8 @@ startB.MouseButton1Click:Connect(function()
     end
 end)
 
--- ==================== Battle Towers ====================
--- Runs go through the game's own functions (hidden battle, same path as the AFK rejoin),
--- so the game's client never starts a second loop on the same run.
+
+-- 13. قسم Battle Towers
 local GG = _G
 pcall(function()
     local g = getrenv and getrenv()._G
@@ -1203,7 +1249,6 @@ local function refreshTowerState(force)
     if ok and type(res) == "table" then tState, tStateAt = res, os.clock() end
 end
 
--- first part that can be started now, soonest repeat wait (seconds), parts cleared
 local function towerStatus(tw)
     local st = tState and tState.Towers and tState.Towers[tw.Id]
     local cleared = st and tonumber(st.Cleared) or 0
@@ -1224,7 +1269,6 @@ local function towerStatus(tw)
     return ready, soonest, cleared
 end
 
--- ---- UI ----
 local TowerBox = Tabs.Towers:AddLeftGroupbox("Battle towers")
 for _, tw in ipairs(TW) do
     TowerBox:AddToggle("T_" .. tw.Id, { Text = tw.Name, Default = tw.On, Callback = function(v) tw.On = v end })
@@ -1240,6 +1284,7 @@ TCtl:AddToggle("TowerFirst", { Text = "Include first clears", Default = TS.First
     Callback = function(v) TS.First = v end })
 local tSpeedB = mkButton(TCtl, "Max battle speed")
 local tEndB = mkButton(TCtl, "End current run")
+TCtl:AddLabel("Shares the tower slot with Halloween, Hard Tower and Auto Raid: only one of them can run at a time.", true)
 
 local function updateTowerRows()
     for _, tw in ipairs(TW) do
@@ -1259,7 +1304,6 @@ local function updateTowerRows()
     end
 end
 
--- ---- results from the game's own tower flow ----
 if GG and type(GG.ShowBattleTowerResult) == "function" and not getgenv().TowerResultHooked then
     getgenv().TowerResultHooked = true
     local orig = GG.ShowBattleTowerResult
@@ -1301,7 +1345,6 @@ getgenv().TowerOnResult = function(res)
     if res.UnlockedCard then log("[T] Unlocked card: " .. tostring(res.UnlockedCard), C.good) end
 end
 
--- is a battle tower run active? (id = that tower, nil = any battle tower)
 local function runInfo(id)
     local ok, r = pcall(function() return GG.GetAfkRun and GG.GetAfkRun() end)
     if not (ok and type(r) == "table") then return nil end
@@ -1341,7 +1384,10 @@ local function setTRunning(on)
     getgenv().TowerFarm = on
     tStartB.Text = on and "STOP" or "START"
     tStartB.BackgroundColor3 = on and C.bad or C.good
-    if not on then tStatus.Text = "Idle" end
+    if not on then
+        tStatus.Text = "Idle"
+        farmFree("Towers")
+    end
 end
 
 local function startTowers()
@@ -1349,6 +1395,7 @@ local function startTowers()
         log("[T] Couldn't find the game's tower functions (_G.ResumeTowerWithRetry / GetAfkRun)", C.bad)
         return
     end
+    if not farmGate("Towers") then return end
     tRun += 1
     local my = tRun
     local function alive()
@@ -1441,10 +1488,8 @@ tEndB.MouseButton1Click:Connect(function()
     log("[T] Ended " .. id .. (ok and "" or " (request failed)") .. " - paused 10m", ok and C.warn or C.bad)
 end)
 
--- ==================== Hard Tower ====================
--- One floor per TowerNextFloor("Hard") call (the same call the game makes). After every floor
--- GetTowerRunSummary("Hard") is checked, so the loop stops by itself when the run ends, the
--- floor stops advancing (defeat) or the stop-floor is reached. Mods are not picked (HardMods={}).
+
+-- 14. قسم Hard Tower
 local hRun = 0
 local function findRem(name) return R:FindFirstChild(name) or RS:FindFirstChild(name, true) end
 
@@ -1463,6 +1508,7 @@ HNote:AddLabel("1) Turn OFF the game's own Hard Tower auto-climb first, or both 
 HNote:AddLabel("2) A Hard run must already be active (talk to the Hard Tower NPC once).", true)
 HNote:AddLabel("3) It stops by itself on defeat, run end, 3 errors, or the stop floor.", true)
 HNote:AddLabel("4) The first 3 replies are written to the Story log (fields after the battle Log).", true)
+HNote:AddLabel("5) Shares the tower slot with Battle Towers, Halloween and Auto Raid: only one can run at a time.", true)
 
 local function hFlat(t, skip, depth)
     depth = depth or 0
@@ -1507,7 +1553,10 @@ end
 local function setHRunning(on)
     getgenv().HardFarm = on
     hStartB.Text = on and "STOP" or "START"
-    if not on then hStatus.Text = "Idle" end
+    if not on then
+        hStatus.Text = "Idle"
+        farmFree("Hard")
+    end
 end
 
 local function startHard()
@@ -1526,6 +1575,7 @@ local function startHard()
         log("[H] No active Hard run. Start one in the game (Hard Tower NPC), then press START.", C.warn)
         return
     end
+    if not farmGate("Hard") then return end
 
     hRun += 1
     local my = hRun
@@ -1540,7 +1590,7 @@ local function startHard()
     setHRunning(true)
     log(("[H] Started from floor %s (%ds per floor%s)"):format(tostring(s.Floor), HS.Interval,
         HS.StopAt > 0 and (", stop at " .. HS.StopAt) or ""), C.good)
-    if hideRem then pcall(function() hideRem:FireServer(true) end) end -- same as the game's hidden mode
+    if hideRem then pcall(function() hideRem:FireServer(true) end) end
 
     task.spawn(function()
         local stuck, errs, probes, extra = 0, 0, 0, 0
@@ -1621,9 +1671,185 @@ hStartB.MouseButton1Click:Connect(function()
     end
 end)
 
--- ==================== Machines (open / close the game's own windows) ====================
--- Lists the GUIs found in PlayerGui under their in-game names (skill tree, traits machine,
--- crafting machine, ...). Open = shows it (and every parent), Close = hides it.
+
+-- 15. قسم Halloween Tower
+local startHalloween
+do
+    local hwRun = 0
+
+    local HwBox = Tabs.Halloween:AddLeftGroupbox("Halloween Tower")
+    local hwStatus = proxyLabel(HwBox:AddLabel("Idle", true))
+    local hwStartB = mkButton(HwBox, "START")
+    HwBox:AddDropdown("HalloweenTeam", { Values = { "1", "2", "3", "4" }, Default = HW.Team, Text = "Team",
+        Callback = function(v) HW.Team = tonumber(v) or HW.Team end })
+
+    local HwNote = Tabs.Halloween:AddRightGroupbox("Notes")
+    HwNote:AddLabel("50 parts, 10 waves each, a Major part every 10 (the Soul Relic comes from Major 3, probably Part 30).", true)
+    HwNote:AddLabel("An active run is only watched, never restarted. Otherwise the next uncleared part starts.", true)
+    HwNote:AddLabel("It stops on its own when all 50 parts are cleared, after 3 failed starts, or after 3 runs in a row that cleared nothing (change the team).", true)
+    HwNote:AddLabel("Shares the tower slot with Battle Towers, Hard Tower and Auto Raid: only one can run at a time.", true)
+
+    local function hwSer(v, d, b)
+        d = d or 0
+        b = b or { n = 0 }
+        if type(v) == "string" then return string.format("%q", v:sub(1, 200)) end
+        if type(v) ~= "table" then return tostring(v) end
+        if d >= 3 or b.n > 60 then return "{...}" end
+        local o = {}
+        for k, x in pairs(v) do
+            b.n += 1
+            if b.n > 60 then o[#o + 1] = "..." break end
+            o[#o + 1] = tostring(k) .. "=" .. hwSer(x, d + 1, b)
+        end
+        return "{" .. table.concat(o, ", ") .. "}"
+    end
+
+    local function hwAlive(my)
+        return getgenv().HalloweenFarm == true and hwRun == my and not unloaded
+    end
+
+    local function setHwRunning(on)
+        getgenv().HalloweenFarm = on
+        hwStartB.Text = on and "STOP" or "START"
+        if not on then
+            hwStatus.Text = "Idle"
+            farmFree("Halloween")
+        end
+    end
+
+    local function hwFinish(my, reason, col)
+        if hwRun == my then
+            hwRun += 1
+            setHwRunning(false)
+            log("[HW] Stopped: " .. reason, col or C.warn)
+        end
+    end
+
+    startHalloween = function()
+        local startRem = findRem("StartTowerRun")
+        local sumRem = findRem("GetTowerRunSummary")
+        if not (startRem and sumRem) then
+            log("[HW] StartTowerRun / GetTowerRunSummary remotes not found", C.bad)
+            return
+        end
+        local function summary()
+            local ok, r = pcall(function() return sumRem:InvokeServer("Halloween") end)
+            if ok and type(r) == "table" then return r end
+        end
+        if not summary() then
+            log("[HW] Couldn't read the Halloween state", C.warn)
+            return
+        end
+        if not farmGate("Halloween") then return end
+
+        hwRun += 1
+        local my = hwRun
+        setHwRunning(true)
+        log(("[HW] Started (team %d)"):format(HW.Team), C.good)
+
+        task.spawn(function()
+            local fails, started, startCleared = 0, false, 0
+            local lastKey, lastChange, warned, replies, lastLog = nil, os.clock(), false, 0, 0
+
+            while hwAlive(my) do
+                local s = summary()
+                if not s then
+                    hwStatus.Text = "Can't read the run state"
+                    task.wait(10)
+                else
+                    local cleared = tonumber(s.Cleared) or 0
+                    local parts = tonumber(s.Parts) or 50
+
+                    if s.Active then
+                        local run = type(s.Run) == "table" and s.Run or {}
+                        local key = tostring(run.Part) .. ":" .. tostring(run.Wave)
+                        if key ~= lastKey then
+                            lastKey, lastChange, warned = key, os.clock(), false
+                        end
+                        local msg = ("Running part %s wave %s | cleared %d/%d"):format(
+                            tostring(run.Part), tostring(run.Wave), cleared, parts)
+                        hwStatus.Text = msg
+                        if os.clock() - lastLog > 60 then
+                            lastLog = os.clock()
+                            log("[HW] " .. msg, C.dim)
+                        end
+                        if not warned and os.clock() - lastChange > 180 then
+                            warned = true
+                            log("[HW] Part/Wave haven't changed for 3 min - the run may be stuck", C.warn)
+                        end
+                        if started and cleared > startCleared then fails = 0 end
+                        task.wait(5)
+                    else
+                        if started then
+                            started = false
+                            if cleared > startCleared then
+                                fails = 0
+                                log(("[HW] Part(s) cleared, now %d/%d"):format(cleared, parts), C.good)
+                            else
+                                fails += 1
+                                log(("[HW] Run ended without clearing part %d (%d/3)"):format(startCleared + 1, fails), C.warn)
+                                if fails >= 3 then
+                                    return hwFinish(my, "3 failed runs in a row - try another team", C.bad)
+                                end
+                                task.wait(30)
+                            end
+                        end
+
+                        if hwAlive(my) then
+                            if cleared >= parts then
+                                return hwFinish(my, "all " .. parts .. " parts cleared", C.good)
+                            end
+                            local part = cleared + 1
+                            hwStatus.Text = "Starting part " .. part
+                            local ok, res, msg = pcall(function()
+                                return startRem:InvokeServer("Halloween", { Part = part, Team = HW.Team })
+                            end)
+                            if replies < 5 then
+                                replies += 1
+                                log(("[HW] StartTowerRun(%d) -> %s%s"):format(part,
+                                    ok and hwSer(res) or ("error " .. tostring(res)),
+                                    msg ~= nil and (", " .. hwSer(msg)) or ""), C.dim)
+                            end
+                            if not ok then
+                                task.wait(30)
+                            else
+                                started, startCleared = true, cleared
+                                local t0, seen = os.clock(), false
+                                while hwAlive(my) and os.clock() - t0 < 20 do
+                                    task.wait(2)
+                                    local s2 = summary()
+                                    if s2 and s2.Active then seen = true break end
+                                end
+                                if hwAlive(my) and not seen then
+                                    started = false
+                                    fails += 1
+                                    log(("[HW] The run didn't start (%d/3)"):format(fails), C.warn)
+                                    if fails >= 3 then
+                                        return hwFinish(my, "the run won't start - see the StartTowerRun reply above", C.bad)
+                                    end
+                                    task.wait(30)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    hwStartB.MouseButton1Click:Connect(function()
+        if getgenv().HalloweenFarm then
+            hwRun += 1
+            setHwRunning(false)
+            log("[HW] Stopped (a run already in progress keeps going on the server)", C.bad)
+        else
+            startHalloween()
+        end
+    end)
+end
+
+
+-- 16. قسم Machines (وهو الأخير)
 task.spawn(function()
     local Tab = Window:AddTab("Machines")
     local box = Tab:AddLeftGroupbox("Game windows")
@@ -1742,335 +1968,155 @@ task.spawn(function()
     end)
     refreshB.MouseButton1Click:Connect(fill)
 
-    box:AddLabel("Windows that load data from the server when they open may look empty if forced open. If one does, open it the normal way in the game.", true)
-
-    task.wait(3) -- let the game finish building its GUIs
-    fill()
-end)
-
--- ==================== Raid Logger ====================
--- Logs every RaidRemotes InvokeServer call WITH its reply + server events.
--- Play a raid by hand, then press "Copy log" (or getgenv().RaidCopy()). Also saved to RaidLog.txt.
-task.spawn(function()
-    local Tab = Window:AddTab("Raid Logger")
-    local box = Tab:AddLeftGroupbox("Raid logger")
-    local info = proxyLabel(box:AddLabel("Waiting for RaidRemotes...", true))
-
-    local folder = RS:WaitForChild("RaidRemotes", 10)
-    if not folder then
-        info.Text = "RaidRemotes not found - wrong game?"
-        return
-    end
-
-    getgenv().RaidLogOn = true
-    local lines, t0, dirty = {}, os.clock(), false
-
-    local function ser(v, d)
-        d = d or 0
-        if type(v) ~= "table" then
-            return type(v) == "string" and string.format("%q", v) or tostring(v)
-        end
-        if d >= 6 then return "{...}" end
-        local o = {}
-        for k, x in pairs(v) do o[#o + 1] = tostring(k) .. "=" .. ser(x, d + 1) end
-        return "{" .. table.concat(o, ", ") .. "}"
-    end
-
-    local function add(text)
-        lines[#lines + 1] = ("[%.1fs] %s"):format(os.clock() - t0, tostring(text):sub(1, 6000))
-        if #lines > 3000 then table.remove(lines, 1) end
-        dirty = true
-        pcall(function() info.Text = ("Logging: %d lines"):format(#lines) end)
-    end
-    getgenv().RaidLogAdd = add -- the hook always calls the newest run's logger
-
-    local function copyLog()
-        local txt = table.concat(lines, "\n")
-        if setclipboard then setclipboard(txt) end
-        pcall(function() Library:Notify(("%d lines copied"):format(#lines), 4) end)
-        print(("[RaidLogger] %d lines, %d chars copied"):format(#lines, #txt))
-    end
-    getgenv().RaidCopy = copyLog
-
-    box:AddToggle("RaidLogToggle", { Text = "Logging", Default = true,
-        Callback = function(v) getgenv().RaidLogOn = v == true end })
-    local copyB = mkButton(box, "Copy log")
-    local clearB = mkButton(box, "Clear log")
-    copyB.MouseButton1Click:Connect(copyLog)
-    clearB.MouseButton1Click:Connect(function()
-        lines, dirty = {}, true
-        info.Text = "Logging: 0 lines"
-    end)
-    box:AddLabel("Play one raid by hand (pick, start, a few waves), then press Copy log and paste it here.", true)
-
-    -- server -> client events
-    for _, ch in ipairs(folder:GetChildren()) do
-        if ch:IsA("RemoteEvent") then
-            local c = ch.OnClientEvent:Connect(function(...)
-                if not getgenv().RaidLogOn then return end
-                local a = table.pack(...)
-                local parts = {}
-                for i = 1, a.n do parts[i] = ser(a[i]) end
-                add("EVENT " .. ch.Name .. "(" .. table.concat(parts, ", ") .. ")")
-            end)
-            table.insert(getgenv().StoryFarmConns, c)
-        end
-    end
-
-    -- client -> server calls with replies (hook once per session)
-    if hookmetamethod and newcclosure and not getgenv().RaidLoggerHooked then
-        getgenv().RaidLoggerHooked = true
-        local old
-        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            local m = getnamecallmethod()
-            if m == "FireServer" and getgenv().RaidLogOn and typeof(self) == "Instance"
-                and self.Parent and self.Parent.Name == "RaidRemotes"
-                and not (checkcaller and checkcaller()) then
-                local fa = table.pack(...)
-                local fs = {}
-                for i = 1, fa.n do fs[i] = ser(fa[i]) end
-                local fcb = getgenv().RaidLogAdd
-                if fcb then
-                    local fname = self.Name
-                    task.spawn(fcb, "FIRE " .. fname .. "(" .. table.concat(fs, ", ") .. ")")
-                end
-            end
-            if getgenv().RaidLogOn and m == "InvokeServer"
-                and typeof(self) == "Instance" and self.Parent and self.Parent.Name == "RaidRemotes"
-                and not (checkcaller and checkcaller()) then
-                local args = table.pack(...)
-                local res = table.pack(old(self, ...))
-                local cb = getgenv().RaidLogAdd
-                if cb then
-                    local a, r = {}, {}
-                    for i = 1, args.n do a[i] = ser(args[i]) end
-                    for i = 1, res.n do r[i] = ser(res[i]) end
-                    local name = self.Name
-                    task.spawn(cb, name .. "(" .. table.concat(a, ", ") .. ") -> " .. table.concat(r, ", "))
-                end
-                return table.unpack(res, 1, res.n)
-            end
-            return old(self, ...)
-        end))
-    end
-
-    add("logger ready")
-    do
-        local names = {}
-        for _, ch in ipairs(folder:GetChildren()) do names[#names + 1] = ch.Name .. ":" .. ch.ClassName end
-        add("REMOTES " .. table.concat(names, ", "))
-    end
-    log("[Raid] Logger ready - play a raid by hand, then press Copy log", C.good)
-
-    -- save to file every 5s (only when something changed)
-    task.spawn(function()
-        while not unloaded do
-            task.wait(5)
-            if dirty and writefile then
-                dirty = false
-                pcall(writefile, "RaidLog.txt", table.concat(lines, "\n"))
+    local QUICK = {
+        { "MergeUI", "mergeui", "GetMergeCards" },
+        { "ExpeditionUI", "expeditionui", "GetExpeditions" },
+        { "SkillTreeUI", "skilltreeui", nil },
+    }
+    local function findGui(exact, pat)
+        local g = pg:FindFirstChild(exact, true)
+        if g then return g end
+        for _, o in ipairs(pg:GetDescendants()) do
+            if (o:IsA("ScreenGui") or o:IsA("Frame")) and o.Name:lower():find(pat, 1, true) then
+                return o
             end
         end
-    end)
-end)
-
--- ==================== Auto Raid ====================
--- From the logged raid: RaidGateAction("Start") starts the raid from an open gate,
--- RaidRunAction("AutoRetry", true) makes the game fight every enemy and restart after results.
-task.spawn(function()
-    local Tab = Window:AddTab("Auto Raid")
-    local box = Tab:AddLeftGroupbox("Auto raid")
-    local stL = proxyLabel(box:AddLabel("Idle", true))
-    local infoL = proxyLabel(box:AddLabel("Tokens: ? | Clears this session: 0", true))
-    local folder = RS:WaitForChild("RaidRemotes", 10)
-    if not folder then
-        stL.Text = "RaidRemotes not found - wrong game?"
-        return
     end
-
-    getgenv().AutoRaidGen = (getgenv().AutoRaidGen or 0) + 1
-    local gen = getgenv().AutoRaidGen
-    local AR = { On = false, Clears = 0, Tokens = nil }
-    local gate, run, autoFor, lastStart, resultAt, lastPoll = nil, nil, nil, 0, nil, 0
-
-    local function ev(name, fn)
-        local e = folder:FindFirstChild(name)
-        if e and e:IsA("RemoteEvent") then
-            table.insert(getgenv().StoryFarmConns, e.OnClientEvent:Connect(function(...) pcall(fn, ...) end))
-        end
-    end
-    ev("RaidGateState", function(d) gate = d end)
-    ev("RaidRunState", function(d) run = d end)
-    ev("RaidRunResult", function(d)
-        resultAt = os.clock()
-        if type(d) == "table" and d.Cleared then
-            raidClears += 1
-            for _, row in pairs(d.Rows or {}) do
-                if row.Name == lp.Name and row.Tokens then
-                    log(("[Raid] Cleared %s (%s) in %ss | +%s tokens"):format(
-                        tostring(d.Raid), tostring(d.Diff), tostring(d.Time), tostring(row.Tokens)), C.good)
-                end
+    for _, q in ipairs(QUICK) do
+        local qb = mkButton(box, "Open " .. q[1])
+        qb.MouseButton1Click:Connect(function()
+            local gui = findGui(q[1], q[2])
+            if not valid(gui) then
+                log("[Machines] " .. q[1] .. " not found in PlayerGui", C.warn)
+                return
             end
-        end
-    end)
-
-    box:AddToggle("AutoRaidOn", { Text = "Auto raid", Default = false, Callback = function(v)
-        AR.On = v == true
-        autoFor = nil
-        log("[Raid] Auto raid " .. (AR.On and "ON" or "OFF"), AR.On and C.good or C.dim)
-    end })
-    box:AddLabel("Stand in an open raid gate (you as leader). The script presses Start, turns the game's Auto on, and the game then fights and restarts by itself.", true)
-
-    local function call(name, ...)
-        local rem = folder:FindFirstChild(name)
-        if not rem then return false, "missing " .. name end
-        local a = table.pack(...)
-        return pcall(function() return rem:InvokeServer(table.unpack(a, 1, a.n)) end)
+            local rem = q[3] and R:FindFirstChild(q[3])
+            if rem then pcall(function() rem:InvokeServer() end) end
+            openObj(gui)
+            opened[gui] = true
+            log("[Machines] Opened " .. pathOf(gui), C.good)
+        end)
     end
 
-    local autoBuy, wantDiff, buyNext = false, "Normal", 0
-    box:AddDropdown("AutoRaidDiff", { Values = { "Normal", "Hard" }, Default = 1, Text = "Difficulty",
-        Callback = function(v) wantDiff = tostring(v or "Normal") end })
-    box:AddToggle("AutoRaidBuy", { Text = "Auto-buy the weekly pack (500 tokens)", Default = false,
-        Callback = function(v) autoBuy = v == true end })
-    box:AddLabel("Normal clears in about 100s for 90 tokens. Hard was lost to the Thunder God with your current team (0 tokens).", true)
-
-    while not unloaded and getgenv().AutoRaidGen == gen do
-        task.wait(1.5)
-        if AR.On then
-            local phase = type(run) == "table" and run.Phase or nil
-            if phase == "Ordeals" or phase == "Final" then
-                if autoFor ~= run.Id then
-                    local ok, res = call("RaidRunAction", "AutoRetry", true)
-                    if ok and res then
-                        autoFor = run.Id
-                        log("[Raid] Game auto-fight turned on for " .. tostring(run.Raid), C.good)
+    local asuraB = mkButton(box, "Fight Asura (uses Story team)")
+    asuraB.MouseButton1Click:Connect(function()
+        local rem = R:FindFirstChild("FightAsura")
+        if not rem then log("[Asura] FightAsura remote not found", C.bad) return end
+        local ok, res, msg = pcall(function() return rem:InvokeServer(S.Team) end)
+        if not ok then
+            log("[Asura] error: " .. tostring(res):sub(1, 120), C.bad)
+        elseif type(res) == "table" then
+            log("[Asura] " .. dumpTable(res):sub(1, 200), C.good)
+            if res.GrantId then
+                task.wait(S.FightDelay)
+                for _ = 1, S.MaxDoneTries do
+                    local okC, done = pcall(function()
+                        local gr = R:FindFirstChild(res.GrantRemote or "AsuraFightDone") or R.AsuraFightDone
+                        return gr:InvokeServer(res.GrantId)
+                    end)
+                    if okC and done then
+                        log("[Asura] Claimed (+" .. tostring(res.BossDamage) .. " damage)", C.good)
+                        break
                     end
-                end
-                stL.Text = ("Raid running: %s (%s) - %s"):format(tostring(run.Raid), tostring(run.Diff), phase)
-            elseif phase == "Results" then
-                stL.Text = "Results - waiting for the game to restart"
-                if resultAt and os.clock() - resultAt > 45 then
-                    resultAt = nil
-                    call("RaidRunAction", "Back")
-                    run = nil
-                end
-            else
-                local me
-                if type(gate) == "table" and type(gate.Members) == "table" then
-                    for _, m in pairs(gate.Members) do
-                        if m.UserId == lp.UserId then me = m end
-                    end
-                end
-                if me and me.Leader and me.Ready ~= false and not gate.Starting and os.clock() - lastStart > 6 then
-                    lastStart = os.clock()
-                    if gate.Diff and gate.Diff ~= wantDiff then
-                        local okp = call("RaidGateAction", "Pick", gate.Raid or "SkyIsland", wantDiff)
-                        log(("[Raid] Picked difficulty %s -> %s"):format(wantDiff, tostring(okp)), C.dim)
-                        task.wait(1)
-                    end
-                    local ok, res = call("RaidGateAction", "Start")
-                    log(("[Raid] Start pressed -> %s"):format(tostring(ok and res)), C.dim)
-                    stL.Text = "Starting the raid..."
-                elseif me then
-                    stL.Text = gate.Starting and ("Starting in %ss"):format(tostring(gate.Starting))
-                        or "In the gate (only the leader can start)"
-                else
-                    stL.Text = "Waiting: stand in a raid gate (the game puts you in one after the results)"
-                end
-            end
-
-            if os.clock() - lastPoll > 30 then
-                lastPoll = os.clock()
-                local ok, st = call("GetRaidState")
-                if ok and type(st) == "table" then AR.Tokens = st.Tokens end
-                if autoBuy and tonumber(AR.Tokens) and AR.Tokens >= 500 and os.clock() > buyNext then
-                    local okb, rb, mb = call("BuyRaidItem", "Pack1MWeekly", 1)
-                    if okb and rb == true then
-                        log("[Raid] " .. tostring(mb), C.good)
-                        lastPoll = 0
-                    else
-                        buyNext = os.clock() + 600
-                        log("[Raid] Buy failed: " .. tostring(mb or rb), C.dim)
-                    end
+                    task.wait(S.RetryDelay)
                 end
             end
         else
-            stL.Text = "Idle"
+            log("[Asura] reply: " .. tostring(msg or res), C.dim)
         end
-        infoL.Text = ("Tokens: %s | Raid clears (total): %d"):format(tostring(AR.Tokens or "?"), raidClears)
+    end)
+
+    local asuraRun, asuraFights, asuraDmg = 0, 0, 0
+    local function fmtNum(n)
+        n = tonumber(n) or 0
+        if n >= 1e12 then return ("%.2fT"):format(n / 1e12) end
+        if n >= 1e9 then return ("%.2fB"):format(n / 1e9) end
+        if n >= 1e6 then return ("%.2fM"):format(n / 1e6) end
+        if n >= 1e3 then return ("%.1fK"):format(n / 1e3) end
+        return tostring(math.floor(n))
     end
-end)
+    local asuraL = proxyLabel(box:AddLabel("Asura auto: off", true))
+    box:AddToggle("AsuraAuto", { Text = "Auto fight Asura (repeat while boss is here)", Default = false,
+        Callback = function(on)
+            asuraRun += 1
+            local my = asuraRun
+            if not on then
+                asuraL.Text = "Asura auto: off"
+                log("[Asura] Auto stopped", C.dim)
+                return
+            end
+            local function alive() return asuraRun == my and not unloaded end
+            local function sleep(n)
+                for _ = 1, n do
+                    if not alive() then return false end
+                    task.wait(1)
+                end
+                return alive()
+            end
+            log("[Asura] Auto started (team " .. S.Team .. ")", C.good)
+            task.spawn(function()
+                local probes = 0
+                while alive() do
+                    local rem = R:FindFirstChild("FightAsura")
+                    if not rem then
+                        log("[Asura] FightAsura remote not found", C.bad)
+                        asuraL.Text = "Asura auto: remote missing"
+                        return
+                    end
+                    asuraL.Text = ("Asura auto: fighting | fights %d"):format(asuraFights)
+                    local ok, res, msg = pcall(function() return rem:InvokeServer(S.Team) end)
+                    if probes < 5 then
+                        probes += 1
+                        local raw = type(res) == "table" and dumpTable(res) or tostring(res)
+                        log(("[Asura] reply#%d ok=%s %s %s"):format(probes, tostring(ok), raw:sub(1, 200),
+                            msg ~= nil and tostring(msg) or ""), C.dim)
+                    end
+                    local m = tostring(msg or (type(res) == "string" and res) or ""):lower()
+                    local failed = (not ok) or res == nil or res == false or type(res) == "string"
+                        or (type(res) == "table" and (res.Ok == false or res.Success == false or res.Error ~= nil))
+                    if not ok then
+                        if not sleep(30) then return end
+                    elseif m:find("slow") then
+                        if not sleep(10) then return end
+                    elseif m:find("busy") then
+                        asuraL.Text = "Asura auto: battle slots busy, retry in 15s"
+                        if not sleep(15) then return end
+                    elseif failed then
+                        asuraL.Text = "Asura auto: boss not available, retry in 60s"
+                        if not sleep(60) then return end
+                    elseif type(res) == "table" and res.GrantId then
+                        -- Winner=B is normal here: you can't kill the boss, the fight just adds damage.
+                        if not sleep(S.FightDelay) then return end
+                        local claimed = false
+                        for _ = 1, S.MaxDoneTries do
+                            local okC, done = pcall(function()
+                                local gr = R:FindFirstChild(res.GrantRemote or "AsuraFightDone") or R.AsuraFightDone
+                                return gr:InvokeServer(res.GrantId)
+                            end)
+                            if okC and done then claimed = true break end
+                            if not sleep(S.RetryDelay) then return end
+                        end
+                        if claimed then
+                            asuraFights += 1
+                            asuraDmg += tonumber(res.BossDamage) or 0
+                            asuraL.Text = ("Asura auto: fights %d | damage %s"):format(asuraFights, fmtNum(asuraDmg))
+                            log(("[Asura] Fight #%d claimed | +%s damage (session %s)"):format(
+                                asuraFights, fmtNum(tonumber(res.BossDamage) or 0), fmtNum(asuraDmg)), C.good)
+                        else
+                            log("[Asura] AsuraFightDone failed - retrying in 15s", C.warn)
+                            if not sleep(15) then return end
+                        end
+                        if not sleep(2) then return end
+                    else
+                        log("[Asura] Unknown reply: " .. (type(res) == "table" and dumpTable(res) or tostring(res)):sub(1, 200), C.warn)
+                        if not sleep(15) then return end
+                    end
+                end
+            end)
+        end })
 
-Library:OnUnload(function()
-    getgenv().AutoRaidGen = (getgenv().AutoRaidGen or 0) + 1
-    getgenv().RaidLogOn = false
-    getgenv().RaidLogAdd = nil
-    getgenv().RaidCopy = nil
-end)
+    box:AddLabel("Windows that load data from the server when they open may look empty if forced open. If one does, open it the normal way in the game.", true)
 
-Library:OnUnload(function()
-    unloaded = true
-    pcall(saveSettings)
-    pcall(function() RunService:Set3dRenderingEnabled(true) end)
-    getgenv().TicketOnUse = nil
-    if S.AntiLag then
-        toggleEventConnections(RS:FindFirstChild("HitAnnounce"), true)
-        toggleEventConnections(RS:FindFirstChild("NewCardAlert"), true)
-        toggleEventConnections(R:FindFirstChild("PlayerRolled"), true)
-        toggleEventConnections(R:FindFirstChild("PlayerShowcase"), true)
-    end
-    runId += 1
-    getgenv().StoryFarm = false
-    getgenv().BlockAutoRejoin = false -- the hook stays installed but stops blocking
-    tRun += 1
-    getgenv().TowerFarm = false
-    hRun += 1
-    getgenv().HardFarm = false
-    getgenv().TowerOnResult = nil
-    getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
-    if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
-    if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
-    for _, c in ipairs(getgenv().StoryFarmConns or {}) do pcall(function() c:Disconnect() end) end
-    getgenv().StoryFarmConns = {}
-    getgenv().StoryFarmLib = nil
-end)
-
-log("Ready. Anti-AFK on. Anti-Lag & Weather Monitor loaded.", C.dim)
-
--- re-apply the toggles saved last session (the handlers skip a value that is already active)
-task.delay(2, function()
-    if unloaded then return end
-    if S.SavedAntiLag then pcall(H.antiLag, true) end
-    if S.SavedNo3D then pcall(H.render, true) end
-    if S.SavedSilentRoll then pcall(H.silentRoll, true) end
-end)
-task.spawn(function()
-    pcall(function() refreshTowerState(true) end)
-    pcall(updateTowerRows)
-end)
-
-if getgenv().StoryFarmAutoStart then
-    getgenv().StoryFarmAutoStart = nil
-    log("Auto-start after rejoin in 8s", C.good)
-    task.delay(8, startFarm)
-end
-
-if getgenv().TowerFarmAutoStart then
-    getgenv().TowerFarmAutoStart = nil
-    log("[T] Tower auto-start after rejoin in 12s", C.good)
-    task.delay(12, startTowers)
-end
-
-if getgenv().HardFarmAutoStart then
-    getgenv().HardFarmAutoStart = nil
-    log("[H] Hard Tower auto-start after rejoin in 16s", C.good)
-    task.delay(16, startHard)
-end
-
-task.spawn(function()
-    while not unloaded do
-        task.wait(10)
-        if not unloaded then saveSettings() end
-    end
+    task.wait(3)
+    fill()
 end)
