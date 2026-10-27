@@ -19,6 +19,17 @@
        through the game's own functions, so the game's AFK-rejoin watcher never fights with us.
 ]]
 
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+-- 18) UI is now Obsidian (deividcomsono/Obsidian), loaded over HTTP at start.
+-- v4 changes:
+-- 15) Weak-units tracker: first loss retries after 15s, second loss pauses that difficulty and
+--     everything above it and shows it in the red bar; "Retry Weak" clears it.
+-- 16) Cooldowns are read from the server (GetStoryTicketState): bosses with nothing ready are skipped,
+--     and locked difficulties are never probed (uses Cleared + 1).
+-- 17) Auto Story Tickets: for fully cleared worlds, bosses are left to cool down and collected with one
+--     ticket once "Min ready" are ready. The script records how the game calls UseStoryTicket
+--     (press the game's "Use Ticket" once per world) and replays exactly that.
 -- v2 changes:
 -- 9)  A lost fight now also pauses the higher difficulties of that boss (they are locked anyway).
 -- 10) Settings (worlds, difficulty, bosses, team, fights, all-diffs, towers) are saved to
@@ -41,6 +52,7 @@ local R  = RS:WaitForChild("RollRemotes")
 
 local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 if getgenv().StoryFarmGui then pcall(function() getgenv().StoryFarmGui:Destroy() end) end
+if getgenv().StoryFarmLib then pcall(function() getgenv().StoryFarmLib:Unload() end) end
 if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
 if getgenv().StoryFarmConns then
     for _, c in ipairs(getgenv().StoryFarmConns) do pcall(function() c:Disconnect() end) end
@@ -126,8 +138,11 @@ local WORLDS = {
     { World = "Fuyuki",         Diff = 6, On = false, Bosses = "" },
 }
 local KNOWN = {
-    Namek = { "Vegeta", "Frieza", "Goku" },
-    InfinityCastle = { "Muzan" },
+    Namek          = { "Zarbon", "Ginyu", "Vegeta", "Frieza", "Goku" },
+    InfinityCastle = { "Nakime", "Akaza", "Douma", "Kokushibo", "Muzan" },
+    Leaf           = { "Deidara", "Hidan", "Obito", "Itachi", "Pain" },
+    Dressrosa      = { "Fujitora", "Sabo", "Lucy", "Law", "Doflamingo" },
+    Fuyuki         = { "Rider", "Lancer", "Archer", "Berserker", "Saber" },
 }
 local S = {
     Team = 1, FightDelay = 4, RetryDelay = 2, MaxDoneTries = 5,
@@ -138,12 +153,18 @@ local S = {
     AntiLag = false,
     SilentRoll = false,
     Workers = 2, -- how many fights run at the same time (1 or 2)
+    Tickets = false,
+    TicketMin = 10,
 }
 
 local kills, rewards, wins = {}, {}, 0
 local tparts = 0 -- tower parts cleared this session
+local failCount = {} -- consecutive losses per boss|diff
+local weakList = {}  -- boss|diff that beat the player twice in a row
 
 local TW, TS
+local saveSettings
+local learned = {} -- world -> args the game sent to UseStoryTicket
 local SCRIPT_FILE = getgenv().StoryFarmFile or "StoryAutoFarm.lua"
 local CFG_FILE = "StoryAutoFarmSettings.json"
 local CFG = {}
@@ -166,109 +187,152 @@ do
     if type(CFG.Team) == "number" and CFG.Team >= 1 and CFG.Team <= 4 then S.Team = CFG.Team end
     if type(CFG.All) == "boolean" then S.All = CFG.All end
     if CFG.Workers == 1 or CFG.Workers == 2 then S.Workers = CFG.Workers end
+    if type(CFG.Tickets) == "boolean" then S.Tickets = CFG.Tickets end
+    if type(CFG.TicketMin) == "number" and CFG.TicketMin >= 1 and CFG.TicketMin <= 60 then
+        S.TicketMin = math.floor(CFG.TicketMin)
+    end
+    pcall(function()
+        local dec = HttpService:JSONDecode(CFG.TicketArgsJson or "{}")
+        if type(dec) == "table" then learned = dec end
+    end)
 end
 
--- ==================== UI helpers ====================
+-- ==================== Obsidian UI ====================
 local C = {
-    bg = Color3.fromRGB(18, 18, 26), bar = Color3.fromRGB(28, 26, 44),
-    row = Color3.fromRGB(28, 28, 40), accent = Color3.fromRGB(128, 90, 255),
     text = Color3.fromRGB(230, 230, 240), dim = Color3.fromRGB(150, 150, 170),
     good = Color3.fromRGB(70, 200, 120), bad = Color3.fromRGB(230, 80, 90),
     warn = Color3.fromRGB(240, 180, 60),
 }
 
-local function new(class, props)
-    local i = Instance.new(class)
-    local parent = props.Parent
-    props.Parent = nil
-    for k, v in pairs(props) do i[k] = v end
-    i.Parent = parent
-    return i
-end
-local function corner(p, r) return new("UICorner", { CornerRadius = UDim.new(0, r), Parent = p }) end
-local function stroke(p, col, th) return new("UIStroke", { Color = col, Thickness = th, Parent = p }) end
-local function label(p, text, pos, size, props)
-    local o = { Text = text, Position = pos, Size = size, BackgroundTransparency = 1,
-        TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 14,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = p }
-    for k, v in pairs(props or {}) do o[k] = v end
-    return new("TextLabel", o)
-end
-local function button(p, text, pos, size, col)
-    local b = new("TextButton", { Text = text, Position = pos, Size = size, BackgroundColor3 = col,
-        TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14, AutoButtonColor = true, Parent = p })
-    corner(b, 6)
-    return b
+local function fetch(url)
+    local ok, body = pcall(function() return game:HttpGet(url) end)
+    if ok and type(body) == "string" and #body > 0 then return body end
+    local req = (syn and syn.request) or http_request or request
+    if req then
+        local ok2, res = pcall(req, { Url = url, Method = "GET" })
+        if ok2 and type(res) == "table" and res.Body then return res.Body end
+    end
 end
 
-local gui = new("ScreenGui", { Name = "StoryFarmUI", ResetOnSpawn = false,
-    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = parentGui })
-getgenv().StoryFarmGui = gui
-
-local win = new("Frame", { Size = UDim2.fromOffset(460, 580), Position = UDim2.new(0.5, -230, 0.5, -230),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0, Parent = gui })
-corner(win, 10); stroke(win, C.accent, 1.5)
-
-local bar = new("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C.bar, BorderSizePixel = 0, Parent = win })
-corner(bar, 10)
-label(bar, "Story Auto Farm", UDim2.fromOffset(12, 0), UDim2.new(1, -90, 1, 0),
-    { Font = Enum.Font.GothamBold, TextSize = 16 })
-local closeB = button(bar, "X", UDim2.new(1, -32, 0, 5), UDim2.fromOffset(24, 24), C.bad)
-local minB   = button(bar, "-", UDim2.new(1, -62, 0, 5), UDim2.fromOffset(24, 24), C.accent)
-
-local body = new("Frame", { Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 1, -34),
-    BackgroundTransparency = 1, Parent = win })
-
--- Dragging (connections are stored so they can be disconnected on close)
+local Library
 do
-    local conns = getgenv().StoryFarmConns
-    local dragging, startPos, startMouse
-    conns[#conns + 1] = bar.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            dragging, startPos, startMouse = true, win.Position, i.Position
-        end
-    end)
-    conns[#conns + 1] = UIS.InputChanged:Connect(function(i)
-        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-            local d = i.Position - startMouse
-            win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-        end
-    end)
-    conns[#conns + 1] = UIS.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
+    local src = fetch("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/Library.lua")
+    local fn = src and loadstring(src)
+    Library = fn and fn()
+end
+if not Library then
+    warn("[StoryFarm] Couldn't load the Obsidian UI library (HTTP blocked or the link changed)")
+    return
+end
+getgenv().StoryFarmLib = Library
+
+local H = {}            -- handlers filled in further down (the UI is built before the logic)
+local unloaded = false
+
+local Window = Library:CreateWindow({
+    Title = "Story Auto Farm",
+    Footer = "Anti-AFK · server cooldowns · tickets",
+    NotifySide = "Right",
+    ShowCustomCursor = false,
+})
+local Tabs = {
+    Story    = Window:AddTab("Story"),
+    Towers   = Window:AddTab("Towers"),
+    Tickets  = Window:AddTab("Tickets"),
+    Stats    = Window:AddTab("Stats"),
+    Settings = Window:AddTab("UI Settings"),
+}
+
+-- Small adapters so the farm logic keeps using ".Text = ..." and "MouseButton1Click:Connect(...)"
+local function proxyLabel(lbl)
+    return setmetatable({}, { __newindex = function(_, k, v)
+        if k == "Text" then pcall(function() lbl:SetText(tostring(v)) end) end
+    end })
+end
+local function mkButton(group, text)
+    local fns, btn = {}, nil
+    btn = group:AddButton({ Text = text, Func = function()
+        for _, fn in ipairs(fns) do task.spawn(fn) end
+    end })
+    return setmetatable({ MouseButton1Click = { Connect = function(_, fn) fns[#fns + 1] = fn end } }, {
+        __newindex = function(_, k, v)
+            if k == "Text" then pcall(function() btn:SetText(tostring(v)) end) end
+        end })
 end
 
--- ==================== Stats & Weather Panel (above window) ====================
-local PH = 118
-local statsP = new("Frame", { Position = UDim2.new(0, 0, 0, -(PH + 8)), Size = UDim2.new(1, 0, 0, PH),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0, Parent = win })
-corner(statsP, 10); stroke(statsP, C.accent, 1.5)
+local status, startB, logLbl, retryWeakB, weakL, weakBar, ticketToggle, ticketL
+local killsL, weatherL, rewL, resetB, rejoinB, hopB
+weakBar = setmetatable({}, { __newindex = function() end })
 
-label(statsP, "Session stats", UDim2.fromOffset(12, 6), UDim2.new(1, -250, 0, 24),
-    { Font = Enum.Font.GothamBold, TextSize = 15 })
-local resetB  = button(statsP, "Reset",      UDim2.new(1, -240, 0, 6), UDim2.fromOffset(56, 24), C.row)
-local rejoinB = button(statsP, "Rejoin",     UDim2.new(1, -178, 0, 6), UDim2.fromOffset(70, 24), C.accent)
-local hopB    = button(statsP, "Server Hop", UDim2.new(1, -102, 0, 6), UDim2.fromOffset(94, 24), C.accent)
-resetB.TextSize = 13; rejoinB.TextSize = 13; hopB.TextSize = 13
+do -- Story tab
+    local Control = Tabs.Story:AddLeftGroupbox("Control")
+    status = proxyLabel(Control:AddLabel("Idle", true))
+    startB = mkButton(Control, "START")
+    Control:AddDropdown("StoryTeam", { Values = { "1", "2", "3", "4" }, Default = S.Team, Text = "Team",
+        Callback = function(v) H.team(v) end })
+    Control:AddDropdown("StoryFights", { Values = { "1", "2" }, Default = S.Workers, Text = "Fights at once",
+        Callback = function(v) H.fights(v) end })
+    Control:AddToggle("StoryAll", { Text = "All difficulties (Easy up to chosen)", Default = S.All,
+        Callback = function(v) S.All = v end })
+    Control:AddToggle("AntiLag", { Text = "Anti-Lag (mute roll/hit events)", Default = false,
+        Callback = function(v) H.antiLag(v) end })
+    Control:AddToggle("SilentRoll", { Text = "Silent auto-roll", Default = false,
+        Callback = function(v) H.silentRoll(v) end })
+    Control:AddToggle("Disable3D", { Text = "Disable 3D rendering (saves CPU/GPU)", Default = false,
+        Callback = function(v) H.render(v) end })
 
-local killsL = label(statsP, "Bosses killed: 0", UDim2.fromOffset(12, 32), UDim2.new(0.55, -12, 0, 18),
-    { TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd })
+    local WeakBox = Tabs.Story:AddLeftGroupbox("Weak units")
+    weakL = proxyLabel(WeakBox:AddLabel("…", true))
+    retryWeakB = mkButton(WeakBox, "Retry weak bosses")
 
-local weatherL = label(statsP, "Weather: Checking...", UDim2.new(0.55, 0, 0, 32), UDim2.new(0.45, -12, 0, 18),
-    { TextSize = 13, TextColor3 = C.warn, TextXAlignment = Enum.TextXAlignment.Right })
+    local LogBox = Tabs.Story:AddLeftGroupbox("Log")
+    logLbl = LogBox:AddLabel("Starting…", true)
 
-local rewF = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 54), Size = UDim2.new(1, -16, 1, -60),
-    BackgroundColor3 = Color3.fromRGB(12, 12, 18), BorderSizePixel = 0, ScrollBarThickness = 3,
-    CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = statsP })
-corner(rewF, 6)
-new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), PaddingTop = UDim.new(0, 3), Parent = rewF })
-local rewL = new("TextLabel", { Text = "No rewards yet", Size = UDim2.new(1, 0, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, TextColor3 = C.dim,
-    Font = Enum.Font.Code, TextSize = 12, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top, Parent = rewF })
+    local DIFF_LABELS = {}
+    for i, d in ipairs(DIFF) do DIFF_LABELS[i] = d[1] .. " (" .. d[2] .. ")" end
+    for _, w in ipairs(WORLDS) do
+        local gb = Tabs.Story:AddRightGroupbox(w.World)
+        gb:AddToggle("W_" .. w.World, { Text = "Farm this world", Default = w.On,
+            Callback = function(v) w.On = v end })
+        gb:AddDropdown("D_" .. w.World, { Values = DIFF_LABELS, Default = w.Diff, Text = "Highest difficulty",
+            Callback = function(v) w.Diff = table.find(DIFF_LABELS, v) or w.Diff end })
+        gb:AddInput("B_" .. w.World, { Default = w.Bosses, Text = "Bosses", Placeholder = "empty = all unlocked bosses",
+            Callback = function(v) w.Bosses = tostring(v or "") end })
+    end
+end
+
+do -- Tickets tab
+    local TixBox = Tabs.Tickets:AddLeftGroupbox("Story tickets")
+    ticketToggle = TixBox:AddToggle("TicketsOn", { Text = "Auto-use tickets", Default = S.Tickets,
+        Callback = function(v) H.tickets(v) end })
+    TixBox:AddDropdown("TicketMin", { Values = { "5", "10", "15", "20", "30" },
+        Default = table.find({ 5, 10, 15, 20, 30 }, S.TicketMin) or 2, Text = "Min bosses ready",
+        Callback = function(v) H.minReady(v) end })
+    ticketL = proxyLabel(TixBox:AddLabel("Tickets: ?", true))
+    TixBox:AddLabel("For each world, press the game's own 'Use Ticket' once so the script learns how to call it.", true)
+end
+
+do -- Stats tab
+    local StatBox = Tabs.Stats:AddLeftGroupbox("Session")
+    killsL = proxyLabel(StatBox:AddLabel("Bosses killed: 0", true))
+    weatherL = proxyLabel(StatBox:AddLabel("Weather: Checking...", true))
+    rewL = proxyLabel(StatBox:AddLabel("No rewards yet", true))
+    resetB = mkButton(StatBox, "Reset stats")
+
+    local AccBox = Tabs.Stats:AddRightGroupbox("Account")
+    rejoinB = mkButton(AccBox, "Rejoin")
+    hopB = mkButton(AccBox, "Server Hop")
+end
+
+do -- UI settings tab
+    local MenuBox = Tabs.Settings:AddLeftGroupbox("Menu")
+    MenuBox:AddButton({ Text = "Unload script", Func = function() Library:Unload() end })
+    pcall(function()
+        MenuBox:AddLabel("Menu keybind"):AddKeyPicker("MenuKeybind",
+            { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
+        Library.ToggleKeybind = Library.Options.MenuKeybind
+    end)
+end
 
 local function refreshStats()
     local parts = {}
@@ -285,7 +349,6 @@ local function refreshStats()
     local out = {}
     for _, n in ipairs(names) do out[#out + 1] = n .. " x" .. rewards[n] end
     rewL.Text = #out > 0 and table.concat(out, "   ·   ") or "No rewards yet"
-    rewL.TextColor3 = #out > 0 and C.text or C.dim
 end
 
 resetB.MouseButton1Click:Connect(function()
@@ -294,6 +357,7 @@ resetB.MouseButton1Click:Connect(function()
 end)
 
 local function queueRerun()
+    if saveSettings then pcall(saveSettings) end
     pcall(function()
         if queue_on_teleport and isfile and isfile(SCRIPT_FILE) then
             queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; loadstring(readfile(%q))()')
@@ -375,112 +439,27 @@ hopB.MouseButton1Click:Connect(function()
     end)
 end)
 
--- ==================== Panes (Story / Towers) ====================
-local storyPane = new("Frame", { Size = UDim2.new(1, 0, 0, 376), BackgroundTransparency = 1, Parent = body })
-local towerPane = new("Frame", { Size = UDim2.new(1, 0, 0, 376), BackgroundTransparency = 1,
-    Visible = false, Parent = body })
-
--- ==================== World rows ====================
-for idx, w in ipairs(WORLDS) do
-    local y = 8 + (idx - 1) * 58
-    local row = new("Frame", { Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 52),
-        BackgroundColor3 = C.row, BorderSizePixel = 0, Parent = storyPane })
-    corner(row, 8)
-
-    local chk = button(row, w.On and "✓" or "", UDim2.fromOffset(8, 6), UDim2.fromOffset(24, 24),
-        w.On and C.good or Color3.fromRGB(60, 60, 78))
-    chk.MouseButton1Click:Connect(function()
-        w.On = not w.On
-        chk.Text = w.On and "✓" or ""
-        chk.BackgroundColor3 = w.On and C.good or Color3.fromRGB(60, 60, 78)
-    end)
-
-    label(row, w.World, UDim2.fromOffset(40, 6), UDim2.fromOffset(170, 24),
-        { Font = Enum.Font.GothamBold, TextSize = 15 })
-
-    local db = button(row, "", UDim2.new(1, -198, 0, 6), UDim2.fromOffset(190, 24), C.accent)
-    db.TextSize = 13
-    w.refresh = function()
-        db.Text = (S.All and "Up to " or "Only ") .. DIFF[w.Diff][1] .. " (" .. DIFF[w.Diff][2] .. ")"
-    end
-    w.refresh()
-    db.MouseButton1Click:Connect(function()
-        w.Diff = w.Diff % #DIFF + 1
-        w.refresh()
-    end)
-
-    local box = new("TextBox", { Text = w.Bosses, PlaceholderText = "Bosses (empty = auto from game data)",
-        Position = UDim2.fromOffset(8, 32), Size = UDim2.new(1, -16, 0, 16), BackgroundColor3 = C.bg,
-        TextColor3 = C.text, PlaceholderColor3 = C.dim, Font = Enum.Font.Code, TextSize = 13,
-        ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, Parent = row })
-    corner(box, 4)
-    box:GetPropertyChangedSignal("Text"):Connect(function() w.Bosses = box.Text end)
-end
-
--- ==================== Controls + Extra Features + Log ====================
-local teamB = button(storyPane, "Team " .. S.Team, UDim2.fromOffset(8, 304), UDim2.fromOffset(68, 34), C.row)
-teamB.TextSize = 13
-teamB.MouseButton1Click:Connect(function()
-    S.Team = S.Team % 4 + 1
-    teamB.Text = "Team " .. S.Team
-end)
-
-local fightsB = button(storyPane, "Fights: " .. S.Workers, UDim2.fromOffset(80, 304), UDim2.fromOffset(84, 34), C.accent)
-fightsB.TextSize = 13
-
-local allB = button(storyPane, "All diffs: " .. (S.All and "ON" or "OFF"), UDim2.fromOffset(168, 304), UDim2.fromOffset(106, 34), S.All and C.accent or C.row)
-allB.TextSize = 13
-allB.MouseButton1Click:Connect(function()
-    S.All = not S.All
-    allB.Text = "All diffs: " .. (S.All and "ON" or "OFF")
-    allB.BackgroundColor3 = S.All and C.accent or C.row
-    for _, w in ipairs(WORLDS) do w.refresh() end
-end)
-
-local startB = button(storyPane, "START", UDim2.fromOffset(282, 304), UDim2.new(1, -290, 0, 34), C.good)
-
--- Second Row Controls (Anti-Lag & Silent Auto Roll)
-local antiLagB = button(storyPane, "Anti-Lag: OFF", UDim2.fromOffset(8, 344), UDim2.fromOffset(142, 28), C.row)
-antiLagB.TextSize = 13
-
-local silentRollB = button(storyPane, "Silent Roll: OFF", UDim2.fromOffset(154, 344), UDim2.fromOffset(142, 28), C.row)
-silentRollB.TextSize = 13
-
-local renderB = button(storyPane, "3D Render: ON", UDim2.fromOffset(300, 344), UDim2.new(1, -308, 0, 28), C.row)
-renderB.TextSize = 13
-local render3d = true
-renderB.MouseButton1Click:Connect(function()
-    render3d = not render3d
-    pcall(function() RunService:Set3dRenderingEnabled(render3d) end)
-    renderB.Text = "3D Render: " .. (render3d and "ON" or "OFF")
-    renderB.BackgroundColor3 = render3d and C.row or C.accent
-end)
-
-local status = label(body, "Idle", UDim2.fromOffset(10, 378), UDim2.new(1, -20, 0, 18),
-    { TextColor3 = C.dim, TextSize = 13 })
-
-local logF = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 400), Size = UDim2.new(1, -16, 1, -408),
-    BackgroundColor3 = Color3.fromRGB(12, 12, 18), BorderSizePixel = 0, ScrollBarThickness = 4,
-    CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = body })
-corner(logF, 6)
-new("UIListLayout", { Padding = UDim.new(0, 1), Parent = logF })
-new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingTop = UDim.new(0, 4), Parent = logF })
-
-local logCount = 0
-local logLabels = {}
+-- ==================== Log + weak units ====================
+local logLines = {}
 local function log(msg, col)
-    logCount += 1
-    local lbl = new("TextLabel", { Text = os.date("%H:%M:%S") .. "  " .. msg, Size = UDim2.new(1, -8, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, TextColor3 = col or C.text,
-        Font = Enum.Font.Code, TextSize = 12, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-        LayoutOrder = logCount, Parent = logF })
-    logLabels[#logLabels + 1] = lbl
-    while #logLabels > 60 do
-        local oldest = table.remove(logLabels, 1)
-        if oldest then oldest:Destroy() end
-    end
-    task.defer(function() logF.CanvasPosition = Vector2.new(0, 1e6) end)
+    logLines[#logLines + 1] = os.date("%H:%M:%S") .. "  " .. tostring(msg)
+    while #logLines > 14 do table.remove(logLines, 1) end
+    pcall(function() logLbl:SetText(table.concat(logLines, "\n")) end)
+    if col == C.bad then pcall(function() Library:Notify(tostring(msg), 6) end) end
 end
+
+local function updateWeakUI()
+    local items = {}
+    for _, v in pairs(weakList) do
+        items[#items + 1] = v.boss .. " [" .. v.diffName .. "]"
+    end
+    if #items == 0 then
+        weakL.Text = "✓ كل الصعوبات ماشية تمام (ما فيه بوس صعب حالياً)"
+    else
+        weakL.Text = "⚠️ يونتاتك ضعيفة ضد: " .. table.concat(items, " ، ")
+    end
+end
+updateWeakUI()
 
 -- ==================== Anti-Lag & Silent Roll Logic ====================
 local function toggleEventConnections(ev, enable)
@@ -493,25 +472,22 @@ local function toggleEventConnections(ev, enable)
     end
 end
 
-antiLagB.MouseButton1Click:Connect(function()
-    S.AntiLag = not S.AntiLag
-    antiLagB.Text = "Anti-Lag: " .. (S.AntiLag and "ON" or "OFF")
-    antiLagB.BackgroundColor3 = S.AntiLag and C.accent or C.row
+H.team = function(v) S.Team = tonumber(v) or S.Team end
 
+H.antiLag = function(v)
+    if v == S.AntiLag then return end
+    S.AntiLag = v
     local enableEvents = not S.AntiLag
     toggleEventConnections(RS:FindFirstChild("HitAnnounce"), enableEvents)
     toggleEventConnections(RS:FindFirstChild("NewCardAlert"), enableEvents)
     toggleEventConnections(R:FindFirstChild("PlayerRolled"), enableEvents)
     toggleEventConnections(R:FindFirstChild("PlayerShowcase"), enableEvents)
-
     log("Anti-Lag (Mute Roll/Hit Events): " .. (S.AntiLag and "ON" or "OFF"), S.AntiLag and C.good or C.dim)
-end)
+end
 
-silentRollB.MouseButton1Click:Connect(function()
-    S.SilentRoll = not S.SilentRoll
-    silentRollB.Text = "Silent Roll: " .. (S.SilentRoll and "ON" or "OFF")
-    silentRollB.BackgroundColor3 = S.SilentRoll and C.accent or C.row
-
+H.silentRoll = function(v)
+    if v == S.SilentRoll then return end
+    S.SilentRoll = v
     pcall(function()
         if S.SilentRoll then
             R.SetAutoRollPopup:FireServer(false)
@@ -521,7 +497,11 @@ silentRollB.MouseButton1Click:Connect(function()
         end
     end)
     log("Silent Auto-Roll: " .. (S.SilentRoll and "ON" or "OFF"), S.SilentRoll and C.good or C.dim)
-end)
+end
+
+H.render = function(v)
+    pcall(function() RunService:Set3dRenderingEnabled(not v) end)
+end
 
 -- ==================== Weather Monitor ====================
 local function updateWeatherUI(data)
@@ -567,11 +547,12 @@ do
     end
 end
 
-local function saveSettings()
+saveSettings = function()
     if not writefile then return end
     pcall(function()
         local d = { Worlds = {}, Team = S.Team, All = S.All, Workers = S.Workers,
-            Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First }
+            Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First,
+            Tickets = S.Tickets, TicketMin = S.TicketMin }
         for _, w in ipairs(WORLDS) do
             d.Worlds[w.World] = { On = w.On, Diff = w.Diff, Bosses = w.Bosses }
         end
@@ -580,6 +561,8 @@ local function saveSettings()
             if t > nowC and t - nowC < 86400 then d.Cooldowns[k] = nowT + math.floor(t - nowC) end
         end
         for _, tw in ipairs(TW or {}) do d.Towers[tw.Id] = tw.On end
+        local okA, encA = pcall(function() return HttpService:JSONEncode(learned) end)
+        if okA then d.TicketArgsJson = encA end
         writefile(CFG_FILE, HttpService:JSONEncode(d))
     end)
 end
@@ -599,6 +582,24 @@ local progress, progAt = {}, {}
 local lastSlow = 0 -- os.clock() of the last "slow down" (or last gap decay step)
 
 local function keyOf(world, boss, diff) return world .. "|" .. boss .. "|" .. diff end
+
+retryWeakB.MouseButton1Click:Connect(function()
+    local count = 0
+    for k, v in pairs(weakList) do
+        count += 1
+        failCount[k] = 0
+        for d2 = v.diff, 6 do
+            nextAt[keyOf(v.world, v.boss, d2)] = nil
+        end
+    end
+    weakList = {}
+    updateWeakUI()
+    if count > 0 then
+        log("🔄 تم تصفير كولداون البوسات الصعبة! السكربت بيرجع يحاول يفرمهم الحين.", C.good)
+    else
+        log("ما فيه بوسات بقائمة الضعف حالياً.", C.dim)
+    end
+end)
 
 local function parseWait(msg)
     if type(msg) ~= "string" then return nil end
@@ -759,12 +760,207 @@ local function updateStatus()
 end
 
 -- Picks the first job that is off cooldown and not already running, and claims it
+-- ==================== Server state (cooldowns) + Story Tickets ====================
+local qState, qStateAt = nil, 0
+local ticketsLeft
+local ticketNext = {}
+local TICKET_STEPS = { 5, 10, 15, 20, 30 }
+
+local function updateTicketUI()
+    local n = 0
+    for _ in pairs(learned) do n += 1 end
+    ticketL.Text = ("Tickets %s | learned %d/%d"):format(ticketsLeft and tostring(ticketsLeft) or "?", n, #WORLDS)
+end
+updateTicketUI()
+
+local function setTicketBtn()
+    pcall(function() ticketToggle:SetValue(S.Tickets) end)
+end
+
+local function stateBoss(world, boss)
+    local ws = qState and qState.Worlds and qState.Worlds[world]
+    local info = ws and ws.Bosses and ws.Bosses[boss]
+    return type(info) == "table" and info or nil
+end
+
+-- Bosses with nothing fightable (Ready == 0) are skipped until the world's next ReadyIn.
+local function applyState(st)
+    local now = os.clock()
+    for _, w in ipairs(WORLDS) do
+        local ws = st.Worlds[w.World]
+        if type(ws) == "table" then
+            local wait = tonumber(ws.ReadyIn) or 30
+            if ws.Unlocked == false then wait = 600 end
+            for boss, info in pairs(ws.Bosses or {}) do
+                local dead = ws.Unlocked == false or (type(info) == "table" and (tonumber(info.Ready) or 1) == 0)
+                if dead then
+                    local t = now + math.max(wait, 5)
+                    for d = 1, #DIFF do
+                        local k = keyOf(w.World, boss, d)
+                        if (nextAt[k] or 0) < t then nextAt[k] = t end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function refreshState(force)
+    if not force and os.clock() - qStateAt < 45 then return qState end
+    qStateAt = os.clock()
+    throttle()
+    local ok, st = pcall(function() return R.GetStoryTicketState:InvokeServer() end)
+    if ok and type(st) == "table" and type(st.Worlds) == "table" then
+        qState = st
+        ticketsLeft = tonumber(st.Tickets)
+        applyState(st)
+        updateTicketUI()
+    end
+    return qState
+end
+
+-- A world is farmed with tickets (instead of single fights) when it is fully cleared,
+-- the script has learned how to use a ticket there, and tickets are left.
+local function ticketMode(w)
+    if not (S.Tickets and w.On and learned[w.World]) then return false end
+    local ws = qState and qState.Worlds and qState.Worlds[w.World]
+    return type(ws) == "table" and ws.Unlocked ~= false and (tonumber(ws.Missing) or 1) == 0
+        and (tonumber(qState.Tickets) or 0) > 0
+end
+
+local function jsonSafe(v, d)
+    d = d or 0
+    local t = type(v)
+    if t == "string" or t == "number" or t == "boolean" then return v, true end
+    if t == "table" and d < 4 then
+        local o = {}
+        for k, x in pairs(v) do
+            if type(k) ~= "string" and type(k) ~= "number" then return nil, false end
+            local c, ok = jsonSafe(x, d + 1)
+            if not ok then return nil, false end
+            o[k] = c
+        end
+        return o, true
+    end
+    return nil, false
+end
+
+local function findWorld(v, d)
+    d = d or 0
+    if type(v) == "string" then
+        for _, w in ipairs(WORLDS) do
+            if w.World == v then return v end
+        end
+    elseif type(v) == "table" and d < 4 then
+        for k, x in pairs(v) do
+            local r = findWorld(k, d + 1) or findWorld(x, d + 1)
+            if r then return r end
+        end
+    end
+end
+
+-- Called by the hook below when YOU press "Use Ticket" in the game: records the exact arguments.
+getgenv().TicketOnUse = function(a)
+    local list = {}
+    for i = 1, a.n do
+        if a[i] == nil then return end
+        list[i] = a[i]
+    end
+    local copy = jsonSafe(list)
+    local world = findWorld(list)
+    if not copy or not world then
+        log("[Tickets] Saw a ticket use but couldn't read its world from the arguments", C.warn)
+        return
+    end
+    learned[world] = copy
+    updateTicketUI()
+    log("[Tickets] Learned how the game uses a ticket on " .. world, C.good)
+    if saveSettings then pcall(saveSettings) end
+end
+
+if hookmetamethod and getnamecallmethod and newcclosure and not getgenv().TicketHooked then
+    getgenv().TicketHooked = true
+    pcall(function()
+        local rem = R:WaitForChild("UseStoryTicket", 5)
+        if not rem then
+            getgenv().TicketHooked = nil
+            return
+        end
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            if self == rem and getnamecallmethod() == "InvokeServer"
+                and not (checkcaller and checkcaller()) then
+                local cb = getgenv().TicketOnUse
+                if cb then
+                    local a = table.pack(...)
+                    task.spawn(pcall, cb, a)
+                end
+            end
+            return old(self, ...)
+        end))
+    end)
+end
+
+H.tickets = function(v)
+    if v == S.Tickets then return end
+    S.Tickets = v
+    if S.Tickets then
+        log(("[Tickets] ON: fully cleared worlds are collected with a ticket once %d bosses are ready. "
+            .. "For each world, press the game's 'Use Ticket' once so I can record how it's called."):format(S.TicketMin), C.warn)
+    else
+        log("[Tickets] OFF", C.dim)
+    end
+end
+
+H.minReady = function(v) S.TicketMin = tonumber(v) or S.TicketMin end
+
+local function ticketPass(alive)
+    if not S.Tickets then return end
+    for _, w in ipairs(WORLDS) do
+        if not alive() then return end
+        local ws = qState and qState.Worlds and qState.Worlds[w.World]
+        if ws and ticketMode(w) and (ticketNext[w.World] or 0) <= os.clock()
+            and (tonumber(ws.Ready) or 0) >= S.TicketMin then
+            local before = tonumber(ws.Ready) or 0
+            local leftBefore = tonumber(qState.Tickets) or 0
+            local args = learned[w.World]
+            if not throttle(alive) then return end
+            local ok, res = pcall(function()
+                return R.UseStoryTicket:InvokeServer(table.unpack(args, 1, #args))
+            end)
+            local detail = type(res) == "table" and dumpTable(res) or tostring(res)
+            task.wait(1)
+            refreshState(true)
+            local ws2 = qState and qState.Worlds and qState.Worlds[w.World]
+            local after = ws2 and tonumber(ws2.Ready) or before
+            if ok and after < before then
+                local got = before - after
+                wins += got
+                kills[w.World] = (kills[w.World] or 0) + got
+                if type(res) == "table" then tallyRewards(res) end
+                refreshStats()
+                log(("[Tickets] %s: %d bosses collected (ready %d -> %d, tickets %d -> %s)"):format(
+                    w.World, got, before, after, leftBefore, tostring(ticketsLeft)), C.good)
+            else
+                ticketNext[w.World] = os.clock() + 600
+                S.Tickets = false
+                setTicketBtn()
+                log(("[Tickets] %s: used a ticket but nothing changed (%s). Tickets turned OFF to protect your tickets.")
+                    :format(w.World, detail), C.bad)
+            end
+        end
+    end
+end
+
 local function pickJob()
     for _, w in ipairs(WORLDS) do
-        if w.On then
+        if w.On and not ticketMode(w) then
             for _, boss in ipairs(bossList(w)) do
                 local lo = S.All and 1 or w.Diff
-                for diff = lo, w.Diff do
+                local hi = w.Diff
+                local binfo = stateBoss(w.World, boss)
+                if binfo and tonumber(binfo.Cleared) then hi = math.min(hi, binfo.Cleared + 1) end
+                for diff = lo, hi do
                     local key = keyOf(w.World, boss, diff)
                     if not inFlight[key] and (nextAt[key] or 0) <= os.clock() then
                         inFlight[key] = true
@@ -788,6 +984,18 @@ local function startFarm()
     setRunning(true)
     lastSlow = os.clock()
     log(("Farm started (%d fight%s at once)"):format(S.Workers, S.Workers > 1 and "s" or ""), C.good)
+
+    refreshState(true)
+    task.spawn(function()
+        while alive() do
+            ticketPass(alive)
+            for _ = 1, 45 do
+                if not alive() then return end
+                task.wait(1)
+            end
+            refreshState(true)
+        end
+    end)
 
     spawnWorker = function(idx)
         if act[idx] then return end
@@ -816,9 +1024,15 @@ local function startFarm()
                     local ok, info, cd, kind, res = fight(w, boss, diff, alive)
                     inFlight[key] = nil
                     if kind == "stop" then break end
-                    log(("#%d %s/%s [%s] %s"):format(idx, w.World, boss, DIFF[diff][1], tostring(info)),
-                        ok and C.good or C.dim)
                     if ok then
+                        failCount[key] = 0
+                        if weakList[key] then
+                            weakList[key] = nil
+                            updateWeakUI()
+                        end
+                        local binfo = stateBoss(w.World, boss)
+                        if binfo and (tonumber(binfo.Cleared) or 0) < diff then binfo.Cleared = diff end
+                        log(("#%d %s/%s [%s] %s"):format(idx, w.World, boss, DIFF[diff][1], tostring(info)), C.good)
                         wins += 1
                         kills[w.World] = (kills[w.World] or 0) + 1
                         if res then tallyRewards(res) end
@@ -826,11 +1040,29 @@ local function startFarm()
                         decayGap()
                         nextAt[key] = os.clock() + 3540
                     else
-                        nextAt[key] = os.clock() + (cd or 60)
-                        if kind == "locked" or kind == "lost" then
+                        if kind == "lost" then
+                            failCount[key] = (failCount[key] or 0) + 1
+                            if failCount[key] == 1 then
+                                nextAt[key] = os.clock() + 15
+                                log(("⚠️ #%d خسارة أولى ضد %s [%s] - بيعيد المحاولة بعد 15 ثانية..."):format(
+                                    idx, boss, DIFF[diff][1]), C.warn)
+                            else
+                                for d2 = diff, w.Diff do
+                                    nextAt[keyOf(w.World, boss, d2)] = os.clock() + (cd or 600)
+                                end
+                                weakList[key] = { world = w.World, boss = boss, diff = diff, diffName = DIFF[diff][1] }
+                                updateWeakUI()
+                                log(("❌ يونتاتك ضعيفة ضد %s [%s]! قوي يونتاتك واضغط Retry Weak (أو بينتظر 10 دقايق)"):format(
+                                    boss, DIFF[diff][1]), C.bad)
+                            end
+                        elseif kind == "locked" then
+                            log(("#%d %s/%s [%s] %s"):format(idx, w.World, boss, DIFF[diff][1], tostring(info)), C.dim)
                             for d2 = diff, w.Diff do
                                 nextAt[keyOf(w.World, boss, d2)] = os.clock() + (cd or 600)
                             end
+                        else
+                            log(("#%d %s/%s [%s] %s"):format(idx, w.World, boss, DIFF[diff][1], tostring(info)), C.dim)
+                            nextAt[key] = os.clock() + (cd or 60)
                         end
                     end
                 end
@@ -844,13 +1076,12 @@ local function startFarm()
     for i = 1, S.Workers do spawnWorker(i) end
 end
 
-fightsB.MouseButton1Click:Connect(function()
-    S.Workers = S.Workers % 2 + 1
-    fightsB.Text = "Fights: " .. S.Workers
+H.fights = function(v)
+    S.Workers = tonumber(v) or S.Workers
     if getgenv().StoryFarm and spawnWorker then
         for i = 1, S.Workers do spawnWorker(i) end
     end
-end)
+end
 
 startB.MouseButton1Click:Connect(function()
     if getgenv().StoryFarm then
@@ -940,50 +1171,21 @@ local function towerStatus(tw)
 end
 
 -- ---- UI ----
-for idx, tw in ipairs(TW) do
-    local y = 8 + (idx - 1) * 58
-    local row = new("Frame", { Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 52),
-        BackgroundColor3 = C.row, BorderSizePixel = 0, Parent = towerPane })
-    corner(row, 8)
-    local chk = button(row, tw.On and "✓" or "", UDim2.fromOffset(8, 6), UDim2.fromOffset(24, 24),
-        tw.On and C.good or Color3.fromRGB(60, 60, 78))
-    chk.MouseButton1Click:Connect(function()
-        tw.On = not tw.On
-        chk.Text = tw.On and "✓" or ""
-        chk.BackgroundColor3 = tw.On and C.good or Color3.fromRGB(60, 60, 78)
-    end)
-    label(row, tw.Name, UDim2.fromOffset(40, 6), UDim2.new(1, -48, 0, 24),
-        { Font = Enum.Font.GothamBold, TextSize = 15 })
-    tw.info = label(row, "Loading...", UDim2.fromOffset(10, 32), UDim2.new(1, -20, 0, 16),
-        { TextSize = 12, TextColor3 = C.dim, Font = Enum.Font.Code, TextTruncate = Enum.TextTruncate.AtEnd })
+local TowerBox = Tabs.Towers:AddLeftGroupbox("Battle towers")
+for _, tw in ipairs(TW) do
+    TowerBox:AddToggle("T_" .. tw.Id, { Text = tw.Name, Default = tw.On, Callback = function(v) tw.On = v end })
+    tw.info = proxyLabel(TowerBox:AddLabel("Loading...", true))
 end
 
-local tTeamB = button(towerPane, "Team: " .. (TS.Team and tostring(TS.Team) or "Auto"), UDim2.fromOffset(8, 304), UDim2.fromOffset(110, 34), C.row)
-tTeamB.TextSize = 13
-tTeamB.MouseButton1Click:Connect(function()
-    if TS.Team == nil then TS.Team = 1
-    elseif TS.Team >= 4 then TS.Team = nil
-    else TS.Team += 1 end
-    tTeamB.Text = "Team: " .. (TS.Team and tostring(TS.Team) or "Auto")
-end)
-
-local tFirstB = button(towerPane, "First clears: " .. (TS.First and "ON" or "OFF"), UDim2.fromOffset(122, 304), UDim2.fromOffset(150, 34), TS.First and C.accent or C.row)
-tFirstB.TextSize = 13
-tFirstB.MouseButton1Click:Connect(function()
-    TS.First = not TS.First
-    tFirstB.Text = "First clears: " .. (TS.First and "ON" or "OFF")
-    tFirstB.BackgroundColor3 = TS.First and C.accent or C.row
-end)
-
-local tStartB = button(towerPane, "START", UDim2.fromOffset(282, 304), UDim2.new(1, -290, 0, 34), C.good)
-
-local tSpeedB = button(towerPane, "Max Battle Speed", UDim2.fromOffset(8, 344), UDim2.fromOffset(218, 28), C.row)
-tSpeedB.TextSize = 13
-local tEndB = button(towerPane, "End current run", UDim2.fromOffset(234, 344), UDim2.new(1, -242, 0, 28), C.row)
-tEndB.TextSize = 13
-
-local tStatus = label(body, "Idle", UDim2.fromOffset(10, 378), UDim2.new(1, -20, 0, 18),
-    { TextColor3 = C.dim, TextSize = 13, Visible = false })
+local TCtl = Tabs.Towers:AddRightGroupbox("Controls")
+local tStatus = proxyLabel(TCtl:AddLabel("Idle", true))
+local tStartB = mkButton(TCtl, "START")
+TCtl:AddDropdown("TowerTeam", { Values = { "Auto", "1", "2", "3", "4" }, Default = (TS.Team or 0) + 1, Text = "Team",
+    Callback = function(v) TS.Team = tonumber(v) end })
+TCtl:AddToggle("TowerFirst", { Text = "Include first clears", Default = TS.First,
+    Callback = function(v) TS.First = v end })
+local tSpeedB = mkButton(TCtl, "Max battle speed")
+local tEndB = mkButton(TCtl, "End current run")
 
 local function updateTowerRows()
     for _, tw in ipairs(TW) do
@@ -1002,27 +1204,6 @@ local function updateTowerRows()
         tw.info.Text = txt
     end
 end
-
--- ---- tabs ----
-local tabStory = button(bar, "Story", UDim2.fromOffset(150, 5), UDim2.fromOffset(66, 24), C.accent)
-local tabTower = button(bar, "Towers", UDim2.fromOffset(220, 5), UDim2.fromOffset(72, 24), C.row)
-tabStory.TextSize = 13
-tabTower.TextSize = 13
-local function showTab(name)
-    local story = name == "story"
-    storyPane.Visible = story
-    towerPane.Visible = not story
-    status.Visible = story
-    tStatus.Visible = not story
-    tabStory.BackgroundColor3 = story and C.accent or C.row
-    tabTower.BackgroundColor3 = story and C.row or C.accent
-    if not story then
-        refreshTowerState(false)
-        updateTowerRows()
-    end
-end
-tabStory.MouseButton1Click:Connect(function() showTab("story") end)
-tabTower.MouseButton1Click:Connect(function() showTab("tower") end)
 
 -- ---- results from the game's own tower flow ----
 if GG and type(GG.ShowBattleTowerResult) == "function" and not getgenv().TowerResultHooked then
@@ -1206,17 +1387,17 @@ tEndB.MouseButton1Click:Connect(function()
     log("[T] Ended " .. id .. (ok and "" or " (request failed)") .. " - paused 10m", ok and C.warn or C.bad)
 end)
 
-local minimized = false
-minB.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    body.Visible = not minimized
-    statsP.Visible = not minimized
-    win.Size = minimized and UDim2.fromOffset(460, 34) or UDim2.fromOffset(460, 580)
-end)
-
-closeB.MouseButton1Click:Connect(function()
-    saveSettings()
+Library:OnUnload(function()
+    unloaded = true
+    pcall(saveSettings)
     pcall(function() RunService:Set3dRenderingEnabled(true) end)
+    getgenv().TicketOnUse = nil
+    if S.AntiLag then
+        toggleEventConnections(RS:FindFirstChild("HitAnnounce"), true)
+        toggleEventConnections(RS:FindFirstChild("NewCardAlert"), true)
+        toggleEventConnections(R:FindFirstChild("PlayerRolled"), true)
+        toggleEventConnections(R:FindFirstChild("PlayerShowcase"), true)
+    end
     runId += 1
     getgenv().StoryFarm = false
     getgenv().BlockAutoRejoin = false -- the hook stays installed but stops blocking
@@ -1228,10 +1409,14 @@ closeB.MouseButton1Click:Connect(function()
     if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
     for _, c in ipairs(getgenv().StoryFarmConns or {}) do pcall(function() c:Disconnect() end) end
     getgenv().StoryFarmConns = {}
-    gui:Destroy()
+    getgenv().StoryFarmLib = nil
 end)
 
 log("Ready. Anti-AFK on. Anti-Lag & Weather Monitor loaded.", C.dim)
+task.spawn(function()
+    pcall(function() refreshTowerState(true) end)
+    pcall(updateTowerRows)
+end)
 
 if getgenv().StoryFarmAutoStart then
     getgenv().StoryFarmAutoStart = nil
@@ -1246,8 +1431,8 @@ if getgenv().TowerFarmAutoStart then
 end
 
 task.spawn(function()
-    while gui.Parent do
+    while not unloaded do
         task.wait(10)
-        if gui.Parent then saveSettings() end
+        if not unloaded then saveSettings() end
     end
 end)
