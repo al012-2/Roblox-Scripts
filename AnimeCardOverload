@@ -168,7 +168,8 @@ local HS = { Interval = 8, StopAt = 0 } -- Hard Tower: seconds per floor, stop a
 
 local kills, rewards, wins = {}, {}, 0
 local tparts = 0 -- tower parts cleared this session
-local hclimbed = 0 -- Hard Tower floors climbed this session
+local hclimbed = 0 -- Hard Tower floors climbed (saved between sessions)
+local raidClears = 0 -- raid clears (saved between sessions)
 local failCount = {} -- consecutive losses per boss|diff
 local weakList = {}  -- boss|diff that beat the player twice in a row
 
@@ -206,6 +207,24 @@ do
     end
     if type(CFG.HardStopAt) == "number" and CFG.HardStopAt >= 0 then
         HS.StopAt = math.floor(CFG.HardStopAt)
+    end
+    -- counters saved from the last session
+    if type(CFG.Stats) == "table" then
+        local st = CFG.Stats
+        wins = math.floor(tonumber(st.Wins) or 0)
+        tparts = math.floor(tonumber(st.Tparts) or 0)
+        hclimbed = math.floor(tonumber(st.Hclimbed) or 0)
+        raidClears = math.floor(tonumber(st.RaidClears) or 0)
+        if type(st.Kills) == "table" then
+            for k, v in pairs(st.Kills) do
+                if type(k) == "string" and tonumber(v) then kills[k] = tonumber(v) end
+            end
+        end
+        if type(st.Rewards) == "table" then
+            for k, v in pairs(st.Rewards) do
+                if type(k) == "string" and tonumber(v) then rewards[k] = tonumber(v) end
+            end
+        end
     end
     -- toggles that used to reset on every start (applied once the UI + handlers exist)
     S.SavedAntiLag    = CFG.AntiLag == true
@@ -379,9 +398,11 @@ local function refreshStats()
 end
 
 resetB.MouseButton1Click:Connect(function()
-    wins, kills, rewards, tparts, hclimbed = 0, {}, {}, 0, 0
+    wins, kills, rewards, tparts, hclimbed, raidClears = 0, {}, {}, 0, 0, 0
     refreshStats()
+    if saveSettings then pcall(saveSettings) end
 end)
+refreshStats() -- show the counters loaded from the last session
 
 local function queueRerun()
     if saveSettings then pcall(saveSettings) end
@@ -583,7 +604,9 @@ saveSettings = function()
             Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First,
             Tickets = S.Tickets, TicketMin = S.TicketMin,
             HardInterval = HS.Interval, HardStopAt = HS.StopAt,
-            AntiLag = S.AntiLag == true, SilentRoll = S.SilentRoll == true, Disable3D = S.No3D == true }
+            AntiLag = S.AntiLag == true, SilentRoll = S.SilentRoll == true, Disable3D = S.No3D == true,
+            Stats = { Wins = wins, Kills = kills, Rewards = rewards, Tparts = tparts,
+                Hclimbed = hclimbed, RaidClears = raidClears } }
         for _, w in ipairs(WORLDS) do
             d.Worlds[w.World] = { On = w.On, Diff = w.Diff, Bosses = w.Bosses }
         end
@@ -1881,7 +1904,7 @@ task.spawn(function()
     ev("RaidRunResult", function(d)
         resultAt = os.clock()
         if type(d) == "table" and d.Cleared then
-            AR.Clears += 1
+            raidClears += 1
             for _, row in pairs(d.Rows or {}) do
                 if row.Name == lp.Name and row.Tokens then
                     log(("[Raid] Cleared %s (%s) in %ss | +%s tokens"):format(
@@ -1949,7 +1972,7 @@ task.spawn(function()
         else
             stL.Text = "Idle"
         end
-        infoL.Text = ("Tokens: %s | Clears this session: %d"):format(tostring(AR.Tokens or "?"), AR.Clears)
+        infoL.Text = ("Tokens: %s | Raid clears (total): %d"):format(tostring(AR.Tokens or "?"), raidClears)
     end
 end)
 
