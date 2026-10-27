@@ -1,42 +1,11 @@
--- 1. أوامر Cobalt الاختيارية (مستقلة عن السكربت الرئيسي)
-local Event1 = game:GetService("ReplicatedStorage").RollRemotes.GetUpgrades
-Event1:InvokeServer()
-
-local Event2 = game:GetService("ReplicatedStorage").RollRemotes.GetTraitData
-Event2:InvokeServer()
-
-local Event3 = game:GetService("ReplicatedStorage").RollRemotes.GetPacks
-Event3:InvokeServer()
-
-local Event4 = game:GetService("ReplicatedStorage").RollRemotes.GetExpeditions
-Event4:InvokeServer()
-
-local Event5 = game:GetService("ReplicatedStorage").RollRemotes.GetMergeCards
-Event5:InvokeServer()
-
-local Event6 = game:GetService("ReplicatedStorage").RollRemotes.FightAsura
-Event6:InvokeServer(1)
-
-
 -- 2. التعليق الكبير والتحقق من تحميل اللعبة
 --[[
-    Story Auto Farm (merged): Story + Battle Towers + Halloween Tower + Hard Tower + Auto Raid + Tickets
-
-    FARM SLOTS (the script enforces them, you don't have to remember):
-      Slot 1 "Story"     : Story farm
-      Slot 2 "Tower run" : Battle Towers / Halloween Tower / Hard Tower / Auto Raid  (only ONE of these)
-    So at most 2 farms run together (Story + one tower-type farm). Starting a farm whose slot is
-    taken shows "Can't start X: Y is running. Turn it off first." and X does not start.
-
-    - StartStoryBattle(world, boss, difficulty, team) + StoryFightDone(GrantId)
-    - Difficulty: 1=Easy 2=Medium 3=Hard 4=Extreme 5=Nightmare 6=Insanity
-    - Cooldown is per boss AND per difficulty; "All difficulties" farms ASCENDING.
-    - Cooldowns are read from the server (GetStoryTicketState); settings are saved to
-      StoryAutoFarmSettings.json; after Rejoin / Server Hop the running farms start again.
-    - Halloween: GetTowerRunSummary("Halloween") + StartTowerRun("Halloween", {Part, Team}); the server
-      climbs the parts, the script only starts the next first-clear part when no run is active.
-    - Hard Tower: TowerNextFloor("Hard") floor by floor (the game's own auto-climb must be OFF).
-    - Raid Logger tab: logs RaidRemotes calls + replies (Copy log).
+    Story Auto Farm (merged): Story + Battle Towers + Halloween Tower + Hard Tower + Auto Raid + Tickets + StarGyro
+    - Auto-Save fixed: Every UI setting & stat change saves immediately
+    - Multi-account: every account has its own settings file StoryAutoFarmSettings_<UserId>.json
+      (teams, worlds, cooldowns, stats, Auto-Hop). Learned ticket calls are shared by all accounts
+      in StoryAutoFarmShared.json.
+    - StarGyro Auto-Hop has a hop limit (MaxHops) and a delay before every hop (HopDelay).
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -57,6 +26,7 @@ local R  = RS:WaitForChild("RollRemotes")
 if getgenv().StoryFarmGui then pcall(function() getgenv().StoryFarmGui:Destroy() end) end
 if getgenv().StoryFarmLib then pcall(function() getgenv().StoryFarmLib:Unload() end) end
 if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
+if getgenv().GyroConn then pcall(function() getgenv().GyroConn:Disconnect() end) end
 if getgenv().StoryFarmConns then
     for _, c in ipairs(getgenv().StoryFarmConns) do pcall(function() c:Disconnect() end) end
 end
@@ -131,24 +101,24 @@ do
 end
 
 
--- 5. قسم Settings
+-- 5. قسم Settings وتحميل الإعدادات المحفوظة
 local DIFF = {
     { "Easy", "x1" }, { "Medium", "x2.5" }, { "Hard", "x5" },
     { "Extreme", "x9" }, { "Nightmare", "x13" }, { "Insanity", "x19" },
 }
 local WORLDS = {
-    { World = "Namek",         Diff = 6, On = true,  Bosses = "" },
+    { World = "Namek",          Diff = 6, On = true,  Bosses = "" },
     { World = "InfinityCastle", Diff = 6, On = true,  Bosses = "" },
-    { World = "Leaf",          Diff = 6, On = false, Bosses = "" },
-    { World = "Dressrosa",     Diff = 6, On = false, Bosses = "" },
-    { World = "Fuyuki",        Diff = 6, On = false, Bosses = "" },
+    { World = "Leaf",           Diff = 6, On = false, Bosses = "" },
+    { World = "Dressrosa",      Diff = 6, On = false, Bosses = "" },
+    { World = "Fuyuki",         Diff = 6, On = false, Bosses = "" },
 }
 local KNOWN = {
-    Namek            = { "Zarbon", "Ginyu", "Vegeta", "Frieza", "Goku" },
+    Namek          = { "Zarbon", "Ginyu", "Vegeta", "Frieza", "Goku" },
     InfinityCastle = { "Nakime", "Akaza", "Douma", "Kokushibo", "Muzan" },
-    Leaf             = { "Deidara", "Hidan", "Obito", "Itachi", "Pain" },
-    Dressrosa        = { "Fujitora", "Sabo", "Lucy", "Law", "Doflamingo" },
-    Fuyuki           = { "Rider", "Lancer", "Archer", "Berserker", "Saber" },
+    Leaf           = { "Deidara", "Hidan", "Obito", "Itachi", "Pain" },
+    Dressrosa      = { "Fujitora", "Sabo", "Lucy", "Law", "Doflamingo" },
+    Fuyuki         = { "Rider", "Lancer", "Archer", "Berserker", "Saber" },
 }
 local S = {
     Team = 1, FightDelay = 4, RetryDelay = 2, MaxDoneTries = 5,
@@ -158,9 +128,14 @@ local S = {
     GapDecayEvery = 300,
     AntiLag = false,
     SilentRoll = false,
+    No3D = false,
     Workers = 2,
     Tickets = false,
     TicketMin = 10,
+    MinGyroLuck = 5,
+    AutoGyroHop = getgenv().GyroHopActive == true,
+    MaxHops = 10,
+    HopDelay = 10,
 }
 local HS = { Interval = 8, StopAt = 0 }
 local HW = { Team = 1 }
@@ -174,14 +149,38 @@ local weakList = {}
 
 local TW, TS
 local saveSettings
+local function triggerSave()
+    if saveSettings then pcall(saveSettings) end
+end
+
 local learned = {}
 local SCRIPT_FILE = getgenv().StoryFarmFile or "StoryAutoFarm.lua"
-local CFG_FILE = "StoryAutoFarmSettings.json"
-local CFG = {}
+-- كل حساب له ملف إعدادات خاص فيه (حسب الـ UserId)
+local LEGACY_CFG  = "StoryAutoFarmSettings.json"
+local CFG_FILE    = ("StoryAutoFarmSettings_%d.json"):format(lp.UserId)
+-- ملف مشترك بين كل الحسابات (طريقة استخدام التذاكر المتعلَّمة)
+local SHARED_FILE = "StoryAutoFarmShared.json"
+local CFG, SHARED = {}, {}
 pcall(function()
-    if isfile and readfile and isfile(CFG_FILE) then
+    if not (isfile and readfile) then return end
+    if isfile(CFG_FILE) then
         local d = HttpService:JSONDecode(readfile(CFG_FILE))
         if type(d) == "table" then CFG = d end
+    elseif isfile(LEGACY_CFG) then
+        -- أول تشغيل لهذا الحساب: نبدأ من الإعدادات القديمة
+        local d = HttpService:JSONDecode(readfile(LEGACY_CFG))
+        if type(d) == "table" then
+            CFG = d
+            -- الكولداون والإحصائيات تخص الحساب القديم، ما نورثها
+            CFG.Cooldowns = nil
+            CFG.Stats = nil
+        end
+    end
+end)
+pcall(function()
+    if isfile and readfile and isfile(SHARED_FILE) then
+        local d = HttpService:JSONDecode(readfile(SHARED_FILE))
+        if type(d) == "table" then SHARED = d end
     end
 end)
 do
@@ -203,6 +202,13 @@ do
     if type(CFG.Tickets) == "boolean" then S.Tickets = CFG.Tickets end
     if type(CFG.TicketMin) == "number" and CFG.TicketMin >= 1 and CFG.TicketMin <= 60 then
         S.TicketMin = math.floor(CFG.TicketMin)
+    end
+    if type(CFG.MinGyroLuck) == "number" then S.MinGyroLuck = CFG.MinGyroLuck end
+    if type(CFG.MaxHops) == "number" and CFG.MaxHops >= 1 and CFG.MaxHops <= 50 then
+        S.MaxHops = math.floor(CFG.MaxHops)
+    end
+    if type(CFG.HopDelay) == "number" and CFG.HopDelay >= 5 and CFG.HopDelay <= 60 then
+        S.HopDelay = math.floor(CFG.HopDelay)
     end
     if type(CFG.HardInterval) == "number" and CFG.HardInterval >= 6 and CFG.HardInterval <= 20 then
         HS.Interval = math.floor(CFG.HardInterval)
@@ -230,8 +236,9 @@ do
     S.SavedAntiLag    = CFG.AntiLag == true
     S.SavedSilentRoll = CFG.SilentRoll == true
     S.SavedNo3D       = CFG.Disable3D == true
+    -- التذاكر: من الملف المشترك أولاً، وإذا ما فيه نأخذها من الإعدادات القديمة
     pcall(function()
-        local dec = HttpService:JSONDecode(CFG.TicketArgsJson or "{}")
+        local dec = HttpService:JSONDecode(SHARED.TicketArgsJson or CFG.TicketArgsJson or "{}")
         if type(dec) == "table" then learned = dec end
     end)
 end
@@ -275,7 +282,7 @@ end
 
 local Window = Library:CreateWindow({
     Title = "Story Auto Farm",
-    Footer = "Anti-AFK · server cooldowns · tickets",
+    Footer = "Anti-AFK · server cooldowns · tickets · StarGyro · " .. lp.Name,
     NotifySide = "Right",
     ShowCustomCursor = false,
 })
@@ -306,7 +313,7 @@ local function mkButton(group, text)
 end
 
 local status, startB, logLbl, retryWeakB, weakL, weakBar, ticketToggle, ticketL, farmL
-local killsL, weatherL, rewL, resetB, rejoinB, hopB
+local killsL, weatherL, gyroL, rewL, resetB, rejoinB, hopB, gyroHopToggle
 weakBar = setmetatable({}, { __newindex = function() end })
 
 do
@@ -319,7 +326,7 @@ do
     Control:AddDropdown("StoryFights", { Values = { "1", "2" }, Default = S.Workers, Text = "Fights at once",
         Callback = function(v) hcall("fights", v) end })
     Control:AddToggle("StoryAll", { Text = "All difficulties (Easy up to chosen)", Default = S.All,
-        Callback = function(v) S.All = v end })
+        Callback = function(v) S.All = v; triggerSave() end })
     Control:AddToggle("AntiLag", { Text = "Anti-Lag (mute roll/hit events)", Default = S.SavedAntiLag,
         Callback = function(v) hcall("antiLag", v) end })
     Control:AddToggle("SilentRoll", { Text = "Silent auto-roll", Default = S.SavedSilentRoll,
@@ -339,11 +346,11 @@ do
     for _, w in ipairs(WORLDS) do
         local gb = Tabs.Story:AddRightGroupbox(w.World)
         gb:AddToggle("W_" .. w.World, { Text = "Farm this world", Default = w.On,
-            Callback = function(v) w.On = v end })
+            Callback = function(v) w.On = v; triggerSave() end })
         gb:AddDropdown("D_" .. w.World, { Values = DIFF_LABELS, Default = w.Diff, Text = "Highest difficulty",
-            Callback = function(v) w.Diff = table.find(DIFF_LABELS, v) or w.Diff end })
+            Callback = function(v) w.Diff = table.find(DIFF_LABELS, v) or w.Diff; triggerSave() end })
         gb:AddInput("B_" .. w.World, { Default = w.Bosses, Text = "Bosses", Placeholder = "empty = all unlocked bosses",
-            Callback = function(v) w.Bosses = tostring(v or "") end })
+            Callback = function(v) w.Bosses = tostring(v or ""); triggerSave() end })
     end
 end
 
@@ -355,24 +362,54 @@ do
         Default = table.find({ 5, 10, 15, 20, 30 }, S.TicketMin) or 2, Text = "Min bosses ready",
         Callback = function(v) hcall("minReady", v) end })
     ticketL = proxyLabel(TixBox:AddLabel("Tickets: ?", true))
-    TixBox:AddLabel("For each world, press the game's own 'Use Ticket' once so the script learns how to call it.", true)
+    TixBox:AddLabel("For each world, press the game's own 'Use Ticket' once (on any account) so the script learns how to call it. Learned calls are shared by all accounts.", true)
 end
 
 do
     local StatBox = Tabs.Stats:AddLeftGroupbox("Session")
     killsL = proxyLabel(StatBox:AddLabel("Bosses killed: 0", true))
     weatherL = proxyLabel(StatBox:AddLabel("Weather: Checking...", true))
+    gyroL = proxyLabel(StatBox:AddLabel("StarGyro Luck: Checking...", true))
     rewL = proxyLabel(StatBox:AddLabel("No rewards yet", true))
     resetB = mkButton(StatBox, "Reset stats")
 
-    local AccBox = Tabs.Stats:AddRightGroupbox("Account")
+    local AccBox = Tabs.Stats:AddRightGroupbox("Account & Server")
     rejoinB = mkButton(AccBox, "Rejoin")
     hopB = mkButton(AccBox, "Server Hop")
+    AccBox:AddDropdown("GyroMinLuck", { Values = { "5", "10", "15", "20", "25" },
+        Default = table.find({ 5, 10, 15, 20, 25 }, S.MinGyroLuck) or 1,
+        Text = "Target StarGyro Luck (+)",
+        Callback = function(v)
+            S.MinGyroLuck = tonumber(v) or 5
+            triggerSave()
+        end })
+    gyroHopToggle = AccBox:AddToggle("AutoGyroHop", {
+        Text = "Auto-Hop until StarGyro Luck >= Target",
+        Default = S.AutoGyroHop,
+        Callback = function(v)
+            -- تشغيل يدوي جديد = نبدأ العد من صفر
+            if v and not S.AutoGyroHop then getgenv().GyroHopCount = 0 end
+            hcall("gyroHop", v)
+        end
+    })
+    AccBox:AddSlider("GyroMaxHops", { Text = "Max hops (safety limit)", Default = S.MaxHops,
+        Min = 1, Max = 50, Rounding = 0,
+        Callback = function(v) S.MaxHops = math.floor(tonumber(v) or S.MaxHops); triggerSave() end })
+    AccBox:AddSlider("GyroHopDelay", { Text = "Delay before each hop (s)", Default = S.HopDelay,
+        Min = 5, Max = 60, Rounding = 0,
+        Callback = function(v) S.HopDelay = math.floor(tonumber(v) or S.HopDelay); triggerSave() end })
 end
 
 do
     local MenuBox = Tabs.Settings:AddLeftGroupbox("Menu")
-    MenuBox:AddButton({ Text = "Unload script", Func = function() Library:Unload() end })
+    MenuBox:AddButton({ Text = "Save settings now", Func = function()
+        triggerSave()
+        pcall(function() Library:Notify("Settings saved to " .. CFG_FILE, 4) end)
+    end })
+    MenuBox:AddButton({ Text = "Unload script", Func = function()
+        triggerSave()
+        Library:Unload()
+    end })
     pcall(function()
         MenuBox:AddLabel("Menu keybind"):AddKeyPicker("MenuKeybind",
             { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
@@ -407,16 +444,18 @@ end
 resetB.MouseButton1Click:Connect(function()
     wins, kills, rewards, tparts, hclimbed, raidClears = 0, {}, {}, 0, 0, 0
     refreshStats()
-    if saveSettings then pcall(saveSettings) end
+    triggerSave()
 end)
 refreshStats()
 
 local function queueRerun()
-    if saveSettings then pcall(saveSettings) end
+    triggerSave()
     pcall(function()
         if queue_on_teleport and isfile and isfile(SCRIPT_FILE) then
-            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; getgenv().HardFarmAutoStart=%s; getgenv().HalloweenFarmAutoStart=%s; loadstring(readfile(%q))()')
-                :format(SCRIPT_FILE, tostring(getgenv().StoryFarm == true), tostring(getgenv().TowerFarm == true),
+            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().GyroHopActive=%s; getgenv().GyroHopCount=%d; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; getgenv().HardFarmAutoStart=%s; getgenv().HalloweenFarmAutoStart=%s; loadstring(readfile(%q))()')
+                :format(SCRIPT_FILE, tostring(S.AutoGyroHop == true),
+                    math.floor(tonumber(getgenv().GyroHopCount) or 0),
+                    tostring(getgenv().StoryFarm == true), tostring(getgenv().TowerFarm == true),
                     tostring(getgenv().HardFarm == true), tostring(getgenv().HalloweenFarm == true), SCRIPT_FILE))
         end
     end)
@@ -448,7 +487,7 @@ local function httpGet(url)
 end
 
 local hopping = false
-hopB.MouseButton1Click:Connect(function()
+local function doServerHop()
     if hopping then return end
     hopping = true
     hopB.Text = "Searching..."
@@ -456,7 +495,7 @@ hopB.MouseButton1Click:Connect(function()
         local target
         local cursor = ""
         for _ = 1, 3 do
-            local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true%s")
+            local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true%s")
                 :format(game.PlaceId, cursor ~= "" and ("&cursor=" .. cursor) or "")
             local body = httpGet(url)
             local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
@@ -493,7 +532,9 @@ hopB.MouseButton1Click:Connect(function()
         hopB.Text = "Server Hop"
         hopping = false
     end)
-end)
+end
+
+hopB.MouseButton1Click:Connect(doServerHop)
 
 
 -- 8. قسم Log وWeak units
@@ -502,7 +543,7 @@ local function log(msg, col)
     logLines[#logLines + 1] = os.date("%H:%M:%S") .. "  " .. tostring(msg)
     while #logLines > 14 do table.remove(logLines, 1) end
     pcall(function() logLbl:SetText(table.concat(logLines, "\n")) end)
-    if col == C.bad then pcall(function() Library:Notify(tostring(msg), 6) end) end
+    if col == C.bad or col == C.good then pcall(function() Library:Notify(tostring(msg), 6) end) end
 end
 
 local function updateWeakUI()
@@ -569,22 +610,26 @@ local function toggleEventConnections(ev, enable)
     end
 end
 
-H.team = function(v) S.Team = tonumber(v) or S.Team end
+H.team = function(v)
+    S.Team = tonumber(v) or S.Team
+    triggerSave()
+end
 
 H.antiLag = function(v)
     if v == S.AntiLag then return end
-    S.AntiLag = v
+    S.AntiLag = v == true
     local enableEvents = not S.AntiLag
     toggleEventConnections(RS:FindFirstChild("HitAnnounce"), enableEvents)
     toggleEventConnections(RS:FindFirstChild("NewCardAlert"), enableEvents)
     toggleEventConnections(R:FindFirstChild("PlayerRolled"), enableEvents)
     toggleEventConnections(R:FindFirstChild("PlayerShowcase"), enableEvents)
     log("Anti-Lag (Mute Roll/Hit Events): " .. (S.AntiLag and "ON" or "OFF"), S.AntiLag and C.good or C.dim)
+    triggerSave()
 end
 
 H.silentRoll = function(v)
     if v == S.SilentRoll then return end
-    S.SilentRoll = v
+    S.SilentRoll = v == true
     pcall(function()
         if S.SilentRoll then
             R.SetAutoRollPopup:FireServer(false)
@@ -594,15 +639,24 @@ H.silentRoll = function(v)
         end
     end)
     log("Silent Auto-Roll: " .. (S.SilentRoll and "ON" or "OFF"), S.SilentRoll and C.good or C.dim)
+    triggerSave()
 end
 
 H.render = function(v)
     S.No3D = v == true
-    pcall(function() RunService:Set3dRenderingEnabled(not v) end)
+    pcall(function() RunService:Set3dRenderingEnabled(not S.No3D) end)
+    triggerSave()
 end
 
+-- تفعيل الإعدادات المحفوظة تلقائياً عند بدء السكربت
+task.defer(function()
+    if S.SavedAntiLag then H.antiLag(true) end
+    if S.SavedSilentRoll then H.silentRoll(true) end
+    if S.SavedNo3D then H.render(true) end
+end)
 
--- 11. قسم Weather Monitor
+
+-- 11. قسم Weather Monitor & StarGyro Monitor
 local function updateWeatherUI(data)
     if type(data) == "table" then
         local wName = data.Name or data.Weather or "Clear"
@@ -633,6 +687,85 @@ pcall(function()
     end
 end)
 
+local function updateGyroUI()
+    local curLuck = tonumber(RS:GetAttribute("StarGyroLuck")) or 0
+    local maxStr = curLuck >= 25 and " (MAX)" or ""
+    gyroL.Text = ("StarGyro Luck: +%d%s"):format(curLuck, maxStr)
+    return curLuck
+end
+
+updateGyroUI()
+getgenv().GyroConn = RS:GetAttributeChangedSignal("StarGyroLuck"):Connect(function()
+    local newLuck = updateGyroUI()
+    log(("[StarGyro] Server Luck updated -> +%d"):format(newLuck), newLuck > 0 and C.good or C.dim)
+end)
+
+local gyroHopToken = 0
+H.gyroHop = function(v)
+    S.AutoGyroHop = v == true
+    getgenv().GyroHopActive = S.AutoGyroHop
+    gyroHopToken += 1
+    local my = gyroHopToken
+    if not S.AutoGyroHop then getgenv().GyroHopCount = 0 end
+    triggerSave()
+    if not S.AutoGyroHop then return end
+
+    local function alive() return S.AutoGyroHop and gyroHopToken == my and not unloaded end
+    local function stopHop(reason, col)
+        S.AutoGyroHop = false
+        getgenv().GyroHopActive = false
+        getgenv().GyroHopCount = 0
+        pcall(function() gyroHopToggle:SetValue(false) end)
+        triggerSave()
+        log(reason, col)
+    end
+    local function found(luck)
+        stopHop(("[StarGyro] Found target server! Current Luck: +%d"):format(luck), C.good)
+    end
+
+    task.spawn(function()
+        local count = math.floor(tonumber(getgenv().GyroHopCount) or 0)
+        local luck = updateGyroUI()
+        if luck >= S.MinGyroLuck then return found(luck) end
+        if count >= S.MaxHops then
+            return stopHop(("[StarGyro] Reached max hops (%d) without finding +%d. Auto-Hop stopped.")
+                :format(S.MaxHops, S.MinGyroLuck), C.bad)
+        end
+
+        log(("[StarGyro] Luck +%d (Target +%d). Hop %d/%d in %ds..."):format(
+            luck, S.MinGyroLuck, count + 1, S.MaxHops, S.HopDelay), C.warn)
+        for _ = 1, S.HopDelay do
+            if not alive() then return end
+            task.wait(1)
+        end
+        -- نعيد الفحص بعد التأخير (اللك ممكن يتحمّل متأخر بعد دخول السيرفر)
+        luck = updateGyroUI()
+        if luck >= S.MinGyroLuck then return found(luck) end
+
+        getgenv().GyroHopCount = count + 1
+        doServerHop()
+
+        -- إذا بعد 45 ثانية لسا هنا، القفزة فشلت: نحاول مرة ثانية (وتنحسب من الحد)
+        for _ = 1, 45 do
+            if not alive() then return end
+            task.wait(1)
+        end
+        log("[StarGyro] Hop didn't go through, trying again", C.warn)
+        H.gyroHop(true)
+    end)
+end
+
+pcall(function()
+    Library:OnUnload(function()
+        unloaded = true
+        S.AutoGyroHop = false
+    end)
+end)
+
+if S.AutoGyroHop then
+    task.defer(function() H.gyroHop(true) end)
+end
+
 
 -- 12. قسم Farm logic (Story والتذاكر وينتهي بزر START)
 local SD
@@ -647,13 +780,36 @@ do
     end
 end
 
+-- الملف المشترك: ندمج اللي تعلّمته الحسابات الثانية قبل ما نكتب، عشان ما نمسح شغلهم
+local lastShared
+local function syncShared()
+    if not writefile then return end
+    pcall(function()
+        if isfile and readfile and isfile(SHARED_FILE) then
+            local d = HttpService:JSONDecode(readfile(SHARED_FILE))
+            local dec = type(d) == "table" and HttpService:JSONDecode(d.TicketArgsJson or "{}")
+            if type(dec) == "table" then
+                for k, v in pairs(dec) do
+                    if learned[k] == nil then learned[k] = v end
+                end
+            end
+        end
+    end)
+    local okA, encA = pcall(function() return HttpService:JSONEncode(learned) end)
+    if okA and encA ~= lastShared then
+        lastShared = encA
+        pcall(function() writefile(SHARED_FILE, HttpService:JSONEncode({ TicketArgsJson = encA })) end)
+    end
+end
+
 saveSettings = function()
     if not writefile then return end
     pcall(function()
         local d = { Worlds = {}, Team = S.Team, All = S.All, Workers = S.Workers,
             Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First,
             HalloweenTeam = HW.Team,
-            Tickets = S.Tickets, TicketMin = S.TicketMin,
+            Tickets = S.Tickets, TicketMin = S.TicketMin, MinGyroLuck = S.MinGyroLuck,
+            MaxHops = S.MaxHops, HopDelay = S.HopDelay,
             HardInterval = HS.Interval, HardStopAt = HS.StopAt,
             AntiLag = S.AntiLag == true, SilentRoll = S.SilentRoll == true, Disable3D = S.No3D == true,
             Stats = { Wins = wins, Kills = kills, Rewards = rewards, Tparts = tparts,
@@ -666,11 +822,11 @@ saveSettings = function()
             if t > nowC and t - nowC < 86400 then d.Cooldowns[k] = nowT + math.floor(t - nowC) end
         end
         for _, tw in ipairs(TW or {}) do d.Towers[tw.Id] = tw.On end
-        local okA, encA = pcall(function() return HttpService:JSONEncode(learned) end)
-        if okA then d.TicketArgsJson = encA end
         writefile(CFG_FILE, HttpService:JSONEncode(d))
     end)
+    syncShared()
 end
+
 local inFlight = {}
 local wstatus = {}
 local nextSlot = 0
@@ -698,6 +854,7 @@ retryWeakB.MouseButton1Click:Connect(function()
     end
     weakList = {}
     updateWeakUI()
+    triggerSave()
     if count > 0 then
         log("🔄 تم تصفير كولداون البوسات الصعبة! السكربت بيرجع يحاول يفرمهم الحين.", C.good)
     else
@@ -868,7 +1025,6 @@ end
 local qState, qStateAt = nil, 0
 local ticketsLeft
 local ticketNext = {}
-local TICKET_STEPS = { 5, 10, 15, 20, 30 }
 
 local function updateTicketUI()
     local n = 0
@@ -975,7 +1131,7 @@ getgenv().TicketOnUse = function(a)
     learned[world] = copy
     updateTicketUI()
     log("[Tickets] Learned how the game uses a ticket on " .. world, C.good)
-    if saveSettings then pcall(saveSettings) end
+    triggerSave()
 end
 
 if hookmetamethod and getnamecallmethod and newcclosure and not getgenv().TicketHooked then
@@ -1003,7 +1159,8 @@ end
 
 H.tickets = function(v)
     if v == S.Tickets then return end
-    S.Tickets = v
+    S.Tickets = v == true
+    triggerSave()
     if S.Tickets then
         log(("[Tickets] ON: fully cleared worlds are collected with a ticket once %d bosses are ready. "
             .. "For each world, press the game's 'Use Ticket' once so I can record how it's called."):format(S.TicketMin), C.warn)
@@ -1012,7 +1169,10 @@ H.tickets = function(v)
     end
 end
 
-H.minReady = function(v) S.TicketMin = tonumber(v) or S.TicketMin end
+H.minReady = function(v)
+    S.TicketMin = tonumber(v) or S.TicketMin
+    triggerSave()
+end
 
 local function ticketPass(alive)
     if not S.Tickets then return end
@@ -1039,12 +1199,14 @@ local function ticketPass(alive)
                 kills[w.World] = (kills[w.World] or 0) + got
                 if type(res) == "table" then tallyRewards(res) end
                 refreshStats()
+                triggerSave()
                 log(("[Tickets] %s: %d bosses collected (ready %d -> %d, tickets %d -> %s)"):format(
                     w.World, got, before, after, leftBefore, tostring(ticketsLeft)), C.good)
             else
                 ticketNext[w.World] = os.clock() + 600
                 S.Tickets = false
                 setTicketBtn()
+                triggerSave()
                 log(("[Tickets] %s: used a ticket but nothing changed (%s). Tickets turned OFF to protect your tickets.")
                     :format(w.World, detail), C.bad)
             end
@@ -1140,6 +1302,7 @@ local function startFarm()
                         refreshStats()
                         decayGap()
                         nextAt[key] = os.clock() + 3540
+                        triggerSave()
                     else
                         if kind == "lost" then
                             failCount[key] = (failCount[key] or 0) + 1
@@ -1165,6 +1328,7 @@ local function startFarm()
                             log(("#%d %s/%s [%s] %s"):format(idx, w.World, boss, DIFF[diff][1], tostring(info)), C.dim)
                             nextAt[key] = os.clock() + (cd or 60)
                         end
+                        triggerSave()
                     end
                 end
             end
@@ -1179,6 +1343,7 @@ end
 
 H.fights = function(v)
     S.Workers = tonumber(v) or S.Workers
+    triggerSave()
     if getgenv().StoryFarm and spawnWorker then
         for i = 1, S.Workers do spawnWorker(i) end
     end
@@ -1271,7 +1436,8 @@ end
 
 local TowerBox = Tabs.Towers:AddLeftGroupbox("Battle towers")
 for _, tw in ipairs(TW) do
-    TowerBox:AddToggle("T_" .. tw.Id, { Text = tw.Name, Default = tw.On, Callback = function(v) tw.On = v end })
+    TowerBox:AddToggle("T_" .. tw.Id, { Text = tw.Name, Default = tw.On,
+        Callback = function(v) tw.On = v; triggerSave() end })
     tw.info = proxyLabel(TowerBox:AddLabel("Loading...", true))
 end
 
@@ -1279,9 +1445,9 @@ local TCtl = Tabs.Towers:AddRightGroupbox("Controls")
 local tStatus = proxyLabel(TCtl:AddLabel("Idle", true))
 local tStartB = mkButton(TCtl, "START")
 TCtl:AddDropdown("TowerTeam", { Values = { "Auto", "1", "2", "3", "4" }, Default = (TS.Team or 0) + 1, Text = "Team",
-    Callback = function(v) TS.Team = tonumber(v) end })
+    Callback = function(v) TS.Team = tonumber(v); triggerSave() end })
 TCtl:AddToggle("TowerFirst", { Text = "Include first clears", Default = TS.First,
-    Callback = function(v) TS.First = v end })
+    Callback = function(v) TS.First = v; triggerSave() end })
 local tSpeedB = mkButton(TCtl, "Max battle speed")
 local tEndB = mkButton(TCtl, "End current run")
 TCtl:AddLabel("Shares the tower slot with Halloween, Hard Tower and Auto Raid: only one of them can run at a time.", true)
@@ -1338,6 +1504,7 @@ getgenv().TowerOnResult = function(res)
         tDeaths[id] = 0
         tStale = true
         refreshStats()
+        triggerSave()
         log(("[T] %s Part %s cleared%s"):format(tostring(id), tostring(res.Part),
             res.FirstClear and " (first clear)" or ""), C.good)
     end
@@ -1498,10 +1665,10 @@ local hStatus = proxyLabel(HBox:AddLabel("Idle", true))
 local hInfo   = proxyLabel(HBox:AddLabel("Floor: ? | Best: ?", true))
 local hStartB = mkButton(HBox, "START")
 HBox:AddSlider("HardInterval", { Text = "Seconds per floor", Default = HS.Interval, Min = 6, Max = 20,
-    Rounding = 0, Callback = function(v) HS.Interval = math.floor(tonumber(v) or HS.Interval) end })
+    Rounding = 0, Callback = function(v) HS.Interval = math.floor(tonumber(v) or HS.Interval); triggerSave() end })
 HBox:AddInput("HardStopAt", { Default = tostring(HS.StopAt), Numeric = true, Finished = true,
     Text = "Stop at floor (0 = never)", Placeholder = "0",
-    Callback = function(v) HS.StopAt = math.max(0, math.floor(tonumber(v) or 0)) end })
+    Callback = function(v) HS.StopAt = math.max(0, math.floor(tonumber(v) or 0)); triggerSave() end })
 
 local HNote = Tabs.Hard:AddRightGroupbox("Notes")
 HNote:AddLabel("1) Turn OFF the game's own Hard Tower auto-climb first, or both will call the server.", true)
@@ -1636,6 +1803,7 @@ local function startHard()
                         hclimbed += fl - lastFloor
                         stuck = 0
                         refreshStats()
+                        triggerSave()
                     elseif not slow then
                         stuck += 1
                     end
@@ -1681,7 +1849,7 @@ do
     local hwStatus = proxyLabel(HwBox:AddLabel("Idle", true))
     local hwStartB = mkButton(HwBox, "START")
     HwBox:AddDropdown("HalloweenTeam", { Values = { "1", "2", "3", "4" }, Default = HW.Team, Text = "Team",
-        Callback = function(v) HW.Team = tonumber(v) or HW.Team end })
+        Callback = function(v) HW.Team = tonumber(v) or HW.Team; triggerSave() end })
 
     local HwNote = Tabs.Halloween:AddRightGroupbox("Notes")
     HwNote:AddLabel("50 parts, 10 waves each, a Major part every 10 (the Soul Relic comes from Major 3, probably Part 30).", true)
@@ -1848,11 +2016,32 @@ do
     end)
 end
 
+-- إعادة تشغيل الفارم تلقائياً بعد الانتقال بين السيرفرات إذا كان يعمل مسبقاً
+task.defer(function()
+    if getgenv().StoryFarmAutoStart then
+        getgenv().StoryFarmAutoStart = false
+        startFarm()
+    end
+    if getgenv().TowerFarmAutoStart then
+        getgenv().TowerFarmAutoStart = false
+        startTowers()
+    end
+    if getgenv().HardFarmAutoStart then
+        getgenv().HardFarmAutoStart = false
+        startHard()
+    end
+    if getgenv().HalloweenFarmAutoStart then
+        getgenv().HalloweenFarmAutoStart = false
+        startHalloween()
+    end
+end)
 
--- 16. قسم Machines (وهو الأخير)
+
+-- 16. قسم Machines (معلومات StarGyro بدون زر شراء)
 task.spawn(function()
     local Tab = Window:AddTab("Machines")
     local box = Tab:AddLeftGroupbox("Game windows")
+    local gyroBox = Tab:AddRightGroupbox("StarGyro (Gyro Overload)")
     local pg = lp:WaitForChild("PlayerGui")
     local entries, picked, filter = {}, nil, ""
     local opened = {}
@@ -1860,6 +2049,20 @@ task.spawn(function()
     local cntL = proxyLabel(box:AddLabel("Found: 0", true))
     local SKIP = { Frame = true, ImageLabel = true, TextLabel = true, Holder = true, Template = true,
         Content = true, Container = true, Background = true, Main = true, Inner = true }
+
+    local gyroInfoL = proxyLabel(gyroBox:AddLabel("Gyro Overload (+5 Server Luck)", true))
+    pcall(function()
+        local sgd = require(RS:WaitForChild("StarGyroData", 3))
+        if sgd then
+            gyroInfoL.Text = ("%s: +%s Luck (Max +%s) | ID: %s"):format(
+                tostring(sgd.NAME or "Gyro Overload"),
+                tostring(sgd.LUCK_PER_STACK or 5),
+                tostring((sgd.LUCK_PER_STACK or 5) * (sgd.MAX_STACKS or 5)),
+                tostring(sgd.PRODUCT_ID or 3718678732))
+        end
+    end)
+
+    gyroBox:AddLabel("Buy Gyro Overload from the game itself if you want it. Use Stats > Auto-Hop to find servers that already have it.", true)
 
     local function pathOf(o)
         local parts, cur = {}, o
@@ -2085,7 +2288,6 @@ task.spawn(function()
                         asuraL.Text = "Asura auto: boss not available, retry in 60s"
                         if not sleep(60) then return end
                     elseif type(res) == "table" and res.GrantId then
-                        -- Winner=B is normal here: you can't kill the boss, the fight just adds damage.
                         if not sleep(S.FightDelay) then return end
                         local claimed = false
                         for _ = 1, S.MaxDoneTries do
