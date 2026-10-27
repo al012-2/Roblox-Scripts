@@ -312,6 +312,33 @@ local function mkButton(group, text)
         end })
 end
 
+-- مفتاح تشغيل/إيقاف بدل زر START. نفس واجهة mkButton (MouseButton1Click + Text)
+-- عشان باقي الكود يشتغل بدون تغيير. المفتاح دايماً يرجع لحالة الفارم الحقيقية
+-- (مثلاً لو الفارم ما قدر يبدأ، يرجع OFF بنفسه).
+local function mkStartToggle(group, id, text)
+    local fns, tog, lastOn, syncing = {}, nil, false, false
+    local function sync()
+        if tog and tog.Value ~= lastOn then
+            syncing = true
+            pcall(function() tog:SetValue(lastOn) end)
+            syncing = false
+        end
+    end
+    tog = group:AddToggle(id, { Text = text, Default = false, Callback = function(v)
+        if syncing or v == lastOn then return end
+        task.spawn(function()
+            for _, fn in ipairs(fns) do pcall(fn) end
+            sync()
+        end)
+    end })
+    return setmetatable({ MouseButton1Click = { Connect = function(_, fn) fns[#fns + 1] = fn end } }, {
+        __newindex = function(_, k, v)
+            if k ~= "Text" then return end
+            if v == "STOP" then lastOn = true elseif v == "START" then lastOn = false else return end
+            sync()
+        end })
+end
+
 local status, startB, logLbl, retryWeakB, weakL, weakBar, ticketToggle, ticketL, farmL
 local killsL, weatherL, gyroL, rewL, resetB, rejoinB, hopB, gyroHopToggle
 weakBar = setmetatable({}, { __newindex = function() end })
@@ -320,7 +347,7 @@ do
     local Control = Tabs.Story:AddLeftGroupbox("Control")
     status = proxyLabel(Control:AddLabel("Idle", true))
     farmL = proxyLabel(Control:AddLabel("Running (0/2): nothing", true))
-    startB = mkButton(Control, "START")
+    startB = mkStartToggle(Control, "StoryRun", "Story farm")
     Control:AddDropdown("StoryTeam", { Values = { "1", "2", "3", "4" }, Default = S.Team, Text = "Team",
         Callback = function(v) hcall("team", v) end })
     Control:AddDropdown("StoryFights", { Values = { "1", "2" }, Default = S.Workers, Text = "Fights at once",
@@ -1443,7 +1470,7 @@ end
 
 local TCtl = Tabs.Towers:AddRightGroupbox("Controls")
 local tStatus = proxyLabel(TCtl:AddLabel("Idle", true))
-local tStartB = mkButton(TCtl, "START")
+local tStartB = mkStartToggle(TCtl, "TowerRun", "Tower farm")
 TCtl:AddDropdown("TowerTeam", { Values = { "Auto", "1", "2", "3", "4" }, Default = (TS.Team or 0) + 1, Text = "Team",
     Callback = function(v) TS.Team = tonumber(v); triggerSave() end })
 TCtl:AddToggle("TowerFirst", { Text = "Include first clears", Default = TS.First,
@@ -1663,7 +1690,7 @@ local function findRem(name) return R:FindFirstChild(name) or RS:FindFirstChild(
 local HBox = Tabs.Hard:AddLeftGroupbox("Hard Tower")
 local hStatus = proxyLabel(HBox:AddLabel("Idle", true))
 local hInfo   = proxyLabel(HBox:AddLabel("Floor: ? | Best: ?", true))
-local hStartB = mkButton(HBox, "START")
+local hStartB = mkStartToggle(HBox, "HardRun", "Hard Tower farm")
 HBox:AddSlider("HardInterval", { Text = "Seconds per floor", Default = HS.Interval, Min = 6, Max = 20,
     Rounding = 0, Callback = function(v) HS.Interval = math.floor(tonumber(v) or HS.Interval); triggerSave() end })
 HBox:AddInput("HardStopAt", { Default = tostring(HS.StopAt), Numeric = true, Finished = true,
@@ -1847,7 +1874,7 @@ do
 
     local HwBox = Tabs.Halloween:AddLeftGroupbox("Halloween Tower")
     local hwStatus = proxyLabel(HwBox:AddLabel("Idle", true))
-    local hwStartB = mkButton(HwBox, "START")
+    local hwStartB = mkStartToggle(HwBox, "HalloweenRun", "Halloween farm")
     HwBox:AddDropdown("HalloweenTeam", { Values = { "1", "2", "3", "4" }, Default = HW.Team, Text = "Team",
         Callback = function(v) HW.Team = tonumber(v) or HW.Team; triggerSave() end })
 
