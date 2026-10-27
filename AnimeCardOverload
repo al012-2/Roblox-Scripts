@@ -205,6 +205,10 @@ do
     if type(CFG.HardStopAt) == "number" and CFG.HardStopAt >= 0 then
         HS.StopAt = math.floor(CFG.HardStopAt)
     end
+    -- toggles that used to reset on every start (applied once the UI + handlers exist)
+    S.SavedAntiLag    = CFG.AntiLag == true
+    S.SavedSilentRoll = CFG.SilentRoll == true
+    S.SavedNo3D       = CFG.Disable3D == true
     pcall(function()
         local dec = HttpService:JSONDecode(CFG.TicketArgsJson or "{}")
         if type(dec) == "table" then learned = dec end
@@ -294,11 +298,11 @@ do -- Story tab
         Callback = function(v) hcall("fights", v) end })
     Control:AddToggle("StoryAll", { Text = "All difficulties (Easy up to chosen)", Default = S.All,
         Callback = function(v) S.All = v end })
-    Control:AddToggle("AntiLag", { Text = "Anti-Lag (mute roll/hit events)", Default = false,
+    Control:AddToggle("AntiLag", { Text = "Anti-Lag (mute roll/hit events)", Default = S.SavedAntiLag,
         Callback = function(v) hcall("antiLag", v) end })
-    Control:AddToggle("SilentRoll", { Text = "Silent auto-roll", Default = false,
+    Control:AddToggle("SilentRoll", { Text = "Silent auto-roll", Default = S.SavedSilentRoll,
         Callback = function(v) hcall("silentRoll", v) end })
-    Control:AddToggle("Disable3D", { Text = "Disable 3D rendering (saves CPU/GPU)", Default = false,
+    Control:AddToggle("Disable3D", { Text = "Disable 3D rendering (saves CPU/GPU)", Default = S.SavedNo3D,
         Callback = function(v) hcall("render", v) end })
 
     local WeakBox = Tabs.Story:AddLeftGroupbox("Weak units")
@@ -522,6 +526,7 @@ H.silentRoll = function(v)
 end
 
 H.render = function(v)
+    S.No3D = v == true
     pcall(function() RunService:Set3dRenderingEnabled(not v) end)
 end
 
@@ -575,7 +580,8 @@ saveSettings = function()
         local d = { Worlds = {}, Team = S.Team, All = S.All, Workers = S.Workers,
             Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First,
             Tickets = S.Tickets, TicketMin = S.TicketMin,
-            HardInterval = HS.Interval, HardStopAt = HS.StopAt }
+            HardInterval = HS.Interval, HardStopAt = HS.StopAt,
+            AntiLag = S.AntiLag == true, SilentRoll = S.SilentRoll == true, Disable3D = S.No3D == true }
         for _, w in ipairs(WORLDS) do
             d.Worlds[w.World] = { On = w.On, Diff = w.Diff, Bosses = w.Bosses }
         end
@@ -1618,6 +1624,14 @@ Library:OnUnload(function()
 end)
 
 log("Ready. Anti-AFK on. Anti-Lag & Weather Monitor loaded.", C.dim)
+
+-- re-apply the toggles saved last session (the handlers skip a value that is already active)
+task.delay(2, function()
+    if unloaded then return end
+    if S.SavedAntiLag then pcall(H.antiLag, true) end
+    if S.SavedNo3D then pcall(H.render, true) end
+    if S.SavedSilentRoll then pcall(H.silentRoll, true) end
+end)
 task.spawn(function()
     pcall(function() refreshTowerState(true) end)
     pcall(updateTowerRows)
