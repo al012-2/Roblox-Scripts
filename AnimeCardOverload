@@ -1598,6 +1598,133 @@ hStartB.MouseButton1Click:Connect(function()
     end
 end)
 
+-- ==================== Machines (open / close the game's own windows) ====================
+-- Lists the GUIs found in PlayerGui under their in-game names (skill tree, traits machine,
+-- crafting machine, ...). Open = shows it (and every parent), Close = hides it.
+task.spawn(function()
+    local Tab = Window:AddTab("Machines")
+    local box = Tab:AddLeftGroupbox("Game windows")
+    local pg = lp:WaitForChild("PlayerGui")
+    local entries, picked, filter = {}, nil, ""
+    local opened = {}
+    local selL = proxyLabel(box:AddLabel("Selected: -", true))
+    local cntL = proxyLabel(box:AddLabel("Found: 0", true))
+    local SKIP = { Frame = true, ImageLabel = true, TextLabel = true, Holder = true, Template = true,
+        Content = true, Container = true, Background = true, Main = true, Inner = true }
+
+    local function pathOf(o)
+        local parts, cur = {}, o
+        while cur and cur ~= pg do
+            table.insert(parts, 1, cur.Name)
+            cur = cur.Parent
+        end
+        return table.concat(parts, "/")
+    end
+
+    local function collect()
+        local list = {}
+        local function walk(o, depth)
+            for _, ch in ipairs(o:GetChildren()) do
+                if ch:IsA("GuiObject") then
+                    if (ch:IsA("Frame") or ch:IsA("ScrollingFrame") or ch:IsA("ImageLabel"))
+                        and not SKIP[ch.Name] and (depth == 1 or ch.Visible == false) then
+                        list[#list + 1] = ch
+                    end
+                    if depth < 3 then walk(ch, depth + 1) end
+                end
+            end
+        end
+        for _, g in ipairs(pg:GetChildren()) do
+            if g:IsA("ScreenGui") then
+                list[#list + 1] = g
+                walk(g, 1)
+            end
+        end
+        return list
+    end
+
+    local dd
+    local function fill()
+        entries = {}
+        local labels, used = {}, {}
+        for _, o in ipairs(collect()) do
+            local name = o.Name
+            local path = pathOf(o)
+            if filter == "" or name:lower():find(filter, 1, true) or path:lower():find(filter, 1, true) then
+                local label = o:IsA("ScreenGui") and (name .. "  [ScreenGui]") or (name .. "  ·  " .. (path:match("^[^/]+") or ""))
+                if used[label] then
+                    used[label] += 1
+                    label = label .. " #" .. used[label]
+                else
+                    used[label] = 1
+                end
+                entries[label] = o
+                labels[#labels + 1] = label
+            end
+        end
+        table.sort(labels)
+        cntL.Text = "Found: " .. #labels
+        if dd then pcall(function() dd:SetValues(labels) end) end
+    end
+
+    dd = box:AddDropdown("GuiPick", { Values = {}, Default = nil, Text = "Window", Searchable = true,
+        Callback = function(v)
+            picked = v and entries[v] or nil
+            selL.Text = "Selected: " .. (picked and pathOf(picked) or "-")
+        end })
+    box:AddInput("GuiFilter", { Default = "", Text = "Filter by name", Placeholder = "e.g. trait, craft, skill",
+        Callback = function(v)
+            filter = tostring(v or ""):lower()
+            fill()
+        end })
+
+    local function valid(o) return o and o.Parent ~= nil end
+
+    local function openObj(o)
+        local cur = o
+        while cur and cur ~= pg do
+            if cur:IsA("ScreenGui") then cur.Enabled = true
+            elseif cur:IsA("GuiObject") then cur.Visible = true end
+            cur = cur.Parent
+        end
+    end
+    local function closeObj(o)
+        if o:IsA("ScreenGui") then o.Enabled = false
+        elseif o:IsA("GuiObject") then o.Visible = false end
+    end
+
+    local openB = mkButton(box, "Open")
+    local closeB = mkButton(box, "Close")
+    local closeAllB = mkButton(box, "Close everything I opened")
+    local refreshB = mkButton(box, "Refresh list")
+
+    openB.MouseButton1Click:Connect(function()
+        if not valid(picked) then log("[Machines] Pick a window first (or refresh the list)", C.warn) return end
+        openObj(picked)
+        opened[picked] = true
+        log("[Machines] Opened " .. pathOf(picked), C.good)
+    end)
+    closeB.MouseButton1Click:Connect(function()
+        if not valid(picked) then log("[Machines] Pick a window first (or refresh the list)", C.warn) return end
+        closeObj(picked)
+        opened[picked] = nil
+        log("[Machines] Closed " .. pathOf(picked), C.dim)
+    end)
+    closeAllB.MouseButton1Click:Connect(function()
+        for o in pairs(opened) do
+            if valid(o) then closeObj(o) end
+        end
+        opened = {}
+        log("[Machines] Closed everything the script opened", C.dim)
+    end)
+    refreshB.MouseButton1Click:Connect(fill)
+
+    box:AddLabel("Windows that load data from the server when they open may look empty if forced open. If one does, open it the normal way in the game.", true)
+
+    task.wait(3) -- let the game finish building its GUIs
+    fill()
+end)
+
 -- ==================== Raid Logger ====================
 -- Logs every RaidRemotes InvokeServer call WITH its reply + server events.
 -- Play a raid by hand, then press "Copy log" (or getgenv().RaidCopy()). Also saved to RaidLog.txt.
