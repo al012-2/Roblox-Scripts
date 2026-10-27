@@ -21,6 +21,11 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
+-- 19) "Hard Tower" tab: climbs the Hard Tower floor by floor with TowerNextFloor("Hard"),
+--     checks GetTowerRunSummary("Hard") after every floor and stops by itself on defeat /
+--     run end / stop-floor. Settings are saved and it can auto-start after Rejoin / Server Hop.
+--     The game's own auto-climb must be OFF, and a Hard run must already be active.
+-- 20) UI callbacks are nil-safe (no error if the library fires a callback while the UI is built).
 -- 18) UI is now Obsidian (deividcomsono/Obsidian), loaded over HTTP at start.
 -- v4 changes:
 -- 15) Weak-units tracker: first loss retries after 15s, second loss pauses that difficulty and
@@ -60,6 +65,7 @@ end
 getgenv().StoryFarmConns = {}
 getgenv().StoryFarm = false
 getgenv().TowerFarm = false
+getgenv().HardFarm = false
 
 -- ==================== Anti-AFK (Fixed Hook) ====================
 do
@@ -156,9 +162,11 @@ local S = {
     Tickets = false,
     TicketMin = 10,
 }
+local HS = { Interval = 8, StopAt = 0 } -- Hard Tower: seconds per floor, stop at floor (0 = never)
 
 local kills, rewards, wins = {}, {}, 0
 local tparts = 0 -- tower parts cleared this session
+local hclimbed = 0 -- Hard Tower floors climbed this session
 local failCount = {} -- consecutive losses per boss|diff
 local weakList = {}  -- boss|diff that beat the player twice in a row
 
@@ -190,6 +198,12 @@ do
     if type(CFG.Tickets) == "boolean" then S.Tickets = CFG.Tickets end
     if type(CFG.TicketMin) == "number" and CFG.TicketMin >= 1 and CFG.TicketMin <= 60 then
         S.TicketMin = math.floor(CFG.TicketMin)
+    end
+    if type(CFG.HardInterval) == "number" and CFG.HardInterval >= 6 and CFG.HardInterval <= 20 then
+        HS.Interval = math.floor(CFG.HardInterval)
+    end
+    if type(CFG.HardStopAt) == "number" and CFG.HardStopAt >= 0 then
+        HS.StopAt = math.floor(CFG.HardStopAt)
     end
     pcall(function()
         local dec = HttpService:JSONDecode(CFG.TicketArgsJson or "{}")
@@ -228,6 +242,11 @@ getgenv().StoryFarmLib = Library
 
 local H = {}            -- handlers filled in further down (the UI is built before the logic)
 local unloaded = false
+-- nil-safe call: a callback fired while the UI is still being built must not error
+local function hcall(name, v)
+    local f = H[name]
+    if f then f(v) end
+end
 
 local Window = Library:CreateWindow({
     Title = "Story Auto Farm",
@@ -238,6 +257,7 @@ local Window = Library:CreateWindow({
 local Tabs = {
     Story    = Window:AddTab("Story"),
     Towers   = Window:AddTab("Towers"),
+    Hard     = Window:AddTab("Hard Tower"),
     Tickets  = Window:AddTab("Tickets"),
     Stats    = Window:AddTab("Stats"),
     Settings = Window:AddTab("UI Settings"),
@@ -269,17 +289,17 @@ do -- Story tab
     status = proxyLabel(Control:AddLabel("Idle", true))
     startB = mkButton(Control, "START")
     Control:AddDropdown("StoryTeam", { Values = { "1", "2", "3", "4" }, Default = S.Team, Text = "Team",
-        Callback = function(v) H.team(v) end })
+        Callback = function(v) hcall("team", v) end })
     Control:AddDropdown("StoryFights", { Values = { "1", "2" }, Default = S.Workers, Text = "Fights at once",
-        Callback = function(v) H.fights(v) end })
+        Callback = function(v) hcall("fights", v) end })
     Control:AddToggle("StoryAll", { Text = "All difficulties (Easy up to chosen)", Default = S.All,
         Callback = function(v) S.All = v end })
     Control:AddToggle("AntiLag", { Text = "Anti-Lag (mute roll/hit events)", Default = false,
-        Callback = function(v) H.antiLag(v) end })
+        Callback = function(v) hcall("antiLag", v) end })
     Control:AddToggle("SilentRoll", { Text = "Silent auto-roll", Default = false,
-        Callback = function(v) H.silentRoll(v) end })
+        Callback = function(v) hcall("silentRoll", v) end })
     Control:AddToggle("Disable3D", { Text = "Disable 3D rendering (saves CPU/GPU)", Default = false,
-        Callback = function(v) H.render(v) end })
+        Callback = function(v) hcall("render", v) end })
 
     local WeakBox = Tabs.Story:AddLeftGroupbox("Weak units")
     weakL = proxyLabel(WeakBox:AddLabel("…", true))
@@ -304,10 +324,10 @@ end
 do -- Tickets tab
     local TixBox = Tabs.Tickets:AddLeftGroupbox("Story tickets")
     ticketToggle = TixBox:AddToggle("TicketsOn", { Text = "Auto-use tickets", Default = S.Tickets,
-        Callback = function(v) H.tickets(v) end })
+        Callback = function(v) hcall("tickets", v) end })
     TixBox:AddDropdown("TicketMin", { Values = { "5", "10", "15", "20", "30" },
         Default = table.find({ 5, 10, 15, 20, 30 }, S.TicketMin) or 2, Text = "Min bosses ready",
-        Callback = function(v) H.minReady(v) end })
+        Callback = function(v) hcall("minReady", v) end })
     ticketL = proxyLabel(TixBox:AddLabel("Tickets: ?", true))
     TixBox:AddLabel("For each world, press the game's own 'Use Ticket' once so the script learns how to call it.", true)
 end
@@ -339,9 +359,10 @@ local function refreshStats()
     for _, w in ipairs(WORLDS) do
         if (kills[w.World] or 0) > 0 then parts[#parts + 1] = w.World .. " " .. kills[w.World] end
     end
-    killsL.Text = ("Bosses killed: %d%s%s"):format(wins,
+    killsL.Text = ("Bosses killed: %d%s%s%s"):format(wins,
         #parts > 0 and (" | " .. table.concat(parts, " · ")) or "",
-        tparts > 0 and (" | Tower parts " .. tparts) or "")
+        tparts > 0 and (" | Tower parts " .. tparts) or "",
+        hclimbed > 0 and (" | Hard floors " .. hclimbed) or "")
 
     local names = {}
     for n in pairs(rewards) do names[#names + 1] = n end
@@ -352,7 +373,7 @@ local function refreshStats()
 end
 
 resetB.MouseButton1Click:Connect(function()
-    wins, kills, rewards, tparts = 0, {}, {}, 0
+    wins, kills, rewards, tparts, hclimbed = 0, {}, {}, 0, 0
     refreshStats()
 end)
 
@@ -360,8 +381,9 @@ local function queueRerun()
     if saveSettings then pcall(saveSettings) end
     pcall(function()
         if queue_on_teleport and isfile and isfile(SCRIPT_FILE) then
-            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; loadstring(readfile(%q))()')
-                :format(SCRIPT_FILE, tostring(getgenv().StoryFarm == true), tostring(getgenv().TowerFarm == true), SCRIPT_FILE))
+            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; getgenv().HardFarmAutoStart=%s; loadstring(readfile(%q))()')
+                :format(SCRIPT_FILE, tostring(getgenv().StoryFarm == true), tostring(getgenv().TowerFarm == true),
+                    tostring(getgenv().HardFarm == true), SCRIPT_FILE))
         end
     end)
 end
@@ -552,7 +574,8 @@ saveSettings = function()
     pcall(function()
         local d = { Worlds = {}, Team = S.Team, All = S.All, Workers = S.Workers,
             Cooldowns = {}, Towers = {}, TowerTeam = TS and TS.Team, TowerFirst = TS and TS.First,
-            Tickets = S.Tickets, TicketMin = S.TicketMin }
+            Tickets = S.Tickets, TicketMin = S.TicketMin,
+            HardInterval = HS.Interval, HardStopAt = HS.StopAt }
         for _, w in ipairs(WORLDS) do
             d.Worlds[w.World] = { On = w.On, Diff = w.Diff, Bosses = w.Bosses }
         end
@@ -1387,6 +1410,186 @@ tEndB.MouseButton1Click:Connect(function()
     log("[T] Ended " .. id .. (ok and "" or " (request failed)") .. " - paused 10m", ok and C.warn or C.bad)
 end)
 
+-- ==================== Hard Tower ====================
+-- One floor per TowerNextFloor("Hard") call (the same call the game makes). After every floor
+-- GetTowerRunSummary("Hard") is checked, so the loop stops by itself when the run ends, the
+-- floor stops advancing (defeat) or the stop-floor is reached. Mods are not picked (HardMods={}).
+local hRun = 0
+local function findRem(name) return R:FindFirstChild(name) or RS:FindFirstChild(name, true) end
+
+local HBox = Tabs.Hard:AddLeftGroupbox("Hard Tower")
+local hStatus = proxyLabel(HBox:AddLabel("Idle", true))
+local hInfo   = proxyLabel(HBox:AddLabel("Floor: ? | Best: ?", true))
+local hStartB = mkButton(HBox, "START")
+HBox:AddSlider("HardInterval", { Text = "Seconds per floor", Default = HS.Interval, Min = 6, Max = 20,
+    Rounding = 0, Callback = function(v) HS.Interval = math.floor(tonumber(v) or HS.Interval) end })
+HBox:AddInput("HardStopAt", { Default = tostring(HS.StopAt), Numeric = true, Finished = true,
+    Text = "Stop at floor (0 = never)", Placeholder = "0",
+    Callback = function(v) HS.StopAt = math.max(0, math.floor(tonumber(v) or 0)) end })
+
+local HNote = Tabs.Hard:AddRightGroupbox("Notes")
+HNote:AddLabel("1) Turn OFF the game's own Hard Tower auto-climb first, or both will call the server.", true)
+HNote:AddLabel("2) A Hard run must already be active (talk to the Hard Tower NPC once).", true)
+HNote:AddLabel("3) It stops by itself on defeat, run end, 3 errors, or the stop floor.", true)
+HNote:AddLabel("4) The first 3 replies are written to the Story log (fields after the battle Log).", true)
+
+local function hFlat(t, skip, depth)
+    depth = depth or 0
+    local o = {}
+    for k, v in pairs(t) do
+        if k ~= skip then
+            local val = tostring(v)
+            if type(v) == "table" then
+                val = depth < 2 and ("{" .. hFlat(v, nil, depth + 1) .. "}") or "{...}"
+            end
+            o[#o + 1] = tostring(k) .. "=" .. val
+        end
+    end
+    return table.concat(o, ", ")
+end
+
+local function hSummary(rem)
+    if not rem then return nil end
+    local ok, r = pcall(function() return rem:InvokeServer("Hard") end)
+    if ok and type(r) == "table" then return r end
+end
+
+local function hItems(s)
+    local out = {}
+    if type(s) == "table" and type(s.Items) == "table" then
+        for _, it in ipairs(s.Items) do
+            if type(it) == "table" and it.Name then
+                out[#out + 1] = tostring(it.Name) .. " x" .. tostring(it.Count or 1)
+            end
+        end
+    end
+    return table.concat(out, ", ")
+end
+
+local function hShow(s)
+    if type(s) == "table" then
+        hInfo.Text = ("Floor %s | Best %s | RewardMult x%s | Climbed %d"):format(
+            tostring(s.Floor), tostring(s.Best), tostring(s.RewardMult or 1), hclimbed)
+    end
+end
+
+local function setHRunning(on)
+    getgenv().HardFarm = on
+    hStartB.Text = on and "STOP" or "START"
+    if not on then hStatus.Text = "Idle" end
+end
+
+local function startHard()
+    local nextRem = findRem("TowerNextFloor")
+    local sumRem  = findRem("GetTowerRunSummary")
+    local hideRem = findRem("SetTowerHidden")
+    if not nextRem then log("[H] TowerNextFloor remote not found", C.bad) return end
+    if not sumRem then log("[H] GetTowerRunSummary remote not found (needed to detect defeat)", C.bad) return end
+
+    local s = hSummary(sumRem)
+    if not s then
+        log("[H] Couldn't read the Hard run state - is a Hard run active?", C.warn)
+        return
+    end
+    if s.Active == false then
+        log("[H] No active Hard run. Start one in the game (Hard Tower NPC), then press START.", C.warn)
+        return
+    end
+
+    hRun += 1
+    local my = hRun
+    local function alive() return getgenv().HardFarm and hRun == my and not unloaded end
+    local function finish(reason, col)
+        if hRun == my then
+            setHRunning(false)
+            log("[H] Stopped: " .. reason, col or C.warn)
+        end
+    end
+
+    setHRunning(true)
+    log(("[H] Started from floor %s (%ds per floor%s)"):format(tostring(s.Floor), HS.Interval,
+        HS.StopAt > 0 and (", stop at " .. HS.StopAt) or ""), C.good)
+    if hideRem then pcall(function() hideRem:FireServer(true) end) end -- same as the game's hidden mode
+
+    task.spawn(function()
+        local stuck, errs, probes, extra = 0, 0, 0, 0
+        local lastFloor = tonumber(s.Floor)
+        hShow(s)
+
+        while alive() do
+            local t0 = os.clock()
+            if HS.StopAt > 0 and lastFloor and lastFloor >= HS.StopAt then
+                return finish("reached floor " .. lastFloor, C.good)
+            end
+            if not throttle(alive) then return end
+            hStatus.Text = "Climbing to floor " .. tostring((lastFloor or 0) + 1)
+
+            local ok, res = pcall(function() return nextRem:InvokeServer("Hard") end)
+            local slow = false
+            if not ok then
+                errs += 1
+                log("[H] error: " .. tostring(res):sub(1, 120), C.warn)
+                if errs >= 3 then return finish("too many errors", C.bad) end
+                task.wait(30)
+            else
+                errs = 0
+                if type(res) == "table" then
+                    if probes < 3 then
+                        probes += 1
+                        local n = type(res.Log) == "table" and #res.Log or 0
+                        log(("[H] reply#%d Log=%d | %s"):format(probes, n, hFlat(res, "Log"):sub(1, 300)), C.dim)
+                    end
+                elseif res ~= nil then
+                    local m = tostring(res)
+                    log("[H] reply: " .. m:sub(1, 120), C.dim)
+                    if m:lower():find("slow") then
+                        slow = true
+                        extra = math.min(extra + 2, 12)
+                    end
+                end
+
+                local s2 = hSummary(sumRem)
+                if s2 then
+                    local fl = tonumber(s2.Floor)
+                    if fl and lastFloor and fl > lastFloor then
+                        hclimbed += fl - lastFloor
+                        stuck = 0
+                        refreshStats()
+                    elseif not slow then
+                        stuck += 1
+                    end
+                    lastFloor = fl or lastFloor
+                    hShow(s2)
+                    if s2.Active == false then
+                        local it = hItems(s2)
+                        log("[H] Run ended" .. (it ~= "" and (" | items: " .. it) or ""), C.warn)
+                        return finish("run is no longer active")
+                    end
+                    if stuck >= 3 then
+                        return finish(("floor not advancing (%dx) - probably defeated"):format(stuck), C.bad)
+                    end
+                end
+
+                local target = HS.Interval + extra
+                while alive() and os.clock() - t0 < target do
+                    hStatus.Text = ("Next floor in %ds"):format(math.ceil(target - (os.clock() - t0)))
+                    task.wait(1)
+                end
+            end
+        end
+    end)
+end
+
+hStartB.MouseButton1Click:Connect(function()
+    if getgenv().HardFarm then
+        hRun += 1
+        setHRunning(false)
+        log("[H] Stopped (the floor in progress finishes on the server)", C.bad)
+    else
+        startHard()
+    end
+end)
+
 Library:OnUnload(function()
     unloaded = true
     pcall(saveSettings)
@@ -1403,6 +1606,8 @@ Library:OnUnload(function()
     getgenv().BlockAutoRejoin = false -- the hook stays installed but stops blocking
     tRun += 1
     getgenv().TowerFarm = false
+    hRun += 1
+    getgenv().HardFarm = false
     getgenv().TowerOnResult = nil
     getgenv().AntiAfkToken = (getgenv().AntiAfkToken or 0) + 1
     if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
@@ -1428,6 +1633,12 @@ if getgenv().TowerFarmAutoStart then
     getgenv().TowerFarmAutoStart = nil
     log("[T] Tower auto-start after rejoin in 12s", C.good)
     task.delay(12, startTowers)
+end
+
+if getgenv().HardFarmAutoStart then
+    getgenv().HardFarmAutoStart = nil
+    log("[H] Hard Tower auto-start after rejoin in 16s", C.good)
+    task.delay(16, startHard)
 end
 
 task.spawn(function()
