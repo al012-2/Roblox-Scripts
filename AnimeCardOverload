@@ -1928,6 +1928,13 @@ task.spawn(function()
         return pcall(function() return rem:InvokeServer(table.unpack(a, 1, a.n)) end)
     end
 
+    local autoBuy, wantDiff, buyNext = false, "Normal", 0
+    box:AddDropdown("AutoRaidDiff", { Values = { "Normal", "Hard" }, Default = 1, Text = "Difficulty",
+        Callback = function(v) wantDiff = tostring(v or "Normal") end })
+    box:AddToggle("AutoRaidBuy", { Text = "Auto-buy the weekly pack (500 tokens)", Default = false,
+        Callback = function(v) autoBuy = v == true end })
+    box:AddLabel("Normal clears in about 100s for 90 tokens. Hard was lost to the Thunder God with your current team (0 tokens).", true)
+
     while not unloaded and getgenv().AutoRaidGen == gen do
         task.wait(1.5)
         if AR.On then
@@ -1943,7 +1950,11 @@ task.spawn(function()
                 stL.Text = ("Raid running: %s (%s) - %s"):format(tostring(run.Raid), tostring(run.Diff), phase)
             elseif phase == "Results" then
                 stL.Text = "Results - waiting for the game to restart"
-                if resultAt and os.clock() - resultAt > 45 then run = nil end
+                if resultAt and os.clock() - resultAt > 45 then
+                    resultAt = nil
+                    call("RaidRunAction", "Back")
+                    run = nil
+                end
             else
                 local me
                 if type(gate) == "table" and type(gate.Members) == "table" then
@@ -1953,6 +1964,11 @@ task.spawn(function()
                 end
                 if me and me.Leader and me.Ready ~= false and not gate.Starting and os.clock() - lastStart > 6 then
                     lastStart = os.clock()
+                    if gate.Diff and gate.Diff ~= wantDiff then
+                        local okp = call("RaidGateAction", "Pick", gate.Raid or "SkyIsland", wantDiff)
+                        log(("[Raid] Picked difficulty %s -> %s"):format(wantDiff, tostring(okp)), C.dim)
+                        task.wait(1)
+                    end
                     local ok, res = call("RaidGateAction", "Start")
                     log(("[Raid] Start pressed -> %s"):format(tostring(ok and res)), C.dim)
                     stL.Text = "Starting the raid..."
@@ -1960,7 +1976,7 @@ task.spawn(function()
                     stL.Text = gate.Starting and ("Starting in %ss"):format(tostring(gate.Starting))
                         or "In the gate (only the leader can start)"
                 else
-                    stL.Text = "Waiting: stand in an open raid gate"
+                    stL.Text = "Waiting: stand in a raid gate (the game puts you in one after the results)"
                 end
             end
 
@@ -1968,6 +1984,16 @@ task.spawn(function()
                 lastPoll = os.clock()
                 local ok, st = call("GetRaidState")
                 if ok and type(st) == "table" then AR.Tokens = st.Tokens end
+                if autoBuy and tonumber(AR.Tokens) and AR.Tokens >= 500 and os.clock() > buyNext then
+                    local okb, rb, mb = call("BuyRaidItem", "Pack1MWeekly", 1)
+                    if okb and rb == true then
+                        log("[Raid] " .. tostring(mb), C.good)
+                        lastPoll = 0
+                    else
+                        buyNext = os.clock() + 600
+                        log("[Raid] Buy failed: " .. tostring(mb or rb), C.dim)
+                    end
+                end
             end
         else
             stL.Text = "Idle"
