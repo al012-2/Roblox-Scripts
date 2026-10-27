@@ -1672,7 +1672,20 @@ task.spawn(function()
         getgenv().RaidLoggerHooked = true
         local old
         old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            if getgenv().RaidLogOn and getnamecallmethod() == "InvokeServer"
+            local m = getnamecallmethod()
+            if m == "FireServer" and getgenv().RaidLogOn and typeof(self) == "Instance"
+                and self.Parent and self.Parent.Name == "RaidRemotes"
+                and not (checkcaller and checkcaller()) then
+                local fa = table.pack(...)
+                local fs = {}
+                for i = 1, fa.n do fs[i] = ser(fa[i]) end
+                local fcb = getgenv().RaidLogAdd
+                if fcb then
+                    local fname = self.Name
+                    task.spawn(fcb, "FIRE " .. fname .. "(" .. table.concat(fs, ", ") .. ")")
+                end
+            end
+            if getgenv().RaidLogOn and m == "InvokeServer"
                 and typeof(self) == "Instance" and self.Parent and self.Parent.Name == "RaidRemotes"
                 and not (checkcaller and checkcaller()) then
                 local args = table.pack(...)
@@ -1692,6 +1705,11 @@ task.spawn(function()
     end
 
     add("logger ready")
+    do
+        local names = {}
+        for _, ch in ipairs(folder:GetChildren()) do names[#names + 1] = ch.Name .. ":" .. ch.ClassName end
+        add("REMOTES " .. table.concat(names, ", "))
+    end
     log("[Raid] Logger ready - play a raid by hand, then press Copy log", C.good)
 
     -- save to file every 5s (only when something changed)
@@ -1706,7 +1724,110 @@ task.spawn(function()
     end)
 end)
 
+-- ==================== Auto Raid ====================
+-- From the logged raid: RaidGateAction("Start") starts the raid from an open gate,
+-- RaidRunAction("AutoRetry", true) makes the game fight every enemy and restart after results.
+task.spawn(function()
+    local Tab = Window:AddTab("Auto Raid")
+    local box = Tab:AddLeftGroupbox("Auto raid")
+    local stL = proxyLabel(box:AddLabel("Idle", true))
+    local infoL = proxyLabel(box:AddLabel("Tokens: ? | Clears this session: 0", true))
+    local folder = RS:WaitForChild("RaidRemotes", 10)
+    if not folder then
+        stL.Text = "RaidRemotes not found - wrong game?"
+        return
+    end
+
+    getgenv().AutoRaidGen = (getgenv().AutoRaidGen or 0) + 1
+    local gen = getgenv().AutoRaidGen
+    local AR = { On = false, Clears = 0, Tokens = nil }
+    local gate, run, autoFor, lastStart, resultAt, lastPoll = nil, nil, nil, 0, nil, 0
+
+    local function ev(name, fn)
+        local e = folder:FindFirstChild(name)
+        if e and e:IsA("RemoteEvent") then
+            table.insert(getgenv().StoryFarmConns, e.OnClientEvent:Connect(function(...) pcall(fn, ...) end))
+        end
+    end
+    ev("RaidGateState", function(d) gate = d end)
+    ev("RaidRunState", function(d) run = d end)
+    ev("RaidRunResult", function(d)
+        resultAt = os.clock()
+        if type(d) == "table" and d.Cleared then
+            AR.Clears += 1
+            for _, row in pairs(d.Rows or {}) do
+                if row.Name == lp.Name and row.Tokens then
+                    log(("[Raid] Cleared %s (%s) in %ss | +%s tokens"):format(
+                        tostring(d.Raid), tostring(d.Diff), tostring(d.Time), tostring(row.Tokens)), C.good)
+                end
+            end
+        end
+    end)
+
+    box:AddToggle("AutoRaidOn", { Text = "Auto raid", Default = false, Callback = function(v)
+        AR.On = v == true
+        autoFor = nil
+        log("[Raid] Auto raid " .. (AR.On and "ON" or "OFF"), AR.On and C.good or C.dim)
+    end })
+    box:AddLabel("Stand in an open raid gate (you as leader). The script presses Start, turns the game's Auto on, and the game then fights and restarts by itself.", true)
+
+    local function call(name, ...)
+        local rem = folder:FindFirstChild(name)
+        if not rem then return false, "missing " .. name end
+        local a = table.pack(...)
+        return pcall(function() return rem:InvokeServer(table.unpack(a, 1, a.n)) end)
+    end
+
+    while not unloaded and getgenv().AutoRaidGen == gen do
+        task.wait(1.5)
+        if AR.On then
+            local phase = type(run) == "table" and run.Phase or nil
+            if phase == "Ordeals" or phase == "Final" then
+                if autoFor ~= run.Id then
+                    local ok, res = call("RaidRunAction", "AutoRetry", true)
+                    if ok and res then
+                        autoFor = run.Id
+                        log("[Raid] Game auto-fight turned on for " .. tostring(run.Raid), C.good)
+                    end
+                end
+                stL.Text = ("Raid running: %s (%s) - %s"):format(tostring(run.Raid), tostring(run.Diff), phase)
+            elseif phase == "Results" then
+                stL.Text = "Results - waiting for the game to restart"
+                if resultAt and os.clock() - resultAt > 45 then run = nil end
+            else
+                local me
+                if type(gate) == "table" and type(gate.Members) == "table" then
+                    for _, m in pairs(gate.Members) do
+                        if m.UserId == lp.UserId then me = m end
+                    end
+                end
+                if me and me.Leader and me.Ready ~= false and not gate.Starting and os.clock() - lastStart > 6 then
+                    lastStart = os.clock()
+                    local ok, res = call("RaidGateAction", "Start")
+                    log(("[Raid] Start pressed -> %s"):format(tostring(ok and res)), C.dim)
+                    stL.Text = "Starting the raid..."
+                elseif me then
+                    stL.Text = gate.Starting and ("Starting in %ss"):format(tostring(gate.Starting))
+                        or "In the gate (only the leader can start)"
+                else
+                    stL.Text = "Waiting: stand in an open raid gate"
+                end
+            end
+
+            if os.clock() - lastPoll > 30 then
+                lastPoll = os.clock()
+                local ok, st = call("GetRaidState")
+                if ok and type(st) == "table" then AR.Tokens = st.Tokens end
+            end
+        else
+            stL.Text = "Idle"
+        end
+        infoL.Text = ("Tokens: %s | Clears this session: %d"):format(tostring(AR.Tokens or "?"), AR.Clears)
+    end
+end)
+
 Library:OnUnload(function()
+    getgenv().AutoRaidGen = (getgenv().AutoRaidGen or 0) + 1
     getgenv().RaidLogOn = false
     getgenv().RaidLogAdd = nil
     getgenv().RaidCopy = nil
