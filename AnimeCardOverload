@@ -1,5 +1,5 @@
 --[[
-    Story Auto Farm (UI + Anti-AFK + Anti-Lag + Weather Monitor)
+    Story Auto Farm (UI + Anti-AFK + Anti-Lag + Weather Monitor + Raid Logger)
     - StartStoryBattle(world, boss, difficulty, team) + StoryFightDone(GrantId)
     - Difficulty: 1=Easy 2=Medium 3=Hard 4=Extreme 5=Nightmare 6=Insanity
     - Cooldown is per boss AND per difficulty; difficulties unlock in order,
@@ -17,6 +17,8 @@
     6) StoryFightDone is called on the remote named in the reply (GrantRemote), like the game does.
     7) "Towers" tab: Battle Tower auto-farm (Limitless / Malevolent / ...). It starts hidden runs
        through the game's own functions, so the game's AFK-rejoin watcher never fights with us.
+    21) "Raid Logger" tab: logs every RaidRemotes InvokeServer call + reply + server events.
+        Play one raid by hand, press "Copy log" (or getgenv().RaidCopy()) and paste it.
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -1594,6 +1596,120 @@ hStartB.MouseButton1Click:Connect(function()
     else
         startHard()
     end
+end)
+
+-- ==================== Raid Logger ====================
+-- Logs every RaidRemotes InvokeServer call WITH its reply + server events.
+-- Play a raid by hand, then press "Copy log" (or getgenv().RaidCopy()). Also saved to RaidLog.txt.
+task.spawn(function()
+    local Tab = Window:AddTab("Raid Logger")
+    local box = Tab:AddLeftGroupbox("Raid logger")
+    local info = proxyLabel(box:AddLabel("Waiting for RaidRemotes...", true))
+
+    local folder = RS:WaitForChild("RaidRemotes", 10)
+    if not folder then
+        info.Text = "RaidRemotes not found - wrong game?"
+        return
+    end
+
+    getgenv().RaidLogOn = true
+    local lines, t0, dirty = {}, os.clock(), false
+
+    local function ser(v, d)
+        d = d or 0
+        if type(v) ~= "table" then
+            return type(v) == "string" and string.format("%q", v) or tostring(v)
+        end
+        if d >= 6 then return "{...}" end
+        local o = {}
+        for k, x in pairs(v) do o[#o + 1] = tostring(k) .. "=" .. ser(x, d + 1) end
+        return "{" .. table.concat(o, ", ") .. "}"
+    end
+
+    local function add(text)
+        lines[#lines + 1] = ("[%.1fs] %s"):format(os.clock() - t0, tostring(text):sub(1, 6000))
+        if #lines > 3000 then table.remove(lines, 1) end
+        dirty = true
+        pcall(function() info.Text = ("Logging: %d lines"):format(#lines) end)
+    end
+    getgenv().RaidLogAdd = add -- the hook always calls the newest run's logger
+
+    local function copyLog()
+        local txt = table.concat(lines, "\n")
+        if setclipboard then setclipboard(txt) end
+        pcall(function() Library:Notify(("%d lines copied"):format(#lines), 4) end)
+        print(("[RaidLogger] %d lines, %d chars copied"):format(#lines, #txt))
+    end
+    getgenv().RaidCopy = copyLog
+
+    box:AddToggle("RaidLogToggle", { Text = "Logging", Default = true,
+        Callback = function(v) getgenv().RaidLogOn = v == true end })
+    local copyB = mkButton(box, "Copy log")
+    local clearB = mkButton(box, "Clear log")
+    copyB.MouseButton1Click:Connect(copyLog)
+    clearB.MouseButton1Click:Connect(function()
+        lines, dirty = {}, true
+        info.Text = "Logging: 0 lines"
+    end)
+    box:AddLabel("Play one raid by hand (pick, start, a few waves), then press Copy log and paste it here.", true)
+
+    -- server -> client events
+    for _, ch in ipairs(folder:GetChildren()) do
+        if ch:IsA("RemoteEvent") then
+            local c = ch.OnClientEvent:Connect(function(...)
+                if not getgenv().RaidLogOn then return end
+                local a = table.pack(...)
+                local parts = {}
+                for i = 1, a.n do parts[i] = ser(a[i]) end
+                add("EVENT " .. ch.Name .. "(" .. table.concat(parts, ", ") .. ")")
+            end)
+            table.insert(getgenv().StoryFarmConns, c)
+        end
+    end
+
+    -- client -> server calls with replies (hook once per session)
+    if hookmetamethod and newcclosure and not getgenv().RaidLoggerHooked then
+        getgenv().RaidLoggerHooked = true
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            if getgenv().RaidLogOn and getnamecallmethod() == "InvokeServer"
+                and typeof(self) == "Instance" and self.Parent and self.Parent.Name == "RaidRemotes"
+                and not (checkcaller and checkcaller()) then
+                local args = table.pack(...)
+                local res = table.pack(old(self, ...))
+                local cb = getgenv().RaidLogAdd
+                if cb then
+                    local a, r = {}, {}
+                    for i = 1, args.n do a[i] = ser(args[i]) end
+                    for i = 1, res.n do r[i] = ser(res[i]) end
+                    local name = self.Name
+                    task.spawn(cb, name .. "(" .. table.concat(a, ", ") .. ") -> " .. table.concat(r, ", "))
+                end
+                return table.unpack(res, 1, res.n)
+            end
+            return old(self, ...)
+        end))
+    end
+
+    add("logger ready")
+    log("[Raid] Logger ready - play a raid by hand, then press Copy log", C.good)
+
+    -- save to file every 5s (only when something changed)
+    task.spawn(function()
+        while not unloaded do
+            task.wait(5)
+            if dirty and writefile then
+                dirty = false
+                pcall(writefile, "RaidLog.txt", table.concat(lines, "\n"))
+            end
+        end
+    end)
+end)
+
+Library:OnUnload(function()
+    getgenv().RaidLogOn = false
+    getgenv().RaidLogAdd = nil
+    getgenv().RaidCopy = nil
 end)
 
 Library:OnUnload(function()
