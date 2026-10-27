@@ -136,6 +136,8 @@ local S = {
     AutoGyroHop = getgenv().GyroHopActive == true,
     MaxHops = 10,
     HopDelay = 10,
+    ResumeFarms = true,   -- يشغّل الفارمات اللي كانت ON لما تشغّل السكربت
+    AsuraAuto = false,
 }
 local HS = { Interval = 8, StopAt = 0 }
 local HW = { Team = 1 }
@@ -174,6 +176,7 @@ pcall(function()
             -- الكولداون والإحصائيات تخص الحساب القديم، ما نورثها
             CFG.Cooldowns = nil
             CFG.Stats = nil
+            CFG.Farms = nil
         end
     end
 end)
@@ -210,6 +213,8 @@ do
     if type(CFG.HopDelay) == "number" and CFG.HopDelay >= 5 and CFG.HopDelay <= 60 then
         S.HopDelay = math.floor(CFG.HopDelay)
     end
+    if type(CFG.ResumeFarms) == "boolean" then S.ResumeFarms = CFG.ResumeFarms end
+    if type(CFG.AsuraAuto) == "boolean" then S.AsuraAuto = CFG.AsuraAuto end
     if type(CFG.HardInterval) == "number" and CFG.HardInterval >= 6 and CFG.HardInterval <= 20 then
         HS.Interval = math.floor(CFG.HardInterval)
     end
@@ -336,6 +341,7 @@ local function mkStartToggle(group, id, text)
             if k ~= "Text" then return end
             if v == "STOP" then lastOn = true elseif v == "START" then lastOn = false else return end
             sync()
+            triggerSave()
         end })
 end
 
@@ -436,6 +442,31 @@ do
     MenuBox:AddButton({ Text = "Unload script", Func = function()
         triggerSave()
         Library:Unload()
+    end })
+
+    local CfgBox = Tabs.Settings:AddLeftGroupbox("Config (" .. lp.Name .. ")")
+    CfgBox:AddLabel("Every setting saves automatically to " .. CFG_FILE, true)
+    CfgBox:AddToggle("ResumeFarms", { Text = "Resume farms that were ON when the script runs", Default = S.ResumeFarms,
+        Callback = function(v) S.ResumeFarms = v == true; triggerSave() end })
+    CfgBox:AddButton({ Text = "Use my settings for new accounts", Func = function()
+        triggerSave()
+        local ok = pcall(function()
+            local d = HttpService:JSONDecode(readfile(CFG_FILE))
+            d.Cooldowns, d.Stats, d.Farms = nil, nil, nil
+            writefile(LEGACY_CFG, HttpService:JSONEncode(d))
+        end)
+        pcall(function()
+            Library:Notify(ok and "Saved as the starting config for new accounts"
+                or "Couldn't write the template file", 5)
+        end)
+    end })
+    CfgBox:AddButton({ Text = "Reset this account's config", Func = function()
+        local ok = pcall(function() if delfile then delfile(CFG_FILE) else writefile(CFG_FILE, "{}") end end)
+        saveSettings = nil -- لا نكتب الإعدادات الحالية فوق الملف المحذوف
+        pcall(function()
+            Library:Notify(ok and "Config reset. Re-run the script to load defaults."
+                or "Couldn't reset the config", 6)
+        end)
     end })
     pcall(function()
         MenuBox:AddLabel("Menu keybind"):AddKeyPicker("MenuKeybind",
@@ -837,6 +868,9 @@ saveSettings = function()
             HalloweenTeam = HW.Team,
             Tickets = S.Tickets, TicketMin = S.TicketMin, MinGyroLuck = S.MinGyroLuck,
             MaxHops = S.MaxHops, HopDelay = S.HopDelay,
+            ResumeFarms = S.ResumeFarms, AsuraAuto = S.AsuraAuto == true,
+            Farms = { Story = getgenv().StoryFarm == true, Towers = getgenv().TowerFarm == true,
+                Hard = getgenv().HardFarm == true, Halloween = getgenv().HalloweenFarm == true },
             HardInterval = HS.Interval, HardStopAt = HS.StopAt,
             AntiLag = S.AntiLag == true, SilentRoll = S.SilentRoll == true, Disable3D = S.No3D == true,
             Stats = { Wins = wins, Kills = kills, Rewards = rewards, Tparts = tparts,
@@ -2043,21 +2077,23 @@ do
     end)
 end
 
--- إعادة تشغيل الفارم تلقائياً بعد الانتقال بين السيرفرات إذا كان يعمل مسبقاً
+-- إعادة تشغيل الفارم تلقائياً: بعد الانتقال بين السيرفرات، أو من الكونفق (الفارمات اللي كانت ON)
+local SAVED_FARMS = type(CFG.Farms) == "table" and CFG.Farms or {}
 task.defer(function()
-    if getgenv().StoryFarmAutoStart then
+    local F = S.ResumeFarms and SAVED_FARMS or {}
+    if getgenv().StoryFarmAutoStart or F.Story == true then
         getgenv().StoryFarmAutoStart = false
         startFarm()
     end
-    if getgenv().TowerFarmAutoStart then
+    if getgenv().TowerFarmAutoStart or F.Towers == true then
         getgenv().TowerFarmAutoStart = false
         startTowers()
     end
-    if getgenv().HardFarmAutoStart then
+    if getgenv().HardFarmAutoStart or F.Hard == true then
         getgenv().HardFarmAutoStart = false
         startHard()
     end
-    if getgenv().HalloweenFarmAutoStart then
+    if getgenv().HalloweenFarmAutoStart or F.Halloween == true then
         getgenv().HalloweenFarmAutoStart = false
         startHalloween()
     end
@@ -2266,8 +2302,10 @@ task.spawn(function()
         return tostring(math.floor(n))
     end
     local asuraL = proxyLabel(box:AddLabel("Asura auto: off", true))
-    box:AddToggle("AsuraAuto", { Text = "Auto fight Asura (repeat while boss is here)", Default = false,
+    local asuraTog = box:AddToggle("AsuraAuto", { Text = "Auto fight Asura (repeat while boss is here)", Default = false,
         Callback = function(on)
+            S.AsuraAuto = on == true
+            triggerSave()
             asuraRun += 1
             local my = asuraRun
             if not on then
@@ -2343,6 +2381,10 @@ task.spawn(function()
                 end
             end)
         end })
+
+    if S.AsuraAuto then
+        task.defer(function() pcall(function() asuraTog:SetValue(true) end) end)
+    end
 
     box:AddLabel("Windows that load data from the server when they open may look empty if forced open. If one does, open it the normal way in the game.", true)
 
