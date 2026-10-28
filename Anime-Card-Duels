@@ -1,12 +1,15 @@
 -- ====================================================================
--- Anime Duels: Ultimate Automation Hub  (Obsidian UI edition)
--- - لوحة حالة حية (Dashboard)
--- - حفظ وتحميل تلقائي للإعدادات (SaveManager: Set as autoload)
+-- Anime Duels: Ultimate Automation Hub  (Obsidian UI edition) - v2
+-- التغييرات:
+--  - بحث آمن في الواجهة (findPath) عشان المحركات ما تموت بصمت
+--  - برج Halloween مضاف + إصلاح Auto Next
+--  - Boss Farmer يسوي تيليبورت اللعبة الرسمي للعالم ثم يقاتل ويطبع رد السيرفر
+--  - تبويب Teleports يستخدم ريموت اللعبة بدل تحريك CFrame
+--  - مزامنة الإعدادات مع السيرفر + backoff لبدء البرج
 -- ====================================================================
 
--- 1. تنظيف أي نسخة سابقة عند إعادة التشغيل
 if getgenv().AnimeDuelsHubInstance then
-    getgenv().AnimeDuelsHubInstance:Destroy()
+    pcall(function() getgenv().AnimeDuelsHubInstance:Destroy() end)
     task.wait(0.3)
 end
 
@@ -17,18 +20,27 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local RollRemote         = Remotes:FindFirstChild("Roll")
-local EquipBestRemote    = Remotes:FindFirstChild("EquipBest")
-local TowerActionRemote  = Remotes:FindFirstChild("TowerAction")
-local StoryFightRemote   = Remotes:FindFirstChild("StoryFight")
-local GroupChestRemote   = Remotes:FindFirstChild("GroupChest")
-local RewardsRemote      = Remotes:FindFirstChild("Rewards")
-local QuestsRemote       = Remotes:FindFirstChild("Quests")
-local IndexClaimRemote   = Remotes:FindFirstChild("IndexClaim")
-local BattleEventRemote  = Remotes:FindFirstChild("BattleEvent")
-local SetSettingRemote   = Remotes:FindFirstChild("SetSetting")
-local TowerEventRemote   = Remotes:FindFirstChild("TowerEvent")
-local StateChangedRemote = Remotes:FindFirstChild("StateChanged")
+local function R(name) return Remotes:FindFirstChild(name) end
+
+local RollRemote         = R("Roll")
+local EquipBestRemote    = R("EquipBest")
+local TowerActionRemote  = R("TowerAction")
+local StoryFightRemote   = R("StoryFight")
+local GroupChestRemote   = R("GroupChest")
+local RewardsRemote      = R("Rewards")
+local QuestsRemote       = R("Quests")
+local IndexClaimRemote   = R("IndexClaim")
+local BattleEventRemote  = R("BattleEvent")
+local SetSettingRemote   = R("SetSetting")
+local TowerEventRemote   = R("TowerEvent")
+local StateChangedRemote = R("StateChanged")
+local TeleportRemote     = R("Teleport")
+local WorldEventRemote   = R("WorldEvent")
+local RaidFightRemote    = R("RaidFight")
+
+-- قيمة AbilityPrompts عند إطفاء Auto Abilities.
+-- غير معروفة حالياً: غيّرها من الإعدادات داخل اللعبة والريموت سباي يوريك القيمة، ثم حطها هنا.
+local ABILITY_MANUAL_VALUE = nil
 
 local Hub = {
     Running = true,
@@ -38,18 +50,29 @@ local Hub = {
     Settings = {
         AutoRoll = false,
         RollDelay = 0.8,
-        RollInBattle = true,   -- الرول أثناء معركة البرج (البرج يبقى بمعركة طول الوقت)
+        RollInBattle = true,
         AutoEquipBest = false,
         EquipInterval = 25,
 
         AutoTower = false,
-        TowerMode = "Hardcore",
+        TowerMode = "Halloween",
         AutoStoryBoss = false,
         TargetBoss = "android_games_boss",
         TargetDifficulty = "Easy",
         AutoAbilities = true,
         AutoNextFloor = true,
         HideBattle = false,
+
+        AutoStory = false,
+        StoryWorlds = {
+            ["Purple Forest"] = true, ["Android Games"] = true,
+            ["Hollow World"] = true, ["Purple Town"] = true,
+        },
+        StoryDiffMode = "Highest unlocked", -- أو "Highest cleared" أو صعوبة ثابتة
+        StoryIncludeBoss = true,
+
+        AutoRaid = false,
+        RaidRetryDelay = 30,
 
         AutoClaimQuests = false,
         AutoClaimChest = false,
@@ -69,6 +92,20 @@ local Hub = {
         LastTowerEvent = 0,
         LastBattleEvent = 0,
         TowerFloorText = "-",
+        TowerStartFails = 0,
+        CurrentPlace = nil,
+        LastTeleport = 0,
+        LastBossResult = "-",
+        LastStoryResult = "-",
+        StoryWins = 0,
+        StoryLosses = {},   -- [stage|diff] = true بعد خسارة -> ننزل صعوبة
+        StorySkipUntil = {}, -- [stage] = os.clock() لو السيرفر رفض
+        LastBattleInfo = nil,
+        Busy = false,        -- قفل: معركة وحدة (ستوري أو رايد) في نفس الوقت
+        StoryIdle = true,    -- الستوري ما عنده شي جاهز
+        LastRaidResult = "-",
+        LastRaidState = "-",
+        RaidWins = 0,
         StartTime = os.clock(),
     }
 }
@@ -77,17 +114,14 @@ getgenv().AnimeDuelsHubInstance = Hub
 function Hub:Destroy()
     self.Running = false
     self.State.InBattle = false
-
     for _, conn in ipairs(self.Connections) do
         if conn and conn.Connected then conn:Disconnect() end
     end
     table.clear(self.Connections)
-
     for _, th in ipairs(self.Threads) do
         if coroutine.status(th) ~= "dead" then pcall(task.cancel, th) end
     end
     table.clear(self.Threads)
-
     if self.Library then
         pcall(function() self.Library:Unload() end)
         self.Library = nil
@@ -97,60 +131,63 @@ end
 -- ====================================================================
 -- أدوات مساعدة
 -- ====================================================================
+local function findPath(root, ...)
+    local cur = root
+    for _, name in ipairs({ ... }) do
+        cur = cur and cur:FindFirstChild(name)
+        if not cur then return nil end
+    end
+    return cur
+end
+
 local function safeClick(btn)
-    if not btn then return false end
-    local sig = btn:IsA("GuiButton") and (btn.Activated or btn.MouseButton1Click)
-    if not sig then return false end
+    if not btn or not btn:IsA("GuiButton") then return false end
+    local sig = btn.Activated or btn.MouseButton1Click
     if firesignal then
-        firesignal(sig)
+        pcall(firesignal, sig)
         return true
     elseif getconnections then
-        for _, c in ipairs(getconnections(sig)) do c:Fire() end
+        for _, c in ipairs(getconnections(sig)) do pcall(function() c:Fire() end) end
         return true
     end
     return false
 end
 
--- Rayfield يعيد الخيار كجدول {"..."}؛ ندعم الحالتين
 local function optionToString(option)
     if option == nil then return "" end
     if type(option) == "table" then return tostring(option[1] or "") end
     return tostring(option)
 end
 
+local function invoke(remote, ...)
+    if not remote then return false, "remote missing" end
+    local args = table.pack(...)
+    return pcall(function() return remote:InvokeServer(table.unpack(args, 1, args.n)) end)
+end
+
 local function towerAction(action, mode)
-    if not TowerActionRemote then return false end
-    local ok, res = pcall(function()
-        return TowerActionRemote:InvokeServer(action, mode or Hub.Settings.TowerMode, nil, nil)
-    end)
+    local ok, res = invoke(TowerActionRemote, action, mode or Hub.Settings.TowerMode, nil, nil)
     return ok and res ~= false
 end
 
 local function towerPause()
-    if not TowerActionRemote then return false end
-    local ok, res = pcall(function()
-        return TowerActionRemote:InvokeServer("Pause", Hub.Settings.TowerMode)
-    end)
+    local ok, res = invoke(TowerActionRemote, "Pause", Hub.Settings.TowerMode)
     if ok and res ~= false then Hub.State.TowerPaused = true end
     return ok and res ~= false
 end
 
 local function setGameSetting(name, value)
-    if not SetSettingRemote then return false end
-    local ok, res = pcall(function()
-        return SetSettingRemote:InvokeServer(name, value)
-    end)
+    local ok, res = invoke(SetSettingRemote, name, value)
     return ok and res ~= false
 end
 
--- لا نرسل إعدادات للسيرفر أثناء بناء الواجهة أو تحميل الإعدادات المحفوظة
 local UIReady = false
 local function userSetting(name, value)
     if UIReady then setGameSetting(name, value) end
 end
 
 -- ====================================================================
--- التقاط حالة اللاعب قبل بناء الواجهة
+-- حالة السيرفر
 -- ====================================================================
 local function mergeServerState(data)
     if type(data) ~= "table" then return end
@@ -164,22 +201,19 @@ if StateChangedRemote then
 end
 
 do
-    local GetSnapshotRemote = Remotes:FindFirstChild("GetSnapshot")
+    local GetSnapshotRemote = R("GetSnapshot")
     if GetSnapshotRemote then
         task.spawn(function()
-            pcall(function()
-                local snap = GetSnapshotRemote:InvokeServer()
-                if type(snap) == "table" then
-                    if type(snap.Settings) == "table" then
-                        mergeServerState(snap)
-                    elseif type(snap.State) == "table" then
-                        mergeServerState(snap.State)
-                    end
+            local ok, snap = invoke(GetSnapshotRemote)
+            if ok and type(snap) == "table" then
+                if type(snap.Settings) == "table" then
+                    mergeServerState(snap)
+                elseif type(snap.State) == "table" then
+                    mergeServerState(snap.State)
                 end
-            end)
+            end
         end)
     end
-
     local t0 = os.clock()
     while not (Hub.State.Server and type(Hub.State.Server.Settings) == "table")
         and os.clock() - t0 < 3 do
@@ -188,38 +222,185 @@ do
 end
 
 local function serverSetting(name)
-    local srv = Hub.State.Server
-    local st = srv and srv.Settings
+    local st = Hub.State.Server and Hub.State.Server.Settings
     return type(st) == "table" and st[name] == true
 end
 
 local function abilitiesAreAuto()
-    local srv = Hub.State.Server
-    local st = srv and srv.Settings
+    local st = Hub.State.Server and Hub.State.Server.Settings
     if type(st) ~= "table" then return true end
     return st.AbilityPrompts == "AutoUse"
 end
 
+-- مزامنة القيم المحلية مع السيرفر (بدل القيم الافتراضية المكتوبة يدوياً)
+Hub.Settings.HideBattle = serverSetting("HideBattleOn")
+Hub.Settings.AutoAbilities = abilitiesAreAuto()
+
 -- ====================================================================
--- بناء الواجهة (Obsidian UI)
+-- العوالم والتيليبورت (ريموت اللعبة الرسمي)
+-- ====================================================================
+local stageWorld = {
+    purple_forest = "Purple Forest",
+    android_games = "Android Games",
+    hollow_world  = "Hollow World",
+    purple_town   = "Purple Town",
+}
+
+if WorldEventRemote then
+    table.insert(Hub.Connections, WorldEventRemote.OnClientEvent:Connect(function(kind, data)
+        if kind == "Teleport" and type(data) == "table" then
+            Hub.State.CurrentPlace = data.place
+            Hub.State.LastTeleport = os.clock()
+        end
+    end))
+end
+
+local function worldFor(stageId)
+    local prefix = stageId:match("^(.-)_boss$") or stageId:match("^(.-)_%d+$")
+    return prefix and stageWorld[prefix]
+end
+
+-- يرجع true إذا صرنا في العالم المطلوب
+local function goToWorld(place)
+    if Hub.State.CurrentPlace == place then return true end
+    if not TeleportRemote then return false end
+
+    local before = Hub.State.LastTeleport
+    local ok, res = invoke(TeleportRemote, place)
+    print("[Hub] Teleport ->", place, ok, res)
+
+    local t0 = os.clock()
+    while os.clock() - t0 < 10 and Hub.Running do
+        if Hub.State.LastTeleport > before then
+            task.wait(1.5) -- مهلة تحميل العالم (اللعبة ترد TeleportReady بنفسها)
+            return Hub.State.CurrentPlace == place
+        end
+        task.wait(0.2)
+    end
+    return false
+end
+
+-- ====================================================================
+-- Story: الستيجات والصعوبات والكولداون (من بيانات السيرفر)
+-- ====================================================================
+local DIFFS = { "Easy", "Medium", "Hard", "Nightmare" }
+local WORLD_ORDER = {
+    { place = "Purple Forest", prefix = "purple_forest" },
+    { place = "Android Games", prefix = "android_games" },
+    { place = "Hollow World",  prefix = "hollow_world" },
+    { place = "Purple Town",   prefix = "purple_town" },
+}
+
+local function serverNow()
+    local srv = Hub.State.Server
+    if not (srv and srv.ServerTime) then return nil end
+    return srv.ServerTime + (os.clock() - Hub.State.ServerStamp)
+end
+
+local function stageReady(stage)
+    if (Hub.State.StorySkipUntil[stage] or 0) > os.clock() then return false end
+    local now = serverNow()
+    if not now then return true end
+    local srv = Hub.State.Server
+    local readyAt = srv.StoryCooldowns and srv.StoryCooldowns[stage]
+    return readyAt == nil or readyAt <= now
+end
+
+-- أعلى صعوبة مختومة بالتسلسل (Easy ثم Medium ...)، 0 = ولا وحدة
+local function clearedIndex(stage)
+    local srv = Hub.State.Server
+    local c = srv and srv.StoryCleared and srv.StoryCleared[stage]
+    if type(c) ~= "table" then return 0 end
+    local k = 0
+    for i, d in ipairs(DIFFS) do
+        if c[d] then k = i else break end
+    end
+    return k
+end
+
+local function pickDifficulty(stage)
+    local mode = Hub.Settings.StoryDiffMode
+    local k = clearedIndex(stage)
+    local idx
+    if mode == "Highest unlocked" then
+        idx = math.min(k + 1, #DIFFS)
+        -- خسرنا هالصعوبة قبل؟ ننزل لأعلى مختومة
+        if Hub.State.StoryLosses[stage .. "|" .. DIFFS[idx]] and k > 0 then idx = k end
+    elseif mode == "Highest cleared" then
+        idx = math.max(k, 1)
+    else
+        idx = table.find(DIFFS, mode) or 1
+        if idx > k + 1 then idx = math.max(k, 1) end -- ما نقدر نقاتل صعوبة مقفلة
+    end
+    return DIFFS[idx]
+end
+
+local function storyStages(prefix)
+    local list = { prefix .. "_1", prefix .. "_2", prefix .. "_3" }
+    if Hub.Settings.StoryIncludeBoss then list[#list + 1] = prefix .. "_boss" end
+    return list
+end
+
+-- يختار ستيج جاهز: العالم الحالي أولاً عشان نقلل التيليبورتات
+local function pickStoryJob()
+    local ordered = {}
+    for _, w in ipairs(WORLD_ORDER) do
+        if Hub.Settings.StoryWorlds[w.place] then
+            if w.place == Hub.State.CurrentPlace then
+                table.insert(ordered, 1, w)
+            else
+                ordered[#ordered + 1] = w
+            end
+        end
+    end
+    for _, w in ipairs(ordered) do
+        for _, stage in ipairs(storyStages(w.prefix)) do
+            if stageReady(stage) then
+                return w.place, stage, pickDifficulty(stage)
+            end
+        end
+    end
+end
+
+local function nextStoryReadyIn()
+    local now = serverNow()
+    local srv = Hub.State.Server
+    if not (now and srv and srv.StoryCooldowns) then return nil end
+    local soonest
+    for _, w in ipairs(WORLD_ORDER) do
+        if Hub.Settings.StoryWorlds[w.place] then
+            for _, stage in ipairs(storyStages(w.prefix)) do
+                local t = srv.StoryCooldowns[stage]
+                if t and t > now and (not soonest or t - now < soonest) then soonest = t - now end
+            end
+        end
+    end
+    return soonest
+end
+
+-- ====================================================================
+-- الواجهة (Obsidian UI)
 -- ====================================================================
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-local okLib, Library = pcall(function()
-    return loadstring(game:HttpGet(repo .. "Library.lua"))()
-end)
-if not okLib or not Library then
-    warn("[AnimeDuelsHub] فشل تحميل Obsidian:", Library)
+local function loadLib(path)
+    local ok, lib = pcall(function() return loadstring(game:HttpGet(repo .. path))() end)
+    if not ok or not lib then warn("[AnimeDuelsHub] فشل تحميل", path, lib) return nil end
+    return lib
+end
+
+local Library = loadLib("Library.lua")
+local ThemeManager = Library and loadLib("addons/ThemeManager.lua")
+local SaveManager = Library and loadLib("addons/SaveManager.lua")
+if not (Library and ThemeManager and SaveManager) then
     Hub:Destroy()
     return
 end
-local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
-local SaveManager  = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
 Hub.Library = Library
 local Options, Toggles = Library.Options, Library.Toggles
 
 local Window = Library:CreateWindow({
     Title = "Anime Duels",
-    Footer = "Auto Farm Hub",
+    Footer = "Auto Farm Hub v2",
     NotifySide = "Right",
     ShowCustomCursor = false,
 })
@@ -233,7 +414,6 @@ local Tabs = {
     Settings = Window:AddTab("Settings", "settings"),
 }
 
--- مفاتيح لا تُحفظ في ملف الإعدادات (حالتها تأتي من السيرفر)
 local ignoreIdx = { "MenuKeybind" }
 
 local function addGameToggles(box, list)
@@ -248,93 +428,65 @@ local function addGameToggles(box, list)
     end
 end
 
--- ====================================================================
--- Dashboard
--- ====================================================================
+-- Dashboard ------------------------------------------------------------
 local StatusLabels = {}
 local statusBox = Tabs.Home:AddLeftGroupbox("Live Status", "activity")
-for i = 1, 6 do
-    StatusLabels[i] = statusBox:AddLabel("...", true)
-end
+for i = 1, 9 do StatusLabels[i] = statusBox:AddLabel("...", true) end
 
 local quickBox = Tabs.Home:AddRightGroupbox("Quick Actions", "zap")
 local masterToggles = {
-    "AutoRollToggle", "AutoTowerToggle", "AutoBossToggle",
+    "AutoRollToggle", "AutoTowerToggle", "AutoBossToggle", "AutoStoryToggle", "AutoRaidToggle",
     "AutoChestToggle", "AutoQuestsToggle", "AutoDailyToggle", "AutoIndexToggle",
 }
 quickBox:AddButton({
     Text = "Stop Everything",
-    Tooltip = "Turns off every automation toggle",
     Func = function()
         for _, idx in ipairs(masterToggles) do
             if Toggles[idx] then Toggles[idx]:SetValue(false) end
         end
-        Library:Notify({
-            Title = "Stopped",
-            Description = "All automation toggles are off.",
-            Time = 4,
-        })
+        Library:Notify({ Title = "Stopped", Description = "All automation toggles are off.", Time = 4 })
     end,
 })
 quickBox:AddLabel("Menu key: RightControl (changeable in Settings)", true)
 
--- ====================================================================
--- Auto Roll
--- ====================================================================
+-- Auto Roll ------------------------------------------------------------
 local rollBox = Tabs.Roll:AddLeftGroupbox("Card Rolling", "dices")
-
 rollBox:AddToggle("AutoRollToggle", {
-    Text = "Enable Auto-Roll",
-    Default = false,
+    Text = "Enable Auto-Roll", Default = false,
     Callback = function(val) Hub.Settings.AutoRoll = val end,
 })
-
 rollBox:AddSlider("RollDelaySlider", {
-    Text = "Roll Delay",
-    Default = 0.8, Min = 0.2, Max = 3, Rounding = 1, Suffix = "s",
+    Text = "Roll Delay", Default = 0.8, Min = 0.2, Max = 3, Rounding = 1, Suffix = "s",
     Callback = function(val) Hub.Settings.RollDelay = val end,
 })
-
 rollBox:AddToggle("RollInBattleToggle", {
-    Text = "Roll While In Battle (tower)",
-    Tooltip = "The tower keeps you in battle all the time; turn off to roll only when idle",
-    Default = true,
+    Text = "Roll While In Battle (tower)", Default = true,
+    Tooltip = "Turn off to roll only when idle",
     Callback = function(val) Hub.Settings.RollInBattle = val end,
 })
 
 local deckBox = Tabs.Roll:AddRightGroupbox("Deck", "layers")
-
 deckBox:AddToggle("AutoEquipToggle", {
-    Text = "Auto Equip Best Deck",
-    Default = false,
+    Text = "Auto Equip Best Deck", Default = false,
     Callback = function(val) Hub.Settings.AutoEquipBest = val end,
 })
-
 deckBox:AddSlider("EquipIntervalSlider", {
-    Text = "Equip Best Every X Rolls",
-    Default = 25, Min = 5, Max = 100, Rounding = 0, Suffix = " rolls",
-    Callback = function(val) Hub.Settings.EquipInterval = val end,
+    Text = "Equip Best Every X Rolls", Default = 25, Min = 5, Max = 100, Rounding = 0, Suffix = " rolls",
+    Callback = function(val) Hub.Settings.EquipInterval = math.max(1, val) end,
 })
-
 deckBox:AddButton({
     Text = "Equip Best Now",
     Func = function()
         if EquipBestRemote then
-            pcall(function() EquipBestRemote:InvokeServer() end)
+            invoke(EquipBestRemote)
         else
-            local btn = PlayerGui:FindFirstChild("DeckScreen")
-                and PlayerGui.DeckScreen.Canvas.Deck:FindFirstChild("EquipBest")
-            safeClick(btn)
+            safeClick(findPath(PlayerGui, "DeckScreen", "Canvas", "Deck", "EquipBest"))
         end
     end,
 })
-
 deckBox:AddButton({
     Text = "Use All Instant Rolls",
-    Func = function()
-        local r = Remotes:FindFirstChild("UseAllInstantRolls")
-        if r then pcall(function() r:InvokeServer() end) end
-    end,
+    Func = function() invoke(R("UseAllInstantRolls")) end,
 })
 
 local gameRollBox = Tabs.Roll:AddLeftGroupbox("Game Auto-Roll (server-side)", "server")
@@ -343,64 +495,67 @@ addGameToggles(gameRollBox, {
     { "Quick Roll",     "QuickRollOn" },
 })
 
--- ====================================================================
--- Battle & Tower
--- ====================================================================
+-- Battle & Tower -------------------------------------------------------
 local towerBox = Tabs.Battle:AddLeftGroupbox("Tower", "castle")
-
 towerBox:AddToggle("AutoTowerToggle", {
-    Text = "Auto Tower Farm",
-    Default = false,
-    Callback = function(val) Hub.Settings.AutoTower = val end,
+    Text = "Auto Tower Farm", Default = false,
+    Callback = function(val)
+        Hub.Settings.AutoTower = val
+        Hub.State.TowerStartFails = 0
+    end,
 })
-
 towerBox:AddDropdown("TowerModeDropdown", {
     Text = "Tower Mode",
-    Values = { "Hardcore", "Potion", "Infinite" },
-    Default = 1,
-    Multi = false,
+    Values = { "Halloween", "Hardcore", "Potion", "Infinite" },
+    Default = 1, Multi = false,
     Callback = function(val)
         local v = optionToString(val)
         if v ~= "" then Hub.Settings.TowerMode = v end
     end,
 })
-
 towerBox:AddToggle("AutoNextFloorToggle", {
-    Text = "Auto Next Floor / Retry",
-    Default = true,
+    Text = "Auto Next Floor", Default = true,
     Callback = function(val) Hub.Settings.AutoNextFloor = val end,
 })
-
 towerBox:AddButton({ Text = "Start Tower", Func = function() towerAction("Start") end })
 towerBox:AddButton({ Text = "Next Floor",  Func = function() towerAction("Next") end })
-towerBox:AddButton({ Text = "Pause Tower", Func = function() towerPause() end })
+towerBox:AddButton({
+    Text = "Pause Tower",
+    Tooltip = "Also turns off Auto Tower so it doesn't restart",
+    Func = function()
+        if Toggles.AutoTowerToggle then Toggles.AutoTowerToggle:SetValue(false) end
+        towerPause()
+    end,
+})
 
 local battleBox = Tabs.Battle:AddRightGroupbox("Battle (server-side)", "server")
-
 table.insert(ignoreIdx, "HideBattleToggle")
 battleBox:AddToggle("HideBattleToggle", {
     Text = "Hide Battle Animations",
-    Default = serverSetting("HideBattleOn"),
+    Default = Hub.Settings.HideBattle,
     Callback = function(val)
         Hub.Settings.HideBattle = val
         userSetting("HideBattleOn", val)
     end,
 })
-
 table.insert(ignoreIdx, "AutoAbilitiesToggle")
 battleBox:AddToggle("AutoAbilitiesToggle", {
     Text = "Auto Trigger Card Abilities",
-    Default = abilitiesAreAuto(),
+    Default = Hub.Settings.AutoAbilities,
     Callback = function(val)
         Hub.Settings.AutoAbilities = val
-        if val then userSetting("AbilityPrompts", "AutoUse") end
+        if val then
+            userSetting("AbilityPrompts", "AutoUse")
+        elseif ABILITY_MANUAL_VALUE ~= nil then
+            userSetting("AbilityPrompts", ABILITY_MANUAL_VALUE)
+        end
     end,
 })
-
 addGameToggles(battleBox, {
-    { "Game Auto-Battle",       "AutoBattle" },
-    { "Game Auto-Retry",        "AutoRetry" },
-    { "Tower Infinite Restart", "TowerInfiniteRestart" },
+    { "Game Auto-Battle",          "AutoBattle" },
+    { "Game Auto-Retry",           "AutoRetry" },
+    { "Halloween Tower Restart",   "TowerHalloweenRestart" },
+    { "Tower Infinite Restart",    "TowerInfiniteRestart" },
 })
 
 local bossIds = {
@@ -410,8 +565,7 @@ local bossIds = {
     ["Killer Bomb (Purple Town)"]       = "purple_town_boss",
 }
 
-local bossBox = Tabs.Battle:AddLeftGroupbox("Boss Farmer (unlock speed)", "skull")
-
+local bossBox = Tabs.Battle:AddLeftGroupbox("Boss Farmer", "skull")
 bossBox:AddDropdown("BossDropdown", {
     Text = "Boss",
     Values = {
@@ -420,47 +574,137 @@ bossBox:AddDropdown("BossDropdown", {
         "Moonquoira (Hollow World)",
         "Killer Bomb (Purple Town)",
     },
-    Default = 2,
-    Multi = false,
+    Default = 2, Multi = false,
     Callback = function(val)
         local id = bossIds[optionToString(val)]
         if id then Hub.Settings.TargetBoss = id end
     end,
 })
-
 bossBox:AddDropdown("DifficultyDropdown", {
     Text = "Difficulty",
     Values = { "Easy", "Medium", "Hard", "Nightmare" },
-    Default = 1,
-    Multi = false,
+    Default = 1, Multi = false,
     Callback = function(val)
         local v = optionToString(val)
         if v ~= "" then Hub.Settings.TargetDifficulty = v end
     end,
 })
 
-bossBox:AddButton({
-    Text = "Fight Selected Boss Once",
-    Func = function()
-        if StoryFightRemote then
-            pcall(function()
-                StoryFightRemote:InvokeServer(Hub.Settings.TargetBoss, Hub.Settings.TargetDifficulty)
-            end)
-        end
-    end,
-})
+local function fightBossOnce()
+    local place = worldFor(Hub.Settings.TargetBoss)
+    if not place then
+        Hub.State.LastBossResult = "unknown world"
+        return false
+    end
+    if not goToWorld(place) then
+        Hub.State.LastBossResult = "teleport failed"
+        warn("[Hub] ما قدرت أوصل", place)
+        return false
+    end
+    local ok, res = invoke(StoryFightRemote, Hub.Settings.TargetBoss, Hub.Settings.TargetDifficulty)
+    print("[Hub] StoryFight ->", Hub.Settings.TargetBoss, Hub.Settings.TargetDifficulty, ok, res)
+    Hub.State.LastBossResult = tostring(ok) .. " / " .. tostring(res)
+    return ok and res ~= false
+end
 
+bossBox:AddButton({
+    Text = "Teleport + Fight Once",
+    Func = function() task.spawn(fightBossOnce) end,
+})
 bossBox:AddToggle("AutoBossToggle", {
     Text = "Auto-Farm Selected Boss",
+    Tooltip = "Pauses the tower while farming the boss",
     Default = false,
     Callback = function(val) Hub.Settings.AutoStoryBoss = val end,
 })
 
--- ====================================================================
--- Rewards
--- ====================================================================
-local claimBox = Tabs.Rewards:AddLeftGroupbox("Auto Claim", "gift")
+local storyBox = Tabs.Battle:AddRightGroupbox("Story Farm (all stages)", "book-open")
+storyBox:AddToggle("AutoStoryToggle", {
+    Text = "Auto Story Farm",
+    Tooltip = "Fights every ready stage in the chosen worlds. Pauses the tower and replaces Boss Farmer.",
+    Default = false,
+    Callback = function(val)
+        Hub.Settings.AutoStory = val
+        if val and Toggles.AutoBossToggle then Toggles.AutoBossToggle:SetValue(false) end
+    end,
+})
+storyBox:AddDropdown("StoryWorldsDropdown", {
+    Text = "Worlds",
+    Values = { "Purple Forest", "Android Games", "Hollow World", "Purple Town" },
+    Default = { "Purple Forest", "Android Games", "Hollow World", "Purple Town" },
+    Multi = true,
+    Callback = function(val)
+        local sel = {}
+        if type(val) == "table" then
+            for k, v in pairs(val) do
+                if v == true then sel[k] = true elseif type(v) == "string" then sel[v] = true end
+            end
+        end
+        Hub.Settings.StoryWorlds = sel
+    end,
+})
+storyBox:AddDropdown("StoryDiffDropdown", {
+    Text = "Difficulty",
+    Values = { "Highest unlocked", "Highest cleared", "Easy", "Medium", "Hard", "Nightmare" },
+    Default = 1, Multi = false,
+    Tooltip = "Highest unlocked = next uncleared difficulty (drops back after a loss)",
+    Callback = function(val)
+        local v = optionToString(val)
+        if v ~= "" then Hub.Settings.StoryDiffMode = v end
+    end,
+})
+storyBox:AddToggle("StoryBossToggle", {
+    Text = "Include world bosses", Default = true,
+    Callback = function(val) Hub.Settings.StoryIncludeBoss = val end,
+})
+storyBox:AddButton({
+    Text = "Reset loss memory",
+    Tooltip = "Try the higher difficulties again after your team got stronger",
+    Func = function() table.clear(Hub.State.StoryLosses) end,
+})
 
+local function raidCall(action)
+    local ok, res = invoke(RaidFightRemote, action)
+    local txt = tostring(ok) .. " / " .. (type(res) == "table" and "{table}" or tostring(res))
+    print("[Hub] RaidFight", action, "->", ok, res)
+    if type(res) == "table" then
+        -- نطبع محتوى الجدول عشان نعرف شكل الرد
+        for k, v in pairs(res) do print("    ", k, "=", v) end
+    end
+    return ok, res, txt
+end
+
+local raidBox = Tabs.Battle:AddLeftGroupbox("Raid Farm", "flame")
+raidBox:AddToggle("AutoRaidToggle", {
+    Text = "Auto Raid",
+    Tooltip = "Story has priority; raids run while no story stage is ready. Pauses the tower.",
+    Default = false,
+    Callback = function(val) Hub.Settings.AutoRaid = val end,
+})
+raidBox:AddSlider("RaidRetrySlider", {
+    Text = "Retry delay after refusal", Default = 30, Min = 10, Max = 300, Rounding = 0, Suffix = "s",
+    Callback = function(val) Hub.Settings.RaidRetryDelay = val end,
+})
+raidBox:AddButton({
+    Text = "Print Raid State",
+    Func = function()
+        task.spawn(function()
+            local _, _, txt = raidCall("State")
+            Hub.State.LastRaidState = txt
+        end)
+    end,
+})
+raidBox:AddButton({
+    Text = "Teleport + Raid Once",
+    Func = function()
+        task.spawn(function()
+            if goToWorld("Raid") then raidCall("Fight") end
+        end)
+    end,
+})
+
+-- Rewards --------------------------------------------------------------
+local claimBox = Tabs.Rewards:AddLeftGroupbox("Auto Claim", "gift")
 claimBox:AddToggle("AutoChestToggle", {
     Text = "Group Chest", Default = false,
     Callback = function(val) Hub.Settings.AutoClaimChest = val end,
@@ -484,76 +728,34 @@ addGameToggles(gameClaimBox, {
     { "Auto Claim Gifts (game)", "AutoClaimGifts" },
 })
 
--- ====================================================================
--- Teleports
--- ====================================================================
-local function teleportToZone(zoneName)
-    task.spawn(function()
-        local char = LocalPlayer.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local before = root and root.Position
-
-        local TeleportRemote = Remotes:FindFirstChild("Teleport")
-        if TeleportRemote then
-            pcall(function() return TeleportRemote:InvokeServer(zoneName) end)
-            task.wait(1.2)
-            root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if root and before and (root.Position - before).Magnitude > 20 then return end
-        end
-
-        local zones = ReplicatedStorage:FindFirstChild("WorldZones")
-        local wz = zones and zones:FindFirstChild(zoneName)
-        local cf = wz and wz:GetAttribute("CFrame")
-        local size = wz and wz:GetAttribute("Size")
-        if cf and root then
-            local drop = size and (size.Y / 2 - 5) or 0
-            root.CFrame = cf + Vector3.new(0, -drop, 0)
-        end
-    end)
+-- Teleports (ريموت اللعبة) ---------------------------------------------
+-- الأسماء نفس قائمة Teleport داخل اللعبة
+local function addTeleportBox(side, title, icon, names)
+    local box = side == "left" and Tabs.Teleport:AddLeftGroupbox(title, icon)
+        or Tabs.Teleport:AddRightGroupbox(title, icon)
+    for _, name in ipairs(names) do
+        box:AddButton({ Text = name, Func = function() task.spawn(goToWorld, name) end })
+    end
 end
+addTeleportBox("left",  "Story Worlds", "map",
+    { "Purple Forest", "Android Games", "Hollow World", "Purple Town" })
+addTeleportBox("right", "Towers", "castle",
+    { "Potion Tower", "Infinite Tower", "Hardcore Tower" })
+addTeleportBox("left",  "Raids", "skull", { "Raid", "Dracula Raid" })
+addTeleportBox("right", "Lobby Areas", "building",
+    { "Card Merge", "Card Deconstruct", "Potion Crafting", "Relic Crafting" })
 
-local lobbyBox = Tabs.Teleport:AddLeftGroupbox("Lobby", "building")
-for _, z in ipairs({
-    { "Lobby / Spawn", "Play" },
-    { "Towers",        "Tower" },
-    { "Shop",          "Shop" },
-    { "Raids",         "Raids" },
-}) do
-    lobbyBox:AddButton({ Text = z[1], Func = function() teleportToZone(z[2]) end })
-end
-
-local mapBox = Tabs.Teleport:AddRightGroupbox("Story Maps", "map")
-for _, z in ipairs({
-    { "1. Purple Forest", "WisteriaForest" },
-    { "2. Android Games", "ArenaGrounds" },
-    { "3. Hollow World",  "WhiteDesert" },
-    { "4. Purple Town",   "SunsetTown" },
-}) do
-    mapBox:AddButton({ Text = z[1], Func = function() teleportToZone(z[2]) end })
-end
-
--- ====================================================================
--- Settings
--- ====================================================================
+-- Settings -------------------------------------------------------------
 local safetyBox = Tabs.Settings:AddLeftGroupbox("Safety & Menu", "shield")
-
 safetyBox:AddToggle("AntiAFKToggle", {
-    Text = "Anti-AFK",
-    Default = true,
+    Text = "Anti-AFK", Default = true,
     Callback = function(val) Hub.Settings.AntiAFK = val end,
 })
-
 safetyBox:AddLabel("Menu keybind"):AddKeyPicker("MenuKeybind", {
-    Default = "RightControl",
-    NoUI = true,
-    Text = "Menu keybind",
+    Default = "RightControl", NoUI = true, Text = "Menu keybind",
 })
 Library.ToggleKeybind = Options.MenuKeybind
-
-safetyBox:AddButton({
-    Text = "Unload Hub",
-    Func = function() Hub:Destroy() end,
-})
+safetyBox:AddButton({ Text = "Unload Hub", Func = function() Hub:Destroy() end })
 
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
@@ -567,51 +769,13 @@ ThemeManager:ApplyToTab(Tabs.Settings)
 -- ====================================================================
 -- المحركات الخلفية
 -- ====================================================================
-
--- 1. Auto-Roll & Equip Best
-local rollEngine = task.spawn(function()
-    while Hub.Running do
-        local canRoll = Hub.Settings.AutoRoll
-            and (Hub.Settings.RollInBattle or not Hub.State.InBattle)
-
-        if canRoll then
-            local ok, res = pcall(function()
-                return RollRemote:InvokeServer()
-            end)
-
-            if not ok or res == false then
-                local rollBtn = PlayerGui:FindFirstChild("RollHud")
-                    and PlayerGui.RollHud.Canvas:FindFirstChild("Roll")
-                if rollBtn and safeClick(rollBtn) then
-                    ok = true
-                    res = nil
-                end
-            end
-
-            if ok and res ~= false then
-                Hub.State.ConsecutiveFailures = 0
-                Hub.State.SuccessfulRolls = Hub.State.SuccessfulRolls + 1
-
-                if Hub.Settings.AutoEquipBest
-                    and Hub.State.SuccessfulRolls % Hub.Settings.EquipInterval == 0 then
-                    pcall(function()
-                        if EquipBestRemote then EquipBestRemote:InvokeServer() end
-                    end)
-                end
-
-                task.wait(Hub.Settings.RollDelay)
-            else
-                Hub.State.ConsecutiveFailures = Hub.State.ConsecutiveFailures + 1
-                task.wait(math.clamp(Hub.State.ConsecutiveFailures * 1.5, 2, 8))
-            end
-        else
-            task.wait(0.5)
-        end
+local function inBattle()
+    if os.clock() - Hub.State.LastBattleEvent > 90 then
+        Hub.State.InBattle = false
     end
-end)
-table.insert(Hub.Threads, rollEngine)
+    return Hub.State.InBattle
+end
 
--- 2. القتال والبرج (أحداث السيرفر الحقيقية)
 local function bossReady()
     local srv = Hub.State.Server
     if not srv or not srv.ServerTime then return true end
@@ -620,20 +784,64 @@ local function bossReady()
     return readyAt == nil or readyAt <= now
 end
 
-local function inBattle()
-    if os.clock() - Hub.State.LastBattleEvent > 90 then
-        Hub.State.InBattle = false
-    end
-    return Hub.State.InBattle
-end
+-- 1. Auto-Roll & Equip Best
+table.insert(Hub.Threads, task.spawn(function()
+    while Hub.Running do
+        local canRoll = Hub.Settings.AutoRoll
+            and (Hub.Settings.RollInBattle or not inBattle())
 
+        if canRoll then
+            local ok, res = false, nil
+            if RollRemote then ok, res = invoke(RollRemote) end
+
+            if not ok or res == false then
+                if safeClick(findPath(PlayerGui, "RollHud", "Canvas", "Roll")) then
+                    ok, res = true, nil
+                end
+            end
+
+            if ok and res ~= false then
+                Hub.State.ConsecutiveFailures = 0
+                Hub.State.SuccessfulRolls += 1
+                if Hub.Settings.AutoEquipBest and EquipBestRemote
+                    and Hub.State.SuccessfulRolls % Hub.Settings.EquipInterval == 0 then
+                    invoke(EquipBestRemote)
+                end
+                task.wait(Hub.Settings.RollDelay)
+            else
+                Hub.State.ConsecutiveFailures += 1
+                task.wait(math.clamp(Hub.State.ConsecutiveFailures * 1.5, 2, 8))
+            end
+        else
+            task.wait(0.5)
+        end
+    end
+end))
+
+-- 2. أحداث القتال والبرج
 if BattleEventRemote then
-    table.insert(Hub.Connections, BattleEventRemote.OnClientEvent:Connect(function(kind)
+    table.insert(Hub.Connections, BattleEventRemote.OnClientEvent:Connect(function(kind, data)
         Hub.State.LastBattleEvent = os.clock()
         if kind == "Start" then
             Hub.State.InBattle = true
         elseif kind == "End" then
             Hub.State.InBattle = false
+            -- نتيجة الستوري: {mode="story", result="Victory", story={stage, difficulty}}
+            if type(data) == "table" and data.mode == "story" and type(data.story) == "table" then
+                local key = tostring(data.story.stage) .. "|" .. tostring(data.story.difficulty)
+                if data.result == "Victory" then
+                    Hub.State.StoryWins += 1
+                    Hub.State.StoryLosses[key] = nil
+                else
+                    Hub.State.StoryLosses[key] = true
+                end
+                Hub.State.LastStoryResult = key .. " -> " .. tostring(data.result)
+                print("[Hub] Story result:", key, data.result)
+            elseif type(data) == "table" and type(data.mode) == "string" and data.mode:find("raid") then
+                if data.result == "Victory" then Hub.State.RaidWins += 1 end
+                Hub.State.LastRaidResult = data.mode .. " -> " .. tostring(data.result)
+                print("[Hub] Raid result:", data.mode, data.result)
+            end
         end
     end))
 end
@@ -646,13 +854,17 @@ if TowerEventRemote then
             Hub.State.TowerPaused = true
         elseif kind == "Started" then
             Hub.State.TowerPaused = false
+            Hub.State.TowerStartFails = 0
+            lastNextKey = nil -- يمنع التعليق لو رجع البرج لنفس رقم الطابق
         end
 
         if type(data) == "table" and data.floor then
-            Hub.State.TowerFloorText = tostring(data.id or "?") .. " / Floor " .. tostring(data.floor)
+            local id = data.id or data.tower or "?"
+            Hub.State.TowerFloorText = tostring(id) .. " / Floor " .. tostring(data.floor)
         end
 
         if not Hub.Running or not Hub.Settings.AutoTower or not Hub.Settings.AutoNextFloor then return end
+        if Hub.Settings.AutoStoryBoss or Hub.Settings.AutoStory or Hub.Settings.AutoRaid then return end
         if kind ~= "Cleared" or type(data) ~= "table" then return end
         if data.id ~= Hub.Settings.TowerMode or data.paused or not data.intermission then return end
 
@@ -660,76 +872,182 @@ if TowerEventRemote then
         if key == lastNextKey then return end
         lastNextKey = key
         task.delay(1.5, function()
-            if Hub.Running and Hub.Settings.AutoTower and not Hub.State.TowerPaused then
+            if Hub.Running and Hub.Settings.AutoTower and not Hub.Settings.AutoStoryBoss then
                 towerAction("Next", data.id)
             end
         end)
     end))
 end
 
-local towerEngine = task.spawn(function()
+-- البرج: يبدأ إذا ما فيه نشاط، مع backoff لو السيرفر ما يرد
+table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
+        local fails = Hub.State.TowerStartFails
+        local quiet = 6 + math.min(fails * 10, 120)
         if Hub.Settings.AutoTower
             and not Hub.Settings.AutoStoryBoss
-            and not Hub.State.TowerPaused
+            and not Hub.Settings.AutoStory
+            and not Hub.Settings.AutoRaid
             and not inBattle()
-            and os.clock() - Hub.State.LastTowerEvent > 6
+            and os.clock() - Hub.State.LastTowerEvent > quiet
             and os.clock() - Hub.State.LastBattleEvent > 6 then
             towerAction("Start")
             Hub.State.LastTowerEvent = os.clock()
+            Hub.State.TowerStartFails = fails + 1 -- يتصفر عند وصول "Started"
         end
         task.wait(2)
     end
-end)
-table.insert(Hub.Threads, towerEngine)
+end))
 
-local bossEngine = task.spawn(function()
+-- البوس: يوقف البرج، يسوي تيليبورت، ثم يقاتل
+table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
-        if Hub.Settings.AutoStoryBoss and StoryFightRemote and not inBattle() and bossReady() then
-            pcall(function()
-                StoryFightRemote:InvokeServer(Hub.Settings.TargetBoss, Hub.Settings.TargetDifficulty)
-            end)
-            task.wait(8)
+        if Hub.Settings.AutoStoryBoss and not Hub.Settings.AutoStory
+            and StoryFightRemote and not inBattle() and bossReady() then
+            if Hub.Settings.AutoTower and not Hub.State.TowerPaused then
+                towerPause()
+                task.wait(2)
+            end
+            if fightBossOnce() then
+                task.wait(8)
+            else
+                task.wait(10)
+            end
         else
             task.wait(3)
         end
     end
-end)
-table.insert(Hub.Threads, bossEngine)
+end))
+
+-- Story Farm: كل الستيجات الجاهزة، عالم عالم
+table.insert(Hub.Threads, task.spawn(function()
+    while Hub.Running do
+        if not (Hub.Settings.AutoStory and StoryFightRemote) or inBattle() then
+            Hub.State.StoryIdle = true
+            task.wait(2)
+        else
+            local place, stage, diff = pickStoryJob()
+            Hub.State.StoryIdle = (place == nil)
+            if place and Hub.State.Busy then
+                task.wait(2)
+            elseif not place then
+                local n = nextStoryReadyIn()
+                Hub.State.LastStoryResult = n and ("all on cooldown, next in " .. math.ceil(n) .. "s")
+                    or "nothing ready"
+                task.wait(5)
+            else
+                if Hub.Settings.AutoTower and not Hub.State.TowerPaused then
+                    towerPause()
+                    task.wait(2)
+                end
+
+                Hub.State.Busy = true
+                if not goToWorld(place) then
+                    Hub.State.LastStoryResult = "teleport to " .. place .. " failed"
+                    warn("[Hub] ما قدرت أوصل", place)
+                    task.wait(10)
+                else
+                    local startedBefore = Hub.State.LastBattleEvent
+                    local ok, res = invoke(StoryFightRemote, stage, diff)
+                    print("[Hub] StoryFight ->", stage, diff, ok, res)
+
+                    if not ok or res == false or type(res) == "string" then
+                        -- السيرفر رفض: نتخطى هالستيج دقيقتين ونكمل غيره
+                        Hub.State.StorySkipUntil[stage] = os.clock() + 120
+                        Hub.State.LastStoryResult = stage .. " refused: " .. tostring(res)
+                        task.wait(3)
+                    else
+                        Hub.State.LastStoryResult = "fighting " .. stage .. " [" .. diff .. "]"
+                        -- ننتظر بداية المعركة ثم نهايتها
+                        local t0 = os.clock()
+                        while Hub.Running and Hub.State.LastBattleEvent == startedBefore
+                            and os.clock() - t0 < 8 do
+                            task.wait(0.3)
+                        end
+                        while Hub.Running and inBattle() do task.wait(0.5) end
+                        -- لو ما وصلنا Start أبداً، نمنع التكرار السريع على نفس الستيج
+                        if Hub.State.LastBattleEvent == startedBefore then
+                            Hub.State.StorySkipUntil[stage] = os.clock() + 60
+                        end
+                        task.wait(2) -- مهلة لوصول StateChanged بالكولداون الجديد
+                    end
+                end
+                Hub.State.Busy = false
+            end
+        end
+    end
+end))
+
+-- Raid Farm: يشتغل لما الستوري ما عنده شي جاهز
+table.insert(Hub.Threads, task.spawn(function()
+    while Hub.Running do
+        if not (Hub.Settings.AutoRaid and RaidFightRemote)
+            or inBattle() or Hub.State.Busy or not Hub.State.StoryIdle then
+            task.wait(2)
+        else
+            Hub.State.Busy = true
+            if Hub.Settings.AutoTower and not Hub.State.TowerPaused then
+                towerPause()
+                task.wait(2)
+            end
+
+            local _, _, stateTxt = raidCall("State")
+            Hub.State.LastRaidState = stateTxt
+
+            if not goToWorld("Raid") then
+                Hub.State.LastRaidResult = "teleport to Raid failed"
+                Hub.State.Busy = false
+                task.wait(10)
+            else
+                local startedBefore = Hub.State.LastBattleEvent
+                local ok, res, txt = raidCall("Fight")
+                if not ok or res == false or type(res) == "string" then
+                    Hub.State.LastRaidResult = "refused: " .. txt
+                    Hub.State.Busy = false
+                    task.wait(Hub.Settings.RaidRetryDelay)
+                else
+                    Hub.State.LastRaidResult = "fighting (" .. txt .. ")"
+                    local t0 = os.clock()
+                    while Hub.Running and Hub.State.LastBattleEvent == startedBefore
+                        and os.clock() - t0 < 8 do
+                        task.wait(0.3)
+                    end
+                    while Hub.Running and inBattle() do task.wait(0.5) end
+                    local noBattle = Hub.State.LastBattleEvent == startedBefore
+                    Hub.State.Busy = false
+                    task.wait(noBattle and Hub.Settings.RaidRetryDelay or 3)
+                end
+            end
+        end
+    end
+end))
 
 -- 3. الجوائز
-local rewardsEngine = task.spawn(function()
+table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
-        if Hub.Settings.AutoClaimChest and GroupChestRemote then
-            pcall(function() GroupChestRemote:InvokeServer("Claim") end)
-            local chestBtn = PlayerGui:FindFirstChild("GroupChestScreen")
-                and PlayerGui.GroupChestScreen.Canvas.GroupChest:FindFirstChild("Claim")
-            safeClick(chestBtn)
+        if Hub.Settings.AutoClaimChest then
+            invoke(GroupChestRemote, "Claim")
+            safeClick(findPath(PlayerGui, "GroupChestScreen", "Canvas", "GroupChest", "Claim"))
         end
-
         if Hub.Settings.AutoClaimQuests then
-            if QuestsRemote then pcall(function() QuestsRemote:InvokeServer("ClaimAll") end) end
-            local qBtn = PlayerGui:FindFirstChild("QuestsScreen")
-                and PlayerGui.QuestsScreen.Canvas.Quests:FindFirstChild("ClaimAll")
-            safeClick(qBtn)
+            invoke(QuestsRemote, "ClaimAll")
+            safeClick(findPath(PlayerGui, "QuestsScreen", "Canvas", "Quests", "ClaimAll"))
         end
-
-        if Hub.Settings.AutoClaimRewards and RewardsRemote then
-            pcall(function() RewardsRemote:InvokeServer("ClaimDaily") end)
-            pcall(function() RewardsRemote:InvokeServer("ClaimPlaytime") end)
+        if Hub.Settings.AutoClaimRewards then
+            invoke(RewardsRemote, "ClaimDaily")
+            invoke(RewardsRemote, "ClaimPlaytime")
         end
-
-        if Hub.Settings.AutoClaimIndex and IndexClaimRemote then
-            pcall(function() IndexClaimRemote:InvokeServer() end)
-            local idxBtn = PlayerGui:FindFirstChild("CardIndexScreen")
-                and PlayerGui.CardIndexScreen.Canvas.CardIndex:FindFirstChild("Claim")
-            safeClick(idxBtn)
+        if Hub.Settings.AutoClaimIndex then
+            invoke(IndexClaimRemote)
+            safeClick(findPath(PlayerGui, "CardIndexScreen", "Canvas", "CardIndex", "Claim"))
         end
-
-        task.wait(60)
+        -- انتظار 60 ثانية على دفعات عشان التفعيل الجديد ياخذ مفعوله بسرعة
+        for _ = 1, 60 do
+            if not Hub.Running then break end
+            task.wait(1)
+        end
     end
-end)
-table.insert(Hub.Threads, rewardsEngine)
+end))
 
 -- 4. Anti-AFK
 table.insert(Hub.Connections, LocalPlayer.Idled:Connect(function()
@@ -739,26 +1057,31 @@ table.insert(Hub.Connections, LocalPlayer.Idled:Connect(function()
     end
 end))
 
--- 5. تحديث لوحة الحالة كل ثانية
+-- 5. لوحة الحالة
 local function onOff(v) return v and "ON" or "OFF" end
-
 local function fmtTime(sec)
     sec = math.floor(sec)
     return string.format("%02d:%02d:%02d", sec // 3600, (sec % 3600) // 60, sec % 60)
 end
 
-local dashEngine = task.spawn(function()
+table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
         local S = Hub.Settings
         local lines = {
             "Uptime: " .. fmtTime(os.clock() - Hub.State.StartTime),
             "Rolls this session: " .. Hub.State.SuccessfulRolls .. "   (Auto-Roll: " .. onOff(S.AutoRoll) .. ")",
-            "Battle: " .. (inBattle() and "In battle" or "Idle"),
+            "Battle: " .. (inBattle() and "In battle" or "Idle")
+                .. " | World: " .. tostring(Hub.State.CurrentPlace or "?"),
             "Tower: " .. onOff(S.AutoTower) .. " | " .. S.TowerMode
                 .. " | " .. (Hub.State.TowerPaused and "Paused" or "Running")
                 .. " | " .. Hub.State.TowerFloorText,
-            "Boss farm: " .. onOff(S.AutoStoryBoss) .. " | " .. S.TargetBoss
+            "Boss: " .. onOff(S.AutoStoryBoss) .. " | " .. S.TargetBoss
                 .. " (" .. S.TargetDifficulty .. ") | " .. (bossReady() and "Ready" or "Cooldown"),
+            "Story: " .. onOff(S.AutoStory) .. " | wins " .. Hub.State.StoryWins
+                .. " | " .. Hub.State.LastStoryResult,
+            "Raid: " .. onOff(S.AutoRaid) .. " | wins " .. Hub.State.RaidWins
+                .. " | " .. Hub.State.LastRaidResult,
+            "Last boss result: " .. Hub.State.LastBossResult,
             "Claims: chest " .. onOff(S.AutoClaimChest) .. ", quests " .. onOff(S.AutoClaimQuests)
                 .. ", daily " .. onOff(S.AutoClaimRewards) .. ", index " .. onOff(S.AutoClaimIndex),
         }
@@ -769,22 +1092,19 @@ local dashEngine = task.spawn(function()
         end)
         task.wait(1)
     end
-end)
-table.insert(Hub.Threads, dashEngine)
+end))
 
 -- ====================================================================
--- تحميل الإعدادات تلقائياً (Auto Load)
--- أول مرة: Settings > Config > اكتب اسماً > Create config > Set as autoload
+-- تحميل الإعدادات تلقائياً
+-- أول مرة: Settings > Config > اكتب اسم > Create config > Set as autoload
 -- ====================================================================
 pcall(function() SaveManager:LoadAutoloadConfig() end)
-
--- بعد انتهاء التحميل نسمح بإرسال إعدادات للسيرفر
 task.delay(1.5, function() UIReady = true end)
 
 pcall(function()
     Library:Notify({
-        Title = "Anime Duels Hub Loaded",
-        Description = "Autoload config applied (if set). RightControl hides/shows the UI.",
+        Title = "Anime Duels Hub v2 Loaded",
+        Description = "RightControl hides/shows the UI.",
         Time = 5,
     })
 end)
