@@ -101,7 +101,8 @@ local Hub = {
         LastBossResult = "-",
         LastStoryResult = "-",
         StoryWins = 0,
-        StoryLosses = {},   -- [stage|diff] = true بعد خسارة -> ننزل صعوبة
+        StoryLosses = {},   -- [stage|diff] = عدد الخسارات المتتالية
+        StoryBlocked = {},  -- [stage|diff] = os.clock() لين متى الصعوبة محظورة
         StorySkipUntil = {}, -- [stage] = os.clock() لو السيرفر رفض
         LastBattleInfo = nil,
         Busy = false,
@@ -179,15 +180,35 @@ local function humanWait(base)
     end
 end
 
+-- TowerAction يرجع {ok, reason, state} (من TowerController.action)
+local lastTowerWarn = {}
 local function towerAction(action, mode)
-    local ok, res = invoke(TowerActionRemote, action, mode or Hub.Settings.TowerMode, nil, nil)
-    return ok and res ~= false
+    mode = mode or Hub.Settings.TowerMode
+    local ok, res = invoke(TowerActionRemote, action, mode, nil, nil)
+    local good = ok and type(res) == "table" and res.ok == true
+    if not good then
+        local reason = tostring(type(res) == "table" and res.reason or res)
+        Hub.State.TowerLastError = action .. ": " .. reason
+        -- نطبع نفس الخطأ مرة كل 30 ثانية بس
+        local key = action .. reason
+        if os.clock() - (lastTowerWarn[key] or 0) > 30 then
+            lastTowerWarn[key] = os.clock()
+            print("[Hub] TowerAction", action, mode, "refused:", reason)
+        end
+    else
+        Hub.State.TowerLastError = nil
+    end
+    return good
 end
 
 local function towerPause()
-    local ok, res = invoke(TowerActionRemote, "Pause", Hub.Settings.TowerMode)
-    if ok and res ~= false then Hub.State.TowerPaused = true end
-    return ok and res ~= false
+    local good = towerAction("Pause")
+    local err = Hub.State.TowerLastError or ""
+    if good or err:find("No run") then
+        Hub.State.TowerPaused = true -- إما وقفناه أو ما كان شغال أصلاً
+        if not good then Hub.State.TowerLastError = nil end
+    end
+    return good
 end
 
 local function setGameSetting(name, value)
@@ -201,47 +222,73 @@ local function userSetting(name, value)
 end
 
 -- ====================================================================
--- حالة السيرفر
+-- حالة اللاعب: نقراها من StateController حق اللعبة نفسها
+-- (نفس الجدول اللي تستخدمه واجهة اللعبة، فيه StoryCleared و StoryCooldowns)
 -- ====================================================================
+local GameState
+pcall(function()
+    local ctrl = LocalPlayer:WaitForChild("PlayerScripts", 5):WaitForChild("Client", 5)
+        :WaitForChild("Controllers", 5):WaitForChild("StateController", 5)
+    GameState = require(ctrl)
+end)
+
 local function mergeServerState(data)
     if type(data) ~= "table" then return end
-    Hub.State.Server = Hub.State.Server or {}
-    for k, v in pairs(data) do Hub.State.Server[k] = v end
+    -- StateChanged يرسل الحالة كاملة، فنستبدلها مثل ما تسوي اللعبة
+    Hub.State.Server = data
     Hub.State.ServerStamp = os.clock()
+    Hub.State.SnapshotLoaded = true
 end
 
 if StateChangedRemote then
     table.insert(Hub.Connections, StateChangedRemote.OnClientEvent:Connect(mergeServerState))
 end
 
+local function playerState()
+    if GameState and GameState.Loaded then
+        local ok, st = pcall(GameState.Get, GameState)
+        if ok and type(st) == "table" then return st end
+    end
+    return Hub.State.Server
+end
+
+local function stateLoaded()
+    return (GameState ~= nil and GameState.Loaded == true) or Hub.State.SnapshotLoaded == true
+end
+
+-- GetSnapshot يرجع {ok = true, snapshot = {...}} (من StateController.Start)
+local GetSnapshotRemote = R("GetSnapshot")
+local lastSnapshotAsk = 0
+local function fetchSnapshot()
+    if not GetSnapshotRemote or os.clock() - lastSnapshotAsk < 5 then return end
+    lastSnapshotAsk = os.clock()
+    task.spawn(function()
+        local ok, res = invoke(GetSnapshotRemote)
+        if ok and type(res) == "table" and res.ok and type(res.snapshot) == "table" then
+            mergeServerState(res.snapshot)
+        else
+            print("[Hub] GetSnapshot failed:", ok, type(res) == "table" and res.reason or res)
+        end
+    end)
+end
+
 do
-    local GetSnapshotRemote = R("GetSnapshot")
-    if GetSnapshotRemote then
-        task.spawn(function()
-            local ok, snap = invoke(GetSnapshotRemote)
-            if ok and type(snap) == "table" then
-                if type(snap.Settings) == "table" then
-                    mergeServerState(snap)
-                elseif type(snap.State) == "table" then
-                    mergeServerState(snap.State)
-                end
-            end
-        end)
-    end
+    if not stateLoaded() then fetchSnapshot() end
     local t0 = os.clock()
-    while not (Hub.State.Server and type(Hub.State.Server.Settings) == "table")
-        and os.clock() - t0 < 3 do
-        task.wait(0.1)
-    end
+    while not stateLoaded() and os.clock() - t0 < 5 do task.wait(0.1) end
+    print("[Hub] player state:", stateLoaded() and "loaded" or "NOT loaded",
+        "| source:", (GameState and GameState.Loaded) and "game StateController" or "snapshot")
 end
 
 local function serverSetting(name)
-    local st = Hub.State.Server and Hub.State.Server.Settings
+    local st = playerState()
+    st = st and st.Settings
     return type(st) == "table" and st[name] == true
 end
 
 local function abilitiesAreAuto()
-    local st = Hub.State.Server and Hub.State.Server.Settings
+    local st = playerState()
+    st = st and st.Settings
     if type(st) ~= "table" then return true end
     return st.AbilityPrompts == "AutoUse"
 end
@@ -294,8 +341,12 @@ local function goToWorld(place)
     return false
 end
 
+local goToRaid -- معرّفة تحت مع محرك الرايد
+
 -- ====================================================================
--- Story: الستيجات والصعوبات والكولداون (من بيانات السيرفر)
+-- Story: نفس قواعد اللعبة (ReplicatedStorage.Shared.Story.StoryRules)
+--  - الصعوبة تنفتح إذا ختمت اللي قبلها في نفس الستيج + نفس الصعوبة في الستيج اللي قبله
+--  - الكولداون يمنع بس الصعوبات اللي ختمتها (عادي 10 دقائق، بوس 30)
 -- ====================================================================
 local DIFFS = { "Easy", "Medium", "Hard", "Nightmare" }
 local WORLD_ORDER = {
@@ -305,50 +356,100 @@ local WORLD_ORDER = {
     { place = "Purple Town",   prefix = "purple_town" },
 }
 
-local function serverNow()
-    local srv = Hub.State.Server
-    if not (srv and srv.ServerTime) then return nil end
-    return srv.ServerTime + (os.clock() - Hub.State.ServerStamp)
-end
-
-local function stageReady(stage)
-    if (Hub.State.StorySkipUntil[stage] or 0) > os.clock() then return false end
-    local now = serverNow()
-    if not now then return true end
-    local srv = Hub.State.Server
-    local readyAt = srv.StoryCooldowns and srv.StoryCooldowns[stage]
-    return readyAt == nil or readyAt <= now
-end
-
--- أعلى صعوبة مختومة بالتسلسل (Easy ثم Medium ...)، 0 = ولا وحدة
-local function clearedIndex(stage)
-    local srv = Hub.State.Server
-    local c = srv and srv.StoryCleared and srv.StoryCleared[stage]
-    if type(c) ~= "table" then return 0 end
-    local k = 0
-    for i, d in ipairs(DIFFS) do
-        if c[d] then k = i else break end
+-- الترتيب حسب Index في StoryConfig
+local STAGE_ORDER = {}
+for _, w in ipairs(WORLD_ORDER) do
+    for _, suffix in ipairs({ "_1", "_2", "_3", "_boss" }) do
+        STAGE_ORDER[#STAGE_ORDER + 1] = w.prefix .. suffix
     end
-    return k
+end
+local STAGE_INDEX = {}
+for i, id in ipairs(STAGE_ORDER) do STAGE_INDEX[id] = i end
+
+-- نفس الوقت اللي تستخدمه اللعبة
+local function serverNow()
+    local ok, t = pcall(function() return workspace:GetServerTimeNow() end)
+    if ok and type(t) == "number" and t > 0 then return t end
+    return os.time()
+end
+
+local function cooldownsKnown()
+    return stateLoaded()
+end
+
+local function beaten(stage, diff)
+    local st = playerState()
+    local c = st and st.StoryCleared and st.StoryCleared[stage]
+    return type(c) == "table" and c[diff] == true
+end
+
+local function prevStage(stage)
+    local i = STAGE_INDEX[stage]
+    return (i and i > 1) and STAGE_ORDER[i - 1] or nil
+end
+
+local function stageOpen(stage)
+    local p = prevStage(stage)
+    return p == nil or beaten(p, "Easy")
+end
+
+local function difficultyOpen(stage, diff)
+    if not stageOpen(stage) then return false end
+    local i = table.find(DIFFS, diff) or 1
+    if i == 1 then return true end
+    local p = prevStage(stage)
+    if p and not beaten(p, diff) then return false end
+    return beaten(stage, DIFFS[i - 1])
+end
+
+local function cooldownLeft(stage)
+    local st = playerState()
+    local t = st and st.StoryCooldowns and st.StoryCooldowns[stage]
+    if type(t) ~= "number" then return 0 end
+    return math.max(math.ceil(t - serverNow()), 0)
+end
+
+local function onCooldown(stage, diff)
+    return beaten(stage, diff) and cooldownLeft(stage) > 0
 end
 
 local function pickDifficulty(stage)
+    local top = 0
+    for i, d in ipairs(DIFFS) do
+        if difficultyOpen(stage, d) then top = i end
+    end
+    if top == 0 then return nil end -- الستيج مقفل
+
     local mode = Hub.Settings.StoryDiffMode
-    local k = clearedIndex(stage)
     local idx
     if mode == "Highest unlocked" then
-        idx = math.min(k + 1, #DIFFS)
-        -- خسارتين متتاليتين على نفس الصعوبة؟ ننزل درجة لهالستيج
-        if (Hub.State.StoryLosses[stage .. "|" .. DIFFS[idx]] or 0) >= 2 and idx > 1 then
-            idx -= 1
+        -- ننزل من أعلى صعوبة مفتوحة لين نلقى وحدة مو محظورة بسبب الخسارة
+        idx = nil
+        for i = top, 1, -1 do
+            if (Hub.State.StoryBlocked[stage .. "|" .. DIFFS[i]] or 0) <= os.clock() then
+                idx = i
+                break
+            end
         end
+        if not idx then return nil end -- كل الصعوبات محظورة: نتخطى الستيج مؤقتاً
     elseif mode == "Highest cleared" then
-        idx = math.max(k, 1)
+        idx = 1
+        for i = top, 1, -1 do
+            if beaten(stage, DIFFS[i]) then idx = i break end
+        end
     else
-        idx = table.find(DIFFS, mode) or 1
-        if idx > k + 1 then idx = math.max(k, 1) end -- ما نقدر نقاتل صعوبة مقفلة
+        idx = math.min(table.find(DIFFS, mode) or 1, top)
     end
     return DIFFS[idx]
+end
+
+-- يرجع الصعوبة إذا الستيج جاهز للقتال، أو nil
+local function stageReady(stage)
+    if (Hub.State.StorySkipUntil[stage] or 0) > os.clock() then return nil end
+    if not cooldownsKnown() then return nil end
+    local diff = pickDifficulty(stage)
+    if not diff or onCooldown(stage, diff) then return nil end
+    return diff
 end
 
 local function storyStages(prefix)
@@ -357,7 +458,7 @@ local function storyStages(prefix)
     return list
 end
 
--- يختار ستيج جاهز: العالم الحالي أولاً عشان نقلل التيليبورتات
+-- يختار ستيج جاهز: البوسات أول، بعدين العالم الحالي عشان نقلل التيليبورتات
 local function pickStoryJob()
     local ordered = {}
     for _, w in ipairs(WORLD_ORDER) do
@@ -369,32 +470,29 @@ local function pickStoryJob()
             end
         end
     end
-    -- البوس كولداونه 30 دقيقة: أي بوس جاهز ياخذ الأولوية حتى لو في عالم ثاني
     if Hub.Settings.BossFirst and Hub.Settings.StoryIncludeBoss then
         for _, w in ipairs(ordered) do
             local boss = w.prefix .. "_boss"
-            if stageReady(boss) then return w.place, boss, pickDifficulty(boss) end
+            local diff = stageReady(boss)
+            if diff then return w.place, boss, diff end
         end
     end
     for _, w in ipairs(ordered) do
         for _, stage in ipairs(storyStages(w.prefix)) do
-            if stageReady(stage) then
-                return w.place, stage, pickDifficulty(stage)
-            end
+            local diff = stageReady(stage)
+            if diff then return w.place, stage, diff end
         end
     end
 end
 
 local function nextStoryReadyIn()
-    local now = serverNow()
-    local srv = Hub.State.Server
-    if not (now and srv and srv.StoryCooldowns) then return nil end
+    if not cooldownsKnown() then return nil end
     local soonest
     for _, w in ipairs(WORLD_ORDER) do
         if Hub.Settings.StoryWorlds[w.place] then
             for _, stage in ipairs(storyStages(w.prefix)) do
-                local t = srv.StoryCooldowns[stage]
-                if t and t > now and (not soonest or t - now < soonest) then soonest = t - now end
+                local left = cooldownLeft(stage)
+                if left > 0 and (not soonest or left < soonest) then soonest = left end
             end
         end
     end
@@ -715,7 +813,10 @@ storyBox:AddButton({
 storyBox:AddButton({
     Text = "Reset loss memory",
     Tooltip = "Try the higher difficulties again after your team got stronger",
-    Func = function() table.clear(Hub.State.StoryLosses) end,
+    Func = function()
+        table.clear(Hub.State.StoryLosses)
+        table.clear(Hub.State.StoryBlocked)
+    end,
 })
 
 local function raidCall(action)
@@ -753,7 +854,8 @@ raidBox:AddButton({
     Text = "Teleport + Raid Once",
     Func = function()
         task.spawn(function()
-            if goToWorld("Raid") then raidCall("Fight") end
+            goToRaid()
+            raidCall("Fight")
         end)
     end,
 })
@@ -840,11 +942,8 @@ local function inBattle()
 end
 
 local function bossReady()
-    local srv = Hub.State.Server
-    if not srv or not srv.ServerTime then return true end
-    local now = srv.ServerTime + (os.clock() - Hub.State.ServerStamp)
-    local readyAt = srv.StoryCooldowns and srv.StoryCooldowns[Hub.Settings.TargetBoss]
-    return readyAt == nil or readyAt <= now
+    if not cooldownsKnown() then return false end
+    return not onCooldown(Hub.Settings.TargetBoss, Hub.Settings.TargetDifficulty)
 end
 
 -- 1. Auto-Roll & Equip Best
@@ -899,8 +998,16 @@ if BattleEventRemote then
                 if data.result == "Victory" then
                     Hub.State.StoryWins += 1
                     Hub.State.StoryLosses[key] = nil
+                    Hub.State.StoryBlocked[key] = nil
                 else
-                    Hub.State.StoryLosses[key] = (Hub.State.StoryLosses[key] or 0) + 1
+                    local n = (Hub.State.StoryLosses[key] or 0) + 1
+                    Hub.State.StoryLosses[key] = n
+                    -- خسارتين متتاليتين = نحظر هالصعوبة 20 دقيقة (الفوز على صعوبة ثانية ما يلغي الحظر)
+                    if n >= 2 then
+                        Hub.State.StoryBlocked[key] = os.clock() + 20 * 60
+                        Hub.State.StoryLosses[key] = 0
+                        print("[Hub] blocking", key, "for 20 min after 2 losses")
+                    end
                 end
                 -- إحصائيات الجوائز
                 local st = Hub.State.StoryStats[key]
@@ -923,7 +1030,8 @@ if BattleEventRemote then
                         end
                     end
                     -- نحدث الكولداون فوراً بدل ما ننتظر StateChanged
-                    if rw.cooldownEnds and rw.stage and Hub.State.Server then
+                    if rw.cooldownEnds and rw.stage and Hub.State.Server
+                        and not (GameState and GameState.Loaded) then
                         Hub.State.Server.StoryCooldowns = Hub.State.Server.StoryCooldowns or {}
                         Hub.State.Server.StoryCooldowns[rw.stage] = rw.cooldownEnds
                     end
@@ -990,11 +1098,19 @@ table.insert(Hub.Threads, task.spawn(function()
         if Hub.Settings.AutoTower
             and towerAllowed()
             and not inBattle()
-            and os.clock() - Hub.State.LastTowerEvent > quiet
+            and os.clock() - math.max(Hub.State.LastTowerEvent, Hub.State.LastTowerAttempt or 0) > quiet
             and os.clock() - Hub.State.LastBattleEvent > 6 then
-            towerAction("Start")
-            Hub.State.LastTowerEvent = os.clock()
-            Hub.State.TowerStartFails = fails + 1 -- يتصفر عند وصول "Started"
+            -- فيه رن موقوف؟ نكمله بدل ما نبدأ جديد ("You have a paused run - Resume it")
+            local good = towerAction("Resume")
+            if not good then good = towerAction("Start") end
+            Hub.State.LastTowerAttempt = os.clock()
+            if good then
+                Hub.State.TowerPaused = false
+                Hub.State.TowerYield = false
+                Hub.State.TowerStartFails = 0
+            else
+                Hub.State.TowerStartFails = fails + 1
+            end
         end
         task.wait(2)
     end
@@ -1024,13 +1140,18 @@ end))
 table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
         local place, stage, diff
-        if Hub.Settings.AutoStory and StoryFightRemote then
+        local known = cooldownsKnown()
+        if Hub.Settings.AutoStory and StoryFightRemote and known then
             place, stage, diff = pickStoryJob()
         end
         Hub.State.StoryIdle = (place == nil)
 
         if not (Hub.Settings.AutoStory and StoryFightRemote) then
             task.wait(2)
+        elseif not known then
+            Hub.State.LastStoryResult = "waiting for cooldown data from server..."
+            fetchSnapshot()
+            task.wait(1)
         elseif place and Hub.State.Busy then
             task.wait(1)
         elseif place and inBattle() then
@@ -1065,7 +1186,13 @@ table.insert(Hub.Threads, task.spawn(function()
                     local ok, res = invoke(StoryFightRemote, stage, diff)
                     print("[Hub] StoryFight ->", stage, diff, ok, res)
 
-                    if not ok or res == false or type(res) == "string" then
+                    local refused = not ok or res == false or type(res) == "string"
+                    if type(res) == "table" and (res.ok == false or res.success == false
+                        or res.error ~= nil or res.reason ~= nil or res.err ~= nil) then
+                        refused = true
+                        for k, v in pairs(res) do print("    ", k, "=", v) end
+                    end
+                    if refused then
                         -- السيرفر رفض: نتخطى هالستيج دقيقتين ونكمل غيره
                         Hub.State.StorySkipUntil[stage] = os.clock() + 120
                         Hub.State.LastStoryResult = stage .. " refused: " .. tostring(res)
@@ -1075,15 +1202,20 @@ table.insert(Hub.Threads, task.spawn(function()
                         -- ننتظر بداية المعركة ثم نهايتها
                         local t0 = os.clock()
                         while Hub.Running and Hub.State.LastBattleEvent == startedBefore
-                            and os.clock() - t0 < 8 do
-                            task.wait(0.3)
+                            and os.clock() - t0 < 5 do
+                            task.wait(0.2)
                         end
-                        while Hub.Running and inBattle() do task.wait(0.5) end
-                        -- لو ما وصلنا Start أبداً، نمنع التكرار السريع على نفس الستيج
                         if Hub.State.LastBattleEvent == startedBefore then
-                            Hub.State.StorySkipUntil[stage] = os.clock() + 60
+                            -- ما بدأت معركة = رفض صامت: نتخطاه ونطلب الأوقات من جديد
+                            Hub.State.StorySkipUntil[stage] = os.clock() + 90
+                            Hub.State.LastStoryResult = stage .. ": no battle started, skipped"
+                            print("[Hub] no battle for", stage, "- skipping")
+                            fetchSnapshot()
+                            task.wait(1)
+                        else
+                            while Hub.Running and inBattle() do task.wait(0.5) end
+                            humanWait(1) -- مهلة + تأخير عشوائي بين المعارك
                         end
-                        humanWait(1) -- مهلة + تأخير عشوائي بين المعارك
                     end
                 end
                 Hub.State.Busy = false
@@ -1092,53 +1224,93 @@ table.insert(Hub.Threads, task.spawn(function()
     end
 end))
 
--- Raid Farm: يشتغل لما الستوري ما عنده شي جاهز
+-- Raid Farm (Dracula): من RaidWindow.fightPressed و RaidController.nearArena
+--  - Dracula موجود إذا ReplicatedStorage.RaidHp > 0
+--  - إذا مات: يرجع عند RaidRespawnAt
+--  - الساحة: workspace["Burning London"] (اللعبة تعتبرك قريب إذا المسافة <= 420)
+local RAID_ARENA = "Burning London"
+
+local function raidHp()
+    return tonumber(ReplicatedStorage:GetAttribute("RaidHp")) or 0
+end
+
+local function raidRespawnIn()
+    local at = tonumber(ReplicatedStorage:GetAttribute("RaidRespawnAt")) or 0
+    return math.max(math.ceil(at - serverNow()), 0)
+end
+
+local function nearRaidArena()
+    local arena = workspace:FindFirstChild(RAID_ARENA)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not (arena and root and arena:IsA("Model")) then return false end
+    return (root.Position - arena:GetPivot().Position).Magnitude <= 420
+end
+
+goToRaid = function()
+    if nearRaidArena() then return true end
+    local ok, res = invoke(TeleportRemote, "Dracula Raid")
+    print("[Hub] Teleport -> Dracula Raid", ok, type(res) == "table" and (res.ok and "ok" or res.reason) or res)
+    local t0 = os.clock()
+    while Hub.Running and os.clock() - t0 < 12 do
+        if nearRaidArena() then
+            task.wait(1)
+            return true
+        end
+        task.wait(0.3)
+    end
+    return nearRaidArena()
+end
+
 table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
-        if not (Hub.Settings.AutoRaid and RaidFightRemote)
-            or inBattle() or Hub.State.Busy or not Hub.State.StoryIdle then
+        if not (Hub.Settings.AutoRaid and RaidFightRemote) then
+            Hub.State.RaidWaiting = false
+            task.wait(2)
+        elseif raidHp() <= 0 then
+            -- Dracula ميت: البرج ياخذ الوقت لين يرجع
+            Hub.State.RaidWaiting = true
+            local left = raidRespawnIn()
+            Hub.State.LastRaidResult = left > 0
+                and string.format("Dracula back in %dm %02ds", left // 60, left % 60)
+                or "Dracula not up"
+            task.wait(3)
+        elseif inBattle() or Hub.State.Busy or not Hub.State.StoryIdle then
+            Hub.State.RaidWaiting = false
             task.wait(2)
         else
+            Hub.State.RaidWaiting = false
             Hub.State.Busy = true
             if towerActive() then
                 towerPause()
                 task.wait(2)
             end
 
-            local _, _, stateTxt = raidCall("State")
-            Hub.State.LastRaidState = stateTxt
+            if not goToRaid() then
+                warn("[Hub] ما وصلت ساحة Dracula، بنحاول القتال على أي حال")
+            end
 
-            if not goToWorld("Raid") then
-                Hub.State.LastRaidResult = "teleport to Raid failed"
+            local startedBefore = Hub.State.LastBattleEvent
+            local ok, res = invoke(RaidFightRemote, "Fight")
+            local good = ok and type(res) == "table" and res.ok == true
+            print("[Hub] RaidFight Fight ->", ok, type(res) == "table" and (res.ok and "ok" or res.reason) or res)
+
+            if not good then
+                Hub.State.LastRaidResult = "refused: " .. tostring(type(res) == "table" and res.reason or res)
                 Hub.State.Busy = false
-                task.wait(10)
+                Hub.State.RaidWaiting = true
+                task.wait(Hub.Settings.RaidRetryDelay)
+                Hub.State.RaidWaiting = false
             else
-                local startedBefore = Hub.State.LastBattleEvent
-                local ok, res, txt = raidCall("Fight")
-                if not ok or res == false or type(res) == "string" then
-                    Hub.State.LastRaidResult = "refused: " .. txt
-                    Hub.State.Busy = false
-                    Hub.State.RaidWaiting = true -- البرج ياخذ الوقت لين المحاولة الجاية
-                    task.wait(Hub.Settings.RaidRetryDelay)
-                    Hub.State.RaidWaiting = false
-                else
-                    Hub.State.LastRaidResult = "fighting (" .. txt .. ")"
-                    local t0 = os.clock()
-                    while Hub.Running and Hub.State.LastBattleEvent == startedBefore
-                        and os.clock() - t0 < 8 do
-                        task.wait(0.3)
-                    end
-                    while Hub.Running and inBattle() do task.wait(0.5) end
-                    local noBattle = Hub.State.LastBattleEvent == startedBefore
-                    Hub.State.Busy = false
-                    if noBattle then
-                        Hub.State.RaidWaiting = true
-                        task.wait(Hub.Settings.RaidRetryDelay)
-                        Hub.State.RaidWaiting = false
-                    else
-                        humanWait(1)
-                    end
+                Hub.State.LastRaidResult = "fighting Dracula"
+                local t0 = os.clock()
+                while Hub.Running and Hub.State.LastBattleEvent == startedBefore
+                    and os.clock() - t0 < 8 do
+                    task.wait(0.3)
                 end
+                while Hub.Running and inBattle() do task.wait(0.5) end
+                Hub.State.Busy = false
+                humanWait(1)
             end
         end
     end
@@ -1197,7 +1369,7 @@ table.insert(Hub.Threads, task.spawn(function()
             "Tower: " .. onOff(S.AutoTower) .. " | " .. S.TowerMode
                 .. " | " .. (Hub.State.TowerPaused and "Paused" or "Running")
                 .. (towerAllowed() and "" or " (yield)")
-                .. " | " .. Hub.State.TowerFloorText,
+                .. " | " .. (Hub.State.TowerLastError or Hub.State.TowerFloorText),
             "Boss: " .. onOff(S.AutoStoryBoss) .. " | " .. S.TargetBoss
                 .. " (" .. S.TargetDifficulty .. ") | " .. (bossReady() and "Ready" or "Cooldown"),
             "Story: " .. onOff(S.AutoStory) .. " | wins " .. Hub.State.StoryWins
