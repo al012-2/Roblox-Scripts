@@ -1,11 +1,14 @@
 -- 2. التعليق الكبير والتحقق من تحميل اللعبة
 --[[
-    Story Auto Farm (merged): Story + Battle Towers + Halloween Tower + Hard Tower + Auto Raid + Tickets + StarGyro
-    - Auto-Save fixed: Every UI setting & stat change saves immediately
+    Story Auto Farm (merged): Story + Battle Towers + Halloween Tower + Hard Tower + Tickets + StarGyro
+    - Auto-Save: every UI setting & stat change is saved (batched, at most once per second)
     - Multi-account: every account has its own settings file StoryAutoFarmSettings_<UserId>.json
       (teams, worlds, cooldowns, stats, Auto-Hop). Learned ticket calls are shared by all accounts
       in StoryAutoFarmShared.json.
     - StarGyro Auto-Hop has a hop limit (MaxHops) and a delay before every hop (HopDelay).
+    - After a hop / rejoin the script re-runs itself ONCE (state is passed through
+      StoryAutoFarmTeleport_<UserId>.json). Save this file as StoryAutoFarm.lua in the executor's
+      workspace folder, or set getgenv().StoryFarmURL to a raw link before running it.
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -23,6 +26,7 @@ local RunService      = game:GetService("RunService")
 local lp = Players.LocalPlayer
 local R  = RS:WaitForChild("RollRemotes")
 
+-- تنظيف النسخة القديمة (Unload القديم يوقف فارماتها ويرجع الرندر)
 if getgenv().StoryFarmGui then pcall(function() getgenv().StoryFarmGui:Destroy() end) end
 if getgenv().StoryFarmLib then pcall(function() getgenv().StoryFarmLib:Unload() end) end
 if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
@@ -35,6 +39,11 @@ getgenv().StoryFarm = false
 getgenv().TowerFarm = false
 getgenv().HardFarm = false
 getgenv().HalloweenFarm = false
+
+-- حالة السكربت العامة
+local loaded, unloaded = false, false -- loaded = خلص بناء كل شي، unloaded = انضغط Unload
+local cleanups = {}                   -- دوال تنفّذ عند الـ Unload
+local function onCleanup(fn) cleanups[#cleanups + 1] = fn end
 
 
 -- 4. قسم Anti-AFK
@@ -76,6 +85,14 @@ do
             end)
             pressStay()
             task.wait(60)
+        end
+    end)
+
+    onCleanup(function()
+        if getgenv().AntiAfkToken == token then
+            getgenv().AntiAfkToken = token + 1
+            getgenv().BlockAutoRejoin = false
+            if getgenv().AntiAfkConn then pcall(function() getgenv().AntiAfkConn:Disconnect() end) end
         end
     end)
 
@@ -150,9 +167,23 @@ local failCount = {}
 local weakList = {}
 
 local TW, TS
+
+-- الحفظ: triggerSave يجمع التغييرات ويكتب مرة وحدة كل ثانية، saveNow يكتب فوراً.
+-- ما نكتب شي قبل ما يخلص بناء السكربت (عشان ما ننكتب فوق الأبراج/الفارمات بقيم ناقصة)
+-- ولا بعد الـ Unload.
 local saveSettings
+local savePending = false
+local function saveNow()
+    if unloaded or not loaded or not saveSettings then return end
+    savePending = false
+    pcall(saveSettings)
+end
 local function triggerSave()
-    if saveSettings then pcall(saveSettings) end
+    if unloaded or not loaded or not saveSettings or savePending then return end
+    savePending = true
+    task.delay(1, function()
+        if savePending then saveNow() end
+    end)
 end
 
 local learned = {}
@@ -162,6 +193,8 @@ local LEGACY_CFG  = "StoryAutoFarmSettings.json"
 local CFG_FILE    = ("StoryAutoFarmSettings_%d.json"):format(lp.UserId)
 -- ملف مشترك بين كل الحسابات (طريقة استخدام التذاكر المتعلَّمة)
 local SHARED_FILE = "StoryAutoFarmShared.json"
+-- ملف ينقل حالة الفارم للسيرفر الجاي بعد الـ hop
+local TP_STATE    = ("StoryAutoFarmTeleport_%d.json"):format(lp.UserId)
 local CFG, SHARED = {}, {}
 pcall(function()
     if not (isfile and readfile) then return end
@@ -278,8 +311,20 @@ if not Library then
 end
 getgenv().StoryFarmLib = Library
 
+-- الـ Unload يوقف كل شي فعلاً (قبل كان الـ Story والـ Towers يكملون شغلهم بعد إغلاق الواجهة)
+pcall(function()
+    Library:OnUnload(function()
+        unloaded = true
+        savePending = false
+        getgenv().StoryFarm = false
+        getgenv().TowerFarm = false
+        getgenv().HardFarm = false
+        getgenv().HalloweenFarm = false
+        for _, fn in ipairs(cleanups) do pcall(fn) end
+    end)
+end)
+
 local H = {}
-local unloaded = false
 local function hcall(name, v)
     local f = H[name]
     if f then f(v) end
@@ -436,11 +481,11 @@ end
 do
     local MenuBox = Tabs.Settings:AddLeftGroupbox("Menu")
     MenuBox:AddButton({ Text = "Save settings now", Func = function()
-        triggerSave()
+        saveNow()
         pcall(function() Library:Notify("Settings saved to " .. CFG_FILE, 4) end)
     end })
     MenuBox:AddButton({ Text = "Unload script", Func = function()
-        triggerSave()
+        saveNow()
         Library:Unload()
     end })
 
@@ -449,7 +494,7 @@ do
     CfgBox:AddToggle("ResumeFarms", { Text = "Resume farms that were ON when the script runs", Default = S.ResumeFarms,
         Callback = function(v) S.ResumeFarms = v == true; triggerSave() end })
     CfgBox:AddButton({ Text = "Use my settings for new accounts", Func = function()
-        triggerSave()
+        saveNow()
         local ok = pcall(function()
             local d = HttpService:JSONDecode(readfile(CFG_FILE))
             d.Cooldowns, d.Stats, d.Farms = nil, nil, nil
@@ -463,6 +508,7 @@ do
     CfgBox:AddButton({ Text = "Reset this account's config", Func = function()
         local ok = pcall(function() if delfile then delfile(CFG_FILE) else writefile(CFG_FILE, "{}") end end)
         saveSettings = nil -- لا نكتب الإعدادات الحالية فوق الملف المحذوف
+        savePending = false
         pcall(function()
             Library:Notify(ok and "Config reset. Re-run the script to load defaults."
                 or "Couldn't reset the config", 6)
@@ -476,11 +522,21 @@ do
 
     local RulesBox = Tabs.Settings:AddRightGroupbox("Farm rules")
     RulesBox:AddLabel("Two farm slots: ONE Story farm + ONE tower-type farm.", true)
-    RulesBox:AddLabel("Battle Towers, Halloween Tower, Hard Tower and Auto Raid share the tower slot, so only one of them can run. If you start a second one, the script tells you which one to turn off first.", true)
+    RulesBox:AddLabel("Battle Towers, Halloween Tower and Hard Tower share the tower slot, so only one of them can run. If you start a second one, the script tells you which one to turn off first.", true)
 end
 
 
--- 7. دوال الإحصائيات وأزرار Rejoin وServer Hop
+-- 7. اللوق + الإحصائيات وأزرار Rejoin وServer Hop
+-- (اللوق صار هنا لأن queueRerun يحتاجه. التنبيه المنبثق بس للأخطاء أو لما نطلبه،
+--  قبل كان يطلع تنبيه مع كل فوز ويغرق الشاشة)
+local logLines = {}
+local function log(msg, col, notify)
+    logLines[#logLines + 1] = os.date("%H:%M:%S") .. "  " .. tostring(msg)
+    while #logLines > 14 do table.remove(logLines, 1) end
+    pcall(function() logLbl:SetText(table.concat(logLines, "\n")) end)
+    if notify or col == C.bad then pcall(function() Library:Notify(tostring(msg), 6) end) end
+end
+
 local function refreshStats()
     local parts = {}
     for _, w in ipairs(WORLDS) do
@@ -506,17 +562,53 @@ resetB.MouseButton1Click:Connect(function()
 end)
 refreshStats()
 
+-- إعادة التشغيل بعد الانتقال: نكتب الحالة في ملف، ونسجّل الـ loader مرة وحدة بس لكل سيرفر.
+-- (قبل كان كل محاولة hop تضيف queue_on_teleport جديد، فالسكربت يشتغل كذا مرة في السيرفر الجاي)
+local TP_LOADER = ([[
+if getgenv().StoryFarmTpBoot then return end
+getgenv().StoryFarmTpBoot = true
+if not game:IsLoaded() then game.Loaded:Wait() end
+local f = %q
+local ok, st = pcall(function() return game:GetService("HttpService"):JSONDecode(readfile(f)) end)
+if not ok or type(st) ~= "table" then return end
+pcall(delfile, f)
+if math.abs(os.time() - (tonumber(st.At) or 0)) > 600 then return end
+local g = getgenv()
+g.StoryFarmFile = st.File
+g.StoryFarmURL = st.URL
+g.GyroHopActive = st.GyroHopActive == true
+g.GyroHopCount = tonumber(st.GyroHopCount) or 0
+g.StoryFarmAutoStart = st.Story == true
+g.TowerFarmAutoStart = st.Towers == true
+g.HardFarmAutoStart = st.Hard == true
+g.HalloweenFarmAutoStart = st.Halloween == true
+local src
+if st.File and isfile and isfile(st.File) then src = readfile(st.File)
+elseif type(st.URL) == "string" then pcall(function() src = game:HttpGet(st.URL) end) end
+if src then loadstring(src)() end
+]]):format(TP_STATE)
+
 local function queueRerun()
-    triggerSave()
+    saveNow()
+    local hasFile = isfile and isfile(SCRIPT_FILE)
+    local url = type(getgenv().StoryFarmURL) == "string" and getgenv().StoryFarmURL or nil
+    if not (queue_on_teleport and writefile and (hasFile or url)) then
+        log(("[Hop] The script won't re-run after the teleport: save it as %s in the workspace folder (or set getgenv().StoryFarmURL)")
+            :format(SCRIPT_FILE), C.warn, true)
+        return
+    end
     pcall(function()
-        if queue_on_teleport and isfile and isfile(SCRIPT_FILE) then
-            queue_on_teleport(('getgenv().StoryFarmFile=%q; getgenv().GyroHopActive=%s; getgenv().GyroHopCount=%d; getgenv().StoryFarmAutoStart=%s; getgenv().TowerFarmAutoStart=%s; getgenv().HardFarmAutoStart=%s; getgenv().HalloweenFarmAutoStart=%s; loadstring(readfile(%q))()')
-                :format(SCRIPT_FILE, tostring(S.AutoGyroHop == true),
-                    math.floor(tonumber(getgenv().GyroHopCount) or 0),
-                    tostring(getgenv().StoryFarm == true), tostring(getgenv().TowerFarm == true),
-                    tostring(getgenv().HardFarm == true), tostring(getgenv().HalloweenFarm == true), SCRIPT_FILE))
-        end
+        writefile(TP_STATE, HttpService:JSONEncode({
+            At = os.time(), File = SCRIPT_FILE, URL = url,
+            GyroHopActive = S.AutoGyroHop == true,
+            GyroHopCount = math.floor(tonumber(getgenv().GyroHopCount) or 0),
+            Story = getgenv().StoryFarm == true, Towers = getgenv().TowerFarm == true,
+            Hard = getgenv().HardFarm == true, Halloween = getgenv().HalloweenFarm == true,
+        }))
     end)
+    if not getgenv().StoryFarmQueued then
+        if pcall(queue_on_teleport, TP_LOADER) then getgenv().StoryFarmQueued = true end
+    end
 end
 
 rejoinB.MouseButton1Click:Connect(function()
@@ -594,16 +686,22 @@ end
 
 hopB.MouseButton1Click:Connect(doServerHop)
 
+-- إذا فشل الانتقال نعرف فوراً بدل ما نعلق
+pcall(function()
+    table.insert(getgenv().StoryFarmConns, TeleportService.TeleportInitFailed:Connect(function(player, result, msg)
+        if player ~= lp then return end
+        hopping = false
+        hopB.Text = "Server Hop"
+        rejoinB.Text = "Rejoin"
+        log(("[Hop] Teleport failed: %s"):format(tostring(msg ~= "" and msg or result)), C.warn)
+    end))
+end)
+onCleanup(function()
+    for _, c in ipairs(getgenv().StoryFarmConns or {}) do pcall(function() c:Disconnect() end) end
+end)
 
--- 8. قسم Log وWeak units
-local logLines = {}
-local function log(msg, col)
-    logLines[#logLines + 1] = os.date("%H:%M:%S") .. "  " .. tostring(msg)
-    while #logLines > 14 do table.remove(logLines, 1) end
-    pcall(function() logLbl:SetText(table.concat(logLines, "\n")) end)
-    if col == C.bad or col == C.good then pcall(function() Library:Notify(tostring(msg), 6) end) end
-end
 
+-- 8. قسم Weak units
 local function updateWeakUI()
     local items = {}
     for _, v in pairs(weakList) do
@@ -668,6 +766,14 @@ local function toggleEventConnections(ev, enable)
     end
 end
 
+local function setEventsMuted(muted)
+    local enable = not muted
+    toggleEventConnections(RS:FindFirstChild("HitAnnounce"), enable)
+    toggleEventConnections(RS:FindFirstChild("NewCardAlert"), enable)
+    toggleEventConnections(R:FindFirstChild("PlayerRolled"), enable)
+    toggleEventConnections(R:FindFirstChild("PlayerShowcase"), enable)
+end
+
 H.team = function(v)
     S.Team = tonumber(v) or S.Team
     triggerSave()
@@ -676,11 +782,7 @@ end
 H.antiLag = function(v)
     if v == S.AntiLag then return end
     S.AntiLag = v == true
-    local enableEvents = not S.AntiLag
-    toggleEventConnections(RS:FindFirstChild("HitAnnounce"), enableEvents)
-    toggleEventConnections(RS:FindFirstChild("NewCardAlert"), enableEvents)
-    toggleEventConnections(R:FindFirstChild("PlayerRolled"), enableEvents)
-    toggleEventConnections(R:FindFirstChild("PlayerShowcase"), enableEvents)
+    setEventsMuted(S.AntiLag)
     log("Anti-Lag (Mute Roll/Hit Events): " .. (S.AntiLag and "ON" or "OFF"), S.AntiLag and C.good or C.dim)
     triggerSave()
 end
@@ -706,6 +808,12 @@ H.render = function(v)
     triggerSave()
 end
 
+-- عند الـ Unload نرجع الرندر والأحداث (قبل كانت الشاشة تظل سودا بعد إغلاق السكربت)
+onCleanup(function()
+    if S.No3D then pcall(function() RunService:Set3dRenderingEnabled(true) end) end
+    if S.AntiLag then setEventsMuted(false) end
+end)
+
 -- تفعيل الإعدادات المحفوظة تلقائياً عند بدء السكربت
 task.defer(function()
     if S.SavedAntiLag then H.antiLag(true) end
@@ -720,7 +828,6 @@ local function updateWeatherUI(data)
         local wName = data.Name or data.Weather or "Clear"
         local mult = data.LuckMultiplier or data.Luck or 1
         weatherL.Text = ("Weather: %s (x%s)"):format(tostring(wName), tostring(mult))
-        weatherL.TextColor3 = (tonumber(mult) or 1) > 1 and C.good or C.dim
     elseif type(data) == "string" then
         weatherL.Text = "Weather: " .. data
     end
@@ -758,6 +865,11 @@ getgenv().GyroConn = RS:GetAttributeChangedSignal("StarGyroLuck"):Connect(functi
     log(("[StarGyro] Server Luck updated -> +%d"):format(newLuck), newLuck > 0 and C.good or C.dim)
 end)
 
+onCleanup(function()
+    if getgenv().WeatherConn then pcall(function() getgenv().WeatherConn:Disconnect() end) end
+    if getgenv().GyroConn then pcall(function() getgenv().GyroConn:Disconnect() end) end
+end)
+
 local gyroHopToken = 0
 H.gyroHop = function(v)
     S.AutoGyroHop = v == true
@@ -775,7 +887,7 @@ H.gyroHop = function(v)
         getgenv().GyroHopCount = 0
         pcall(function() gyroHopToggle:SetValue(false) end)
         triggerSave()
-        log(reason, col)
+        log(reason, col, true)
     end
     local function found(luck)
         stopHop(("[StarGyro] Found target server! Current Luck: +%d"):format(luck), C.good)
@@ -813,12 +925,7 @@ H.gyroHop = function(v)
     end)
 end
 
-pcall(function()
-    Library:OnUnload(function()
-        unloaded = true
-        S.AutoGyroHop = false
-    end)
-end)
+onCleanup(function() S.AutoGyroHop = false end)
 
 if S.AutoGyroHop then
     task.defer(function() H.gyroHop(true) end)
@@ -1017,6 +1124,21 @@ local function decayGap()
     end
 end
 
+-- استلام الجائزة بعد القتال (نفس الطريقة للقتال العادي وقتال التذكرة)
+local function claimGrant(res)
+    task.wait(S.FightDelay)
+    throttle()
+    for _ = 1, S.MaxDoneTries do
+        local ok, done = pcall(function()
+            local rem = R:FindFirstChild(res.GrantRemote or "StoryFightDone") or R.StoryFightDone
+            return rem:InvokeServer(res.GrantId)
+        end)
+        if ok and done then return true end
+        task.wait(S.RetryDelay)
+    end
+    return false
+end
+
 local function fight(w, boss, diff, alive)
     if not throttle(alive) then return false, "stopped", 0, "stop" end
 
@@ -1030,18 +1152,9 @@ local function fight(w, boss, diff, alive)
         if res.Winner ~= "A" then
             return false, "lost (Winner=" .. tostring(res.Winner) .. ")", 600, "lost"
         end
-        task.wait(S.FightDelay)
-        throttle()
-        for _ = 1, S.MaxDoneTries do
-            local ok, done = pcall(function()
-                local rem = R:FindFirstChild(res.GrantRemote or "StoryFightDone") or R.StoryFightDone
-                return rem:InvokeServer(res.GrantId)
-            end)
-            if ok and done then
-                local pack = type(res.WinPackText) == "string" and (" " .. res.WinPackText) or ""
-                return true, "WIN" .. pack .. " (claimed)", nil, nil, res
-            end
-            task.wait(S.RetryDelay)
+        if claimGrant(res) then
+            local pack = type(res.WinPackText) == "string" and (" " .. res.WinPackText) or ""
+            return true, "WIN" .. pack .. " (claimed)", nil, nil, res
         end
         return false, "StoryFightDone failed", 30, "err"
     end
@@ -1068,7 +1181,6 @@ end
 local function setRunning(on)
     getgenv().StoryFarm = on
     startB.Text = on and "STOP" or "START"
-    startB.BackgroundColor3 = on and C.bad or C.good
     if not on then
         status.Text = "Idle"
         farmFree("Story")
@@ -1191,7 +1303,7 @@ getgenv().TicketOnUse = function(a)
     end
     learned[world] = copy
     updateTicketUI()
-    log("[Tickets] Learned how the game uses a ticket on " .. world, C.good)
+    log("[Tickets] Learned how the game uses a ticket on " .. world, C.good, true)
     triggerSave()
 end
 
@@ -1249,6 +1361,10 @@ local function ticketPass(alive)
             local ok, res = pcall(function()
                 return R.UseStoryTicket:InvokeServer(table.unpack(args, 1, #args))
             end)
+            -- قتال التذكرة مثل القتال العادي: لو رجع GrantId لازم نستلم الجائزة وإلا تضيع
+            if ok and type(res) == "table" and res.GrantId and res.Winner ~= false then
+                claimGrant(res)
+            end
             local detail = type(res) == "table" and dumpTable(res) or tostring(res)
             task.wait(1)
             refreshState(true)
@@ -1262,7 +1378,7 @@ local function ticketPass(alive)
                 refreshStats()
                 triggerSave()
                 log(("[Tickets] %s: %d bosses collected (ready %d -> %d, tickets %d -> %s)"):format(
-                    w.World, got, before, after, leftBefore, tostring(ticketsLeft)), C.good)
+                    w.World, got, before, after, leftBefore, tostring(ticketsLeft)), C.good, true)
             else
                 ticketNext[w.World] = os.clock() + 600
                 S.Tickets = false
@@ -1275,9 +1391,17 @@ local function ticketPass(alive)
     end
 end
 
+-- يرجع أول قتال جاهز. وإذا ما فيه، يرجع أقرب وقت جاهزية من البوسات اللي فعلاً بيقاتلها
+-- (قبل كان العداد "next in Xs" يحسب كولداونات عوالم مقفلة/مطفية فيطلع رقم ما له معنى)
 local function pickJob()
+    local soonest, ticketWait = nil, nil
+    local now = os.clock()
     for _, w in ipairs(WORLDS) do
-        if w.On and not ticketMode(w) then
+        if w.On and ticketMode(w) then
+            local ws = qState and qState.Worlds and qState.Worlds[w.World]
+            ticketWait = (ticketWait and (ticketWait .. ", ") or "")
+                .. ("%s %d/%d"):format(w.World, tonumber(ws and ws.Ready) or 0, S.TicketMin)
+        elseif w.On then
             for _, boss in ipairs(bossList(w)) do
                 local lo = S.All and 1 or w.Diff
                 local hi = w.Diff
@@ -1285,14 +1409,26 @@ local function pickJob()
                 if binfo and tonumber(binfo.Cleared) then hi = math.min(hi, binfo.Cleared + 1) end
                 for diff = lo, hi do
                     local key = keyOf(w.World, boss, diff)
-                    if not inFlight[key] and (nextAt[key] or 0) <= os.clock() then
-                        inFlight[key] = true
-                        return w, boss, diff, key
+                    if not inFlight[key] then
+                        local t = nextAt[key] or 0
+                        if t <= now then
+                            inFlight[key] = true
+                            return w, boss, diff, key
+                        end
+                        if not soonest or t < soonest then soonest = t end
                     end
                 end
             end
         end
     end
+    return nil, nil, nil, nil, soonest, ticketWait
+end
+
+local function fmtLeft(sec)
+    sec = math.max(0, math.ceil(sec))
+    if sec >= 3600 then return ("%dh %dm"):format(sec // 3600, (sec % 3600) // 60) end
+    if sec >= 60 then return ("%dm %ds"):format(sec // 60, sec % 60) end
+    return sec .. "s"
 end
 
 local spawnWorker
@@ -1301,7 +1437,7 @@ local function startFarm()
     if not farmGate("Story") then return end
     runId += 1
     local my = runId
-    local function alive() return getgenv().StoryFarm and runId == my end
+    local function alive() return getgenv().StoryFarm and runId == my and not unloaded end
     local act = {}
     inFlight = {}
     wstatus = {}
@@ -1326,17 +1462,22 @@ local function startFarm()
         act[idx] = true
         task.spawn(function()
             while alive() and idx <= S.Workers do
-                local w, boss, diff, key = pickJob()
+                local w, boss, diff, key, soonest, ticketWait = pickJob()
                 if not w then
                     decayGap()
-                    local soonest
-                    for _, t in pairs(nextAt) do
-                        if t > os.clock() and (not soonest or t < soonest) then soonest = t end
-                    end
                     if idx == 1 then
-                        wstatus[1] = "#1 " .. (soonest
-                            and ("All on cooldown, next in %ds"):format(math.ceil(soonest - os.clock()))
-                            or (next(inFlight) and "Waiting for the other fight" or "No bosses available"))
+                        local txt
+                        if soonest then
+                            txt = "All on cooldown, next in " .. fmtLeft(soonest - os.clock())
+                        elseif next(inFlight) then
+                            txt = "Waiting for the other fight"
+                        elseif ticketWait then
+                            txt = "Saving bosses for a ticket (" .. ticketWait .. ")"
+                        else
+                            txt = "No bosses to farm (turn a world ON)"
+                        end
+                        if soonest and ticketWait then txt = txt .. " | tickets: " .. ticketWait end
+                        wstatus[1] = "#1 " .. txt
                     else
                         wstatus[idx] = nil
                     end
@@ -1511,7 +1652,7 @@ TCtl:AddToggle("TowerFirst", { Text = "Include first clears", Default = TS.First
     Callback = function(v) TS.First = v; triggerSave() end })
 local tSpeedB = mkButton(TCtl, "Max battle speed")
 local tEndB = mkButton(TCtl, "End current run")
-TCtl:AddLabel("Shares the tower slot with Halloween, Hard Tower and Auto Raid: only one of them can run at a time.", true)
+TCtl:AddLabel("Shares the tower slot with Halloween and Hard Tower: only one of them can run at a time.", true)
 
 local function updateTowerRows()
     for _, tw in ipairs(TW) do
@@ -1542,7 +1683,7 @@ if GG and type(GG.ShowBattleTowerResult) == "function" and not getgenv().TowerRe
 end
 
 getgenv().TowerOnResult = function(res)
-    if type(res) ~= "table" then return end
+    if type(res) ~= "table" or unloaded then return end
     local id = res.BattleTower or currentTower or "?"
     if res.Died then
         tDeaths[id] = (tDeaths[id] or 0) + 1
@@ -1569,8 +1710,8 @@ getgenv().TowerOnResult = function(res)
         log(("[T] %s Part %s cleared%s"):format(tostring(id), tostring(res.Part),
             res.FirstClear and " (first clear)" or ""), C.good)
     end
-    if res.Artifact then log("[T] Got artifact: " .. tostring(res.Artifact), C.good) end
-    if res.UnlockedCard then log("[T] Unlocked card: " .. tostring(res.UnlockedCard), C.good) end
+    if res.Artifact then log("[T] Got artifact: " .. tostring(res.Artifact), C.good, true) end
+    if res.UnlockedCard then log("[T] Unlocked card: " .. tostring(res.UnlockedCard), C.good, true) end
 end
 
 local function runInfo(id)
@@ -1611,7 +1752,6 @@ end
 local function setTRunning(on)
     getgenv().TowerFarm = on
     tStartB.Text = on and "STOP" or "START"
-    tStartB.BackgroundColor3 = on and C.bad or C.good
     if not on then
         tStatus.Text = "Idle"
         farmFree("Towers")
@@ -1627,7 +1767,7 @@ local function startTowers()
     tRun += 1
     local my = tRun
     local function alive()
-        return getgenv().TowerFarm and tRun == my and getgenv().TowerGen == tGen
+        return getgenv().TowerFarm and tRun == my and getgenv().TowerGen == tGen and not unloaded
     end
     setTRunning(true)
     log("[T] Tower farm started", C.good)
@@ -1736,7 +1876,7 @@ HNote:AddLabel("1) Turn OFF the game's own Hard Tower auto-climb first, or both 
 HNote:AddLabel("2) A Hard run must already be active (talk to the Hard Tower NPC once).", true)
 HNote:AddLabel("3) It stops by itself on defeat, run end, 3 errors, or the stop floor.", true)
 HNote:AddLabel("4) The first 3 replies are written to the Story log (fields after the battle Log).", true)
-HNote:AddLabel("5) Shares the tower slot with Battle Towers, Halloween and Auto Raid: only one can run at a time.", true)
+HNote:AddLabel("5) Shares the tower slot with Battle Towers and Halloween: only one can run at a time.", true)
 
 local function hFlat(t, skip, depth)
     depth = depth or 0
@@ -1773,10 +1913,32 @@ end
 
 local function hShow(s)
     if type(s) == "table" then
-        hInfo.Text = ("Floor %s | Best %s | RewardMult x%s | Climbed %d"):format(
-            tostring(s.Floor), tostring(s.Best), tostring(s.RewardMult or 1), hclimbed)
+        if s.Active == false and (tonumber(s.Floor) or 0) <= 0 then
+            hInfo.Text = ("No active run | Best %s | Climbed %d"):format(tostring(s.Best or "?"), hclimbed)
+        else
+            hInfo.Text = ("Floor %s | Best %s | RewardMult x%s | Climbed %d"):format(
+                tostring(s.Floor), tostring(s.Best), tostring(s.RewardMult or 1), hclimbed)
+        end
     end
 end
+
+-- سبب رفض التشغيل يطلع في التاب نفسه + تنبيه (قبل كان يروح للوق تاب Story بس)
+local function hFail(msg, col)
+    hStatus.Text = msg
+    log("[H] " .. msg, col or C.warn, true)
+end
+
+-- تحديث معلومات الطابق كل 20 ثانية والفارم طافي
+task.spawn(function()
+    local sumRem = findRem("GetTowerRunSummary")
+    while not unloaded do
+        if sumRem and not getgenv().HardFarm then
+            local s = hSummary(sumRem)
+            if s and not getgenv().HardFarm then hShow(s) end
+        end
+        task.wait(20)
+    end
+end)
 
 local function setHRunning(on)
     getgenv().HardFarm = on
@@ -1791,19 +1953,21 @@ local function startHard()
     local nextRem = findRem("TowerNextFloor")
     local sumRem  = findRem("GetTowerRunSummary")
     local hideRem = findRem("SetTowerHidden")
-    if not nextRem then log("[H] TowerNextFloor remote not found", C.bad) return end
-    if not sumRem then log("[H] GetTowerRunSummary remote not found (needed to detect defeat)", C.bad) return end
+    if not nextRem then return hFail("TowerNextFloor remote not found", C.bad) end
+    if not sumRem then return hFail("GetTowerRunSummary remote not found (needed to detect defeat)", C.bad) end
 
     local s = hSummary(sumRem)
     if not s then
-        log("[H] Couldn't read the Hard run state - is a Hard run active?", C.warn)
+        return hFail("Couldn't read the Hard run state - try again in a few seconds")
+    end
+    hShow(s)
+    if s.Active == false and (tonumber(s.Floor) or 0) <= 0 then
+        return hFail("No active Hard run. Start one from the Hard Tower NPC (press Start once), then turn this ON.")
+    end
+    if not farmGate("Hard") then
+        hStatus.Text = "Another tower farm is running - turn it off first"
         return
     end
-    if s.Active == false then
-        log("[H] No active Hard run. Start one in the game (Hard Tower NPC), then press START.", C.warn)
-        return
-    end
-    if not farmGate("Hard") then return end
 
     hRun += 1
     local my = hRun
@@ -1811,7 +1975,8 @@ local function startHard()
     local function finish(reason, col)
         if hRun == my then
             setHRunning(false)
-            log("[H] Stopped: " .. reason, col or C.warn)
+            hStatus.Text = "Stopped: " .. reason
+            log("[H] Stopped: " .. reason, col or C.warn, true)
         end
     end
 
@@ -1870,7 +2035,7 @@ local function startHard()
                     end
                     lastFloor = fl or lastFloor
                     hShow(s2)
-                    if s2.Active == false then
+                    if s2.Active == false and (tonumber(s2.Floor) or 0) <= 0 then
                         local it = hItems(s2)
                         log("[H] Run ended" .. (it ~= "" and (" | items: " .. it) or ""), C.warn)
                         return finish("run is no longer active")
@@ -1916,7 +2081,7 @@ do
     HwNote:AddLabel("50 parts, 10 waves each, a Major part every 10 (the Soul Relic comes from Major 3, probably Part 30).", true)
     HwNote:AddLabel("An active run is only watched, never restarted. Otherwise the next uncleared part starts.", true)
     HwNote:AddLabel("It stops on its own when all 50 parts are cleared, after 3 failed starts, or after 3 runs in a row that cleared nothing (change the team).", true)
-    HwNote:AddLabel("Shares the tower slot with Battle Towers, Hard Tower and Auto Raid: only one can run at a time.", true)
+    HwNote:AddLabel("Shares the tower slot with Battle Towers and Hard Tower: only one can run at a time.", true)
 
     local function hwSer(v, d, b)
         d = d or 0
@@ -1950,7 +2115,7 @@ do
         if hwRun == my then
             hwRun += 1
             setHwRunning(false)
-            log("[HW] Stopped: " .. reason, col or C.warn)
+            log("[HW] Stopped: " .. reason, col or C.warn, true)
         end
     end
 
@@ -2076,6 +2241,9 @@ do
         end
     end)
 end
+
+-- كل شي جاهز: من هنا ورايح الحفظ مسموح
+loaded = true
 
 -- إعادة تشغيل الفارم تلقائياً: بعد الانتقال بين السيرفرات، أو من الكونفق (الفارمات اللي كانت ON)
 local SAVED_FARMS = type(CFG.Farms) == "table" and CFG.Farms or {}
