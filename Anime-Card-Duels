@@ -886,21 +886,41 @@ addGameToggles(gameClaimBox, {
 })
 
 -- Teleports (ريموت اللعبة) ---------------------------------------------
--- الأسماء نفس قائمة Teleport داخل اللعبة
-local function addTeleportBox(side, title, icon, names)
-    local box = side == "left" and Tabs.Teleport:AddLeftGroupbox(title, icon)
-        or Tabs.Teleport:AddRightGroupbox(title, icon)
-    for _, name in ipairs(names) do
-        box:AddButton({ Text = name, Func = function() task.spawn(goToWorld, name) end })
+-- Teleport ياخذ Id المنطقة (Shared.World.Areas)، مو الاسم المعروض
+local function teleportTo(id)
+    local ok, res = invoke(TeleportRemote, id)
+    local reason = type(res) == "table" and (res.ok and "ok" or res.reason) or res
+    print("[Hub] Teleport ->", id, ok, reason)
+    if type(res) == "table" and res.ok == false then
+        Library:Notify({ Title = "Teleport", Description = tostring(res.reason), Time = 3 })
     end
 end
-addTeleportBox("left",  "Story Worlds", "map",
-    { "Purple Forest", "Android Games", "Hollow World", "Purple Town" })
-addTeleportBox("right", "Towers", "castle",
-    { "Potion Tower", "Infinite Tower", "Hardcore Tower" })
-addTeleportBox("left",  "Raids", "skull", { "Raid", "Dracula Raid" })
-addTeleportBox("right", "Lobby Areas", "building",
-    { "Card Merge", "Card Deconstruct", "Potion Crafting", "Relic Crafting" })
+
+local function addTeleportBox(side, title, icon, list)
+    local box = side == "left" and Tabs.Teleport:AddLeftGroupbox(title, icon)
+        or Tabs.Teleport:AddRightGroupbox(title, icon)
+    for _, e in ipairs(list) do
+        box:AddButton({ Text = e[1], Func = function() task.spawn(teleportTo, e[2]) end })
+    end
+end
+addTeleportBox("left", "Story Worlds", "map", {
+    { "Purple Forest", "Purple Forest" }, { "Android Games", "Android Games" },
+    { "Hollow World", "Hollow World" },   { "Purple Town", "Purple Town" },
+})
+addTeleportBox("right", "Towers", "castle", {
+    { "Halloween Tower", "HalloweenTower" }, { "Hardcore Tower", "HardcoreTower" },
+    { "Infinite Tower", "InfiniteTower" },   { "Potion Tower", "PotionTower" },
+    { "Halloween Trial Tower", "HalloweenTrial" },
+})
+addTeleportBox("left", "Raids & Events", "skull", {
+    { "Dracula Raid", "DraculaRaid" }, { "Raid", "Raids" }, { "Candy Shop", "CandyShop" },
+})
+addTeleportBox("right", "Lobby", "building", {
+    { "Lobby", "Lobby" }, { "Quests", "Quests" }, { "Exploration", "Exploration" },
+    { "Card Merge", "CardMerge" }, { "Card Deconstruct", "CardDeconstruct" },
+    { "Potion Crafting", "PotionCrafting" }, { "Relic Crafting", "RelicCrafting" },
+    { "Traits", "Traits" }, { "Testing Dummy", "TestingDummy" },
+})
 
 -- Settings -------------------------------------------------------------
 local safetyBox = Tabs.Settings:AddLeftGroupbox("Safety & Menu", "shield")
@@ -1249,8 +1269,8 @@ end
 
 goToRaid = function()
     if nearRaidArena() then return true end
-    local ok, res = invoke(TeleportRemote, "Dracula Raid")
-    print("[Hub] Teleport -> Dracula Raid", ok, type(res) == "table" and (res.ok and "ok" or res.reason) or res)
+    local ok, res = invoke(TeleportRemote, "DraculaRaid")
+    print("[Hub] Teleport -> DraculaRaid", ok, type(res) == "table" and (res.ok and "ok" or res.reason) or res)
     local t0 = os.clock()
     while Hub.Running and os.clock() - t0 < 12 do
         if nearRaidArena() then
