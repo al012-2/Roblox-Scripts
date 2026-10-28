@@ -72,6 +72,9 @@ local Hub = {
         StoryIncludeBoss = true,
 
         AutoRaid = false,
+        TowerInDowntime = true,
+        BossFirst = true,
+        HumanDelay = true,
         RaidRetryDelay = 30,
 
         AutoClaimQuests = false,
@@ -101,11 +104,14 @@ local Hub = {
         StoryLosses = {},   -- [stage|diff] = true بعد خسارة -> ننزل صعوبة
         StorySkipUntil = {}, -- [stage] = os.clock() لو السيرفر رفض
         LastBattleInfo = nil,
-        Busy = false,        -- قفل: معركة وحدة (ستوري أو رايد) في نفس الوقت
+        Busy = false,
+        RaidWaiting = false,        -- قفل: معركة وحدة (ستوري أو رايد) في نفس الوقت
         StoryIdle = true,    -- الستوري ما عنده شي جاهز
         LastRaidResult = "-",
         LastRaidState = "-",
         RaidWins = 0,
+        StoryStats = {},     -- [stage|diff] = {fights, wins, seconds, items={}}
+        TowerYield = false,  -- البرج موقوف مؤقتاً عشان الستوري
         StartTime = os.clock(),
     }
 }
@@ -163,6 +169,14 @@ local function invoke(remote, ...)
     if not remote then return false, "remote missing" end
     local args = table.pack(...)
     return pcall(function() return remote:InvokeServer(table.unpack(args, 1, args.n)) end)
+end
+
+local function humanWait(base)
+    if Hub.Settings.HumanDelay then
+        task.wait(base + math.random() * 2 + 0.5)
+    else
+        task.wait(base)
+    end
 end
 
 local function towerAction(action, mode)
@@ -324,8 +338,10 @@ local function pickDifficulty(stage)
     local idx
     if mode == "Highest unlocked" then
         idx = math.min(k + 1, #DIFFS)
-        -- خسرنا هالصعوبة قبل؟ ننزل لأعلى مختومة
-        if Hub.State.StoryLosses[stage .. "|" .. DIFFS[idx]] and k > 0 then idx = k end
+        -- خسارتين متتاليتين على نفس الصعوبة؟ ننزل درجة لهالستيج
+        if (Hub.State.StoryLosses[stage .. "|" .. DIFFS[idx]] or 0) >= 2 and idx > 1 then
+            idx -= 1
+        end
     elseif mode == "Highest cleared" then
         idx = math.max(k, 1)
     else
@@ -351,6 +367,13 @@ local function pickStoryJob()
             else
                 ordered[#ordered + 1] = w
             end
+        end
+    end
+    -- البوس كولداونه 30 دقيقة: أي بوس جاهز ياخذ الأولوية حتى لو في عالم ثاني
+    if Hub.Settings.BossFirst and Hub.Settings.StoryIncludeBoss then
+        for _, w in ipairs(ordered) do
+            local boss = w.prefix .. "_boss"
+            if stageReady(boss) then return w.place, boss, pickDifficulty(boss) end
         end
     end
     for _, w in ipairs(ordered) do
@@ -657,6 +680,38 @@ storyBox:AddToggle("StoryBossToggle", {
     Text = "Include world bosses", Default = true,
     Callback = function(val) Hub.Settings.StoryIncludeBoss = val end,
 })
+storyBox:AddToggle("BossFirstToggle", {
+    Text = "Bosses first (30 min cooldown)", Default = true,
+    Callback = function(val) Hub.Settings.BossFirst = val end,
+})
+storyBox:AddToggle("TowerDowntimeToggle", {
+    Text = "Tower while story is on cooldown",
+    Tooltip = "Needs Auto Tower ON. Pauses the tower when a stage is ready, resumes after.",
+    Default = true,
+    Callback = function(val) Hub.Settings.TowerInDowntime = val end,
+})
+storyBox:AddToggle("HumanDelayToggle", {
+    Text = "Random delay between fights", Default = true,
+    Callback = function(val) Hub.Settings.HumanDelay = val end,
+})
+storyBox:AddButton({
+    Text = "Print rewards per stage",
+    Func = function()
+        local keys = {}
+        for k in pairs(Hub.State.StoryStats) do keys[#keys + 1] = k end
+        table.sort(keys)
+        print("[Hub] ===== Story rewards this session =====")
+        for _, k in ipairs(keys) do
+            local st = Hub.State.StoryStats[k]
+            local parts = {}
+            for item, n in pairs(st.items) do parts[#parts + 1] = item .. " x" .. n end
+            table.sort(parts)
+            local avg = st.fights > 0 and (st.seconds / st.fights) or 0
+            print(string.format("[Hub] %s | %d/%d wins | avg %.0fs | %s",
+                k, st.wins, st.fights, avg, table.concat(parts, ", ")))
+        end
+    end,
+})
 storyBox:AddButton({
     Text = "Reset loss memory",
     Tooltip = "Try the higher difficulties again after your team got stronger",
@@ -769,6 +824,14 @@ ThemeManager:ApplyToTab(Tabs.Settings)
 -- ====================================================================
 -- المحركات الخلفية
 -- ====================================================================
+local towerAllowed -- معرّفة تحت مع محرك البرج
+
+-- البرج شغال فعلاً؟ (وصلنا منه حدث خلال آخر 30 ثانية وما هو موقوف)
+local function towerActive()
+    return Hub.Settings.AutoTower and not Hub.State.TowerPaused
+        and os.clock() - Hub.State.LastTowerEvent < 30
+end
+
 local function inBattle()
     if os.clock() - Hub.State.LastBattleEvent > 90 then
         Hub.State.InBattle = false
@@ -829,11 +892,41 @@ if BattleEventRemote then
             -- نتيجة الستوري: {mode="story", result="Victory", story={stage, difficulty}}
             if type(data) == "table" and data.mode == "story" and type(data.story) == "table" then
                 local key = tostring(data.story.stage) .. "|" .. tostring(data.story.difficulty)
+                if Hub.State.LastEndKey == key and os.clock() - (Hub.State.LastEndAt or 0) < 2 then
+                    return -- نفس النتيجة وصلت مرتين
+                end
+                Hub.State.LastEndKey, Hub.State.LastEndAt = key, os.clock()
                 if data.result == "Victory" then
                     Hub.State.StoryWins += 1
                     Hub.State.StoryLosses[key] = nil
                 else
-                    Hub.State.StoryLosses[key] = true
+                    Hub.State.StoryLosses[key] = (Hub.State.StoryLosses[key] or 0) + 1
+                end
+                -- إحصائيات الجوائز
+                local st = Hub.State.StoryStats[key]
+                if not st then
+                    st = { fights = 0, wins = 0, seconds = 0, items = {} }
+                    Hub.State.StoryStats[key] = st
+                end
+                st.fights += 1
+                if data.result == "Victory" then st.wins += 1 end
+                if type(data.stats) == "table" and tonumber(data.stats.seconds) then
+                    st.seconds += tonumber(data.stats.seconds)
+                end
+                local rw = data.rewards
+                if type(rw) == "table" then
+                    if type(rw.items) == "table" then
+                        for _, it in ipairs(rw.items) do
+                            if type(it) == "table" and it.item then
+                                st.items[it.item] = (st.items[it.item] or 0) + (tonumber(it.count) or 1)
+                            end
+                        end
+                    end
+                    -- نحدث الكولداون فوراً بدل ما ننتظر StateChanged
+                    if rw.cooldownEnds and rw.stage and Hub.State.Server then
+                        Hub.State.Server.StoryCooldowns = Hub.State.Server.StoryCooldowns or {}
+                        Hub.State.Server.StoryCooldowns[rw.stage] = rw.cooldownEnds
+                    end
                 end
                 Hub.State.LastStoryResult = key .. " -> " .. tostring(data.result)
                 print("[Hub] Story result:", key, data.result)
@@ -864,7 +957,7 @@ if TowerEventRemote then
         end
 
         if not Hub.Running or not Hub.Settings.AutoTower or not Hub.Settings.AutoNextFloor then return end
-        if Hub.Settings.AutoStoryBoss or Hub.Settings.AutoStory or Hub.Settings.AutoRaid then return end
+        if not towerAllowed() then return end
         if kind ~= "Cleared" or type(data) ~= "table" then return end
         if data.id ~= Hub.Settings.TowerMode or data.paused or not data.intermission then return end
 
@@ -872,11 +965,21 @@ if TowerEventRemote then
         if key == lastNextKey then return end
         lastNextKey = key
         task.delay(1.5, function()
-            if Hub.Running and Hub.Settings.AutoTower and not Hub.Settings.AutoStoryBoss then
+            if Hub.Running and Hub.Settings.AutoTower and towerAllowed() then
                 towerAction("Next", data.id)
             end
         end)
     end))
+end
+
+-- البرج مسموح إذا ما فيه ستوري/رايد/بوس محتاج الوقت
+towerAllowed = function()
+    if Hub.State.Busy or Hub.Settings.AutoStoryBoss then return false end
+    if Hub.Settings.AutoStory then
+        if not (Hub.Settings.TowerInDowntime and Hub.State.StoryIdle) then return false end
+    end
+    if Hub.Settings.AutoRaid and not Hub.State.RaidWaiting then return false end
+    return true
 end
 
 -- البرج: يبدأ إذا ما فيه نشاط، مع backoff لو السيرفر ما يرد
@@ -885,9 +988,7 @@ table.insert(Hub.Threads, task.spawn(function()
         local fails = Hub.State.TowerStartFails
         local quiet = 6 + math.min(fails * 10, 120)
         if Hub.Settings.AutoTower
-            and not Hub.Settings.AutoStoryBoss
-            and not Hub.Settings.AutoStory
-            and not Hub.Settings.AutoRaid
+            and towerAllowed()
             and not inBattle()
             and os.clock() - Hub.State.LastTowerEvent > quiet
             and os.clock() - Hub.State.LastBattleEvent > 6 then
@@ -904,7 +1005,7 @@ table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
         if Hub.Settings.AutoStoryBoss and not Hub.Settings.AutoStory
             and StoryFightRemote and not inBattle() and bossReady() then
-            if Hub.Settings.AutoTower and not Hub.State.TowerPaused then
+            if towerActive() then
                 towerPause()
                 task.wait(2)
             end
@@ -922,21 +1023,34 @@ end))
 -- Story Farm: كل الستيجات الجاهزة، عالم عالم
 table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
-        if not (Hub.Settings.AutoStory and StoryFightRemote) or inBattle() then
-            Hub.State.StoryIdle = true
+        local place, stage, diff
+        if Hub.Settings.AutoStory and StoryFightRemote then
+            place, stage, diff = pickStoryJob()
+        end
+        Hub.State.StoryIdle = (place == nil)
+
+        if not (Hub.Settings.AutoStory and StoryFightRemote) then
             task.wait(2)
+        elseif place and Hub.State.Busy then
+            task.wait(1)
+        elseif place and inBattle() then
+            -- معركة شغالة (غالباً البرج): نوقف البرج وننتظر نهاية المعركة
+            if towerActive() then
+                Hub.State.TowerYield = true
+                towerPause()
+            end
+            local t0 = os.clock()
+            while Hub.Running and inBattle() and os.clock() - t0 < 45 do task.wait(0.5) end
+            task.wait(1)
         else
-            local place, stage, diff = pickStoryJob()
-            Hub.State.StoryIdle = (place == nil)
-            if place and Hub.State.Busy then
-                task.wait(2)
-            elseif not place then
+            if not place then
                 local n = nextStoryReadyIn()
                 Hub.State.LastStoryResult = n and ("all on cooldown, next in " .. math.ceil(n) .. "s")
                     or "nothing ready"
-                task.wait(5)
+                task.wait(3)
             else
-                if Hub.Settings.AutoTower and not Hub.State.TowerPaused then
+                if towerActive() then
+                    Hub.State.TowerYield = true
                     towerPause()
                     task.wait(2)
                 end
@@ -969,7 +1083,7 @@ table.insert(Hub.Threads, task.spawn(function()
                         if Hub.State.LastBattleEvent == startedBefore then
                             Hub.State.StorySkipUntil[stage] = os.clock() + 60
                         end
-                        task.wait(2) -- مهلة لوصول StateChanged بالكولداون الجديد
+                        humanWait(1) -- مهلة + تأخير عشوائي بين المعارك
                     end
                 end
                 Hub.State.Busy = false
@@ -986,7 +1100,7 @@ table.insert(Hub.Threads, task.spawn(function()
             task.wait(2)
         else
             Hub.State.Busy = true
-            if Hub.Settings.AutoTower and not Hub.State.TowerPaused then
+            if towerActive() then
                 towerPause()
                 task.wait(2)
             end
@@ -1004,7 +1118,9 @@ table.insert(Hub.Threads, task.spawn(function()
                 if not ok or res == false or type(res) == "string" then
                     Hub.State.LastRaidResult = "refused: " .. txt
                     Hub.State.Busy = false
+                    Hub.State.RaidWaiting = true -- البرج ياخذ الوقت لين المحاولة الجاية
                     task.wait(Hub.Settings.RaidRetryDelay)
+                    Hub.State.RaidWaiting = false
                 else
                     Hub.State.LastRaidResult = "fighting (" .. txt .. ")"
                     local t0 = os.clock()
@@ -1015,7 +1131,13 @@ table.insert(Hub.Threads, task.spawn(function()
                     while Hub.Running and inBattle() do task.wait(0.5) end
                     local noBattle = Hub.State.LastBattleEvent == startedBefore
                     Hub.State.Busy = false
-                    task.wait(noBattle and Hub.Settings.RaidRetryDelay or 3)
+                    if noBattle then
+                        Hub.State.RaidWaiting = true
+                        task.wait(Hub.Settings.RaidRetryDelay)
+                        Hub.State.RaidWaiting = false
+                    else
+                        humanWait(1)
+                    end
                 end
             end
         end
@@ -1074,6 +1196,7 @@ table.insert(Hub.Threads, task.spawn(function()
                 .. " | World: " .. tostring(Hub.State.CurrentPlace or "?"),
             "Tower: " .. onOff(S.AutoTower) .. " | " .. S.TowerMode
                 .. " | " .. (Hub.State.TowerPaused and "Paused" or "Running")
+                .. (towerAllowed() and "" or " (yield)")
                 .. " | " .. Hub.State.TowerFloorText,
             "Boss: " .. onOff(S.AutoStoryBoss) .. " | " .. S.TargetBoss
                 .. " (" .. S.TargetDifficulty .. ") | " .. (bossReady() and "Ready" or "Cooldown"),
