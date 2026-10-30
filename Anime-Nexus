@@ -1,0 +1,3667 @@
+--[[
+    NAXX Hub  |  Anime Nexus RNG (Halloween)
+    -----------------------------------------
+    Save this file as  workspace/NAXX.lua  in your executor folder, then run it.
+    It re-runs by itself after every teleport (lobby <-> portal / stages).
+    Menu key: RightShift.  Running it again closes the old copy.
+
+    Tabs
+      Farm     : Story (any world / act), Raids, Auto Replay, Skip Wave
+      Bosses   : Halloween (doors, quests), Boss Rush, Gem Rush, Invasion, Hollow Hunt, Rogue, SBR
+      Portal   : Pumpkin Portals (open + join), smart card picks, Portal Arcade minigames, potions
+      Roll     : Auto Roll, Haunted Tower, Infinity Tower
+      Items    : potions, shops, crafting
+      Misc     : quests, NPC questlines, unit index, server tools, the game's own Auto settings
+      Evolve   : Merlyn evolutions (reads YOUR units and items, farms what is missing, evolves)
+      Collect  : hidden items in the map (fingers, chests, horseshoes, reishi, dragon balls, ghosts)
+      Teleport : every NPC (search by name) and every area / world
+      Tracker  : live currencies
+      Settings : themes, configs, Autostart
+]]
+
+-- ==================== Obsidian UI ====================
+-- Uses deividcomsono/Obsidian (modern successor to LinoriaLib with search, icons, mobile support & themes)
+-- Exposes a Rayfield-compatible API (Rayfield:CreateWindow / Tab:CreateToggle / ...) so the rest of the
+-- script keeps working unchanged. Call Rayfield:LoadConfiguration() once, after all tabs are built.
+
+-- ===== Settings =====
+local SCRIPT_NAME   = "Anime Nexus RNG"
+local CONFIG_FOLDER = "AnimeNexusRNG"
+local OBSIDIAN_REF  = "main"
+local FALLBACK_REF  = "main"
+
+local RUN_GROUPS = { ["Farm"] = true, ["Bosses"] = true, ["Roll"] = true }
+
+-- ===== Only one copy at a time: running the script again closes the old one first =====
+local GENV = (getgenv and getgenv()) or _G
+if type(GENV.NAXX_Unload) == "function" then
+    pcall(GENV.NAXX_Unload)
+    GENV.NAXX_Unload = nil
+    task.wait(0.5)
+end
+
+-- ===== Services =====
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+local UserInputService = game:GetService("UserInputService")
+
+-- ===== Library loading (safe) =====
+local function fetch(ref, path)
+    local url = "https://raw.githubusercontent.com/deividcomsono/Obsidian/" .. ref .. "/" .. path
+    local ok, result = pcall(function()
+        return loadstring(game:HttpGet(url))()
+    end)
+    if ok and result then return result end
+    return nil, tostring(result)
+end
+
+local function loadLib(path)
+    local lib, err = fetch(OBSIDIAN_REF, path)
+    if lib then return lib end
+    if FALLBACK_REF ~= OBSIDIAN_REF then
+        warn("[UI] " .. path .. " failed on " .. OBSIDIAN_REF .. ", trying " .. FALLBACK_REF .. ": " .. err)
+        lib, err = fetch(FALLBACK_REF, path)
+        if lib then return lib end
+    end
+    error("[UI] Could not load " .. path .. ": " .. tostring(err), 0)
+end
+
+local Library      = loadLib("Library.lua")
+local ThemeManager = loadLib("addons/ThemeManager.lua")
+local SaveManager  = loadLib("addons/SaveManager.lua")
+local LOptions, LToggles = Library.Options, Library.Toggles
+GENV.NAXX_Unload = function()
+    pcall(function() Library:Unload() end)
+end
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+
+-- ===== Window size (fits small screens / mobile) =====
+local function getViewport()
+    local cam = workspace.CurrentCamera
+    if cam then return cam.ViewportSize end
+    return Vector2.new(1280, 900)
+end
+
+local vp = getViewport()
+local IS_MOBILE = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local WIN_W = math.floor(math.clamp(vp.X - 40, 480, 760))
+local WIN_H = math.floor(math.clamp(vp.Y - 80, 360, 820))
+
+-- ===== Rayfield shim state =====
+local Rayfield = {}
+Rayfield.Loading = false
+Rayfield.Flags = {}
+
+local LWindow
+local uiCounter = 0
+local runToggles = {}
+local unloadHandlers = {}
+
+local ignoreIdx = { "MenuKeybind", "SpySettingChange", "AutoStartOnLoad" }
+
+local function nextIdx(flag)
+    if flag and flag ~= "" then return flag end
+    uiCounter = uiCounter + 1
+    local id = "_ui" .. uiCounter
+    table.insert(ignoreIdx, id)
+    return id
+end
+
+local function safe(fn, name)
+    if type(fn) ~= "function" then return function() end end
+    return function(...)
+        local ok, err = pcall(fn, ...)
+        if not ok then warn("[UI] callback error (" .. tostring(name) .. "): " .. tostring(err)) end
+    end
+end
+
+local function decimalsOf(step)
+    step = tonumber(step) or 1
+    if step >= 1 then return 0 end
+    local s = tostring(step)
+    local dot = s:find("%.")
+    return dot and (#s - dot) or 0
+end
+
+local function toList(value)
+    if type(value) ~= "table" then
+        return value ~= nil and { value } or {}
+    end
+    -- Rayfield style list {"a", "b"} (this was the bug: defaults were treated as a set and lost)
+    if value[1] ~= nil then
+        local list = {}
+        for _, v in ipairs(value) do list[#list + 1] = v end
+        return list
+    end
+    local list = {}
+    for k, v in pairs(value) do
+        if v == true then table.insert(list, k) end
+    end
+    table.sort(list, function(a, b) return tostring(a) < tostring(b) end)
+    return list
+end
+
+local function toSet(list)
+    local set = {}
+    if type(list) == "table" then
+        for _, v in ipairs(list) do set[v] = true end
+    elseif list ~= nil then
+        set[list] = true
+    end
+    return set
+end
+
+-- ===== Grouping =====
+local GroupOf = {
+    ["Auto Farm"] = "Farm", ["Kaiju Raid"] = "Farm",
+    ["Custom Boss"] = "Bosses", ["Secret Bosses"] = "Bosses", ["Halloween"] = "Bosses",
+    ["Roll & Tower"] = "Roll", ["Infinity Tower"] = "Roll",
+    ["Prestige Tower"] = "Roll", ["Endless Raid"] = "Roll",
+    ["Potions"] = "Items", ["Crafting"] = "Items", ["Raid Shop"] = "Items", ["Candy Shop"] = "Items",
+    ["NPCs"] = "Misc", ["Quests"] = "Misc", ["Server & Rejoin"] = "Misc",
+    ["Tracker"] = "Tracker",
+    ["Boss Modes"] = "Bosses",
+    ["Pumpkin Portal"] = "Portal",
+    ["Game Settings"] = "Misc",
+    ["Quest Helper"] = "Evolve",
+    ["Collector"] = "Collect",
+    ["Teleport"] = "Teleport",
+}
+local GroupIcons = {
+    ["Farm"] = "swords",
+    ["Bosses"] = "skull",
+    ["Roll"] = "dice-5",
+    ["Items"] = "flask-conical",
+    ["Misc"] = "compass",
+    ["Tracker"] = "activity",
+    ["Portal"] = "ghost",
+    ["Evolve"] = "sparkles",
+    ["Collect"] = "search",
+    ["Teleport"] = "map-pin",
+}
+local DEFAULT_ICON = "layout-grid"
+
+local Groups = {}
+
+local function getGroup(groupName)
+    local g = Groups[groupName]
+    if g then return g end
+    local tab = LWindow:AddTab(groupName, GroupIcons[groupName] or DEFAULT_ICON)
+    g = { Tab = tab, Left = 0, Right = 0 }
+    Groups[groupName] = g
+    return g
+end
+
+local SHORT = {
+    ["Auto Claim All Quests (Daily/Raid/Update/Event)"] = "Auto Claim Quests",
+    ["Custom Priority (best first, comma separated)"] = "Custom Order",
+    ["Auto Questline (start, claim, farm next step)"] = "Auto Questline",
+    ["Auto Trick or Treat (walks to every door)"] = "Auto Trick/Treat",
+    ["Unit to evolve (yours, closest first)"] = "Unit",
+    ["Auto Claim Haunted Tower Milestones"] = "Auto Claim HTower",
+    ["Convert Stat Chips (ConvertChips)"] = "Convert Chips",
+    ["Auto Open & Join Portal (lobby)"] = "Auto Portal",
+    ["Start Selected Evolution Quest"] = "Start Evo Quest",
+    ["Start NPC Trial (If Available)"] = "NPC Trial",
+    ["Halloween Auto Mode (NWHwAuto)"] = "HW Auto Mode",
+    ["Claim Halloween Portal Rewards"] = "Claim Portal",
+    ["Claim All Halloween Quests Now"] = "Claim HW Quests",
+    ["Auto Start Haunted Tower Floor"] = "Auto HTower",
+    ["Open Shanks / Jujutsu Shop UI"] = "Shanks/JJK Shop",
+    ["Start / Accept NPC Questline"] = "Start NPC Quest",
+    ["Print Door Info (F9 console)"] = "Door Info (F9)",
+    ["Open Pumpkin / Candy Shop UI"] = "Candy Shop",
+    ["Claim Current NPC Quest Step"] = "Claim NPC Step",
+    ["Claim All Unit Index Rewards"] = "Claim Index",
+    ["Story Skip (selected world)"] = "Story Skip",
+    ["Shop Item Key (BuyRaidShop)"] = "Shop Item Key",
+    ["Auto Claim Halloween Quests"] = "Auto HW Quests",
+    ["Auto Claim Halloween Portal"] = "Auto Claim Portal",
+    ["Open Halloween Quest Board"] = "HW Quest Board",
+    ["Start Trial (trial steps)"] = "Trial",
+    ["Start Evolution Questline"] = "Start Evo",
+    ["Auto Retry (game setting)"] = "Auto Retry",
+    ["Auto Next (game setting)"] = "Auto Next",
+    ["Start Selected Raid Once"] = "Start Raid",
+    ["Open Hueco Mundo Shop UI"] = "Hueco Shop",
+    ["Open Halloween Portal UI"] = "Portal UI",
+    ["Auto Use Selected Potion"] = "Auto Use Item",
+    ["Auto Start Selected Raid"] = "Auto Raid",
+    ["Auto Replay on Stage End"] = "Auto Replay",
+    ["Teleport to AFK Chamber"] = "TP AFK Chamber",
+    ["Open & Join Portal Once"] = "Open Portal",
+    ["Copy Recipe (to verify)"] = "Copy Recipe",
+    ["Claim All Tower Rewards"] = "Claim Tower",
+    ["Auto Roll (RequestRoll)"] = "Auto Roll",
+    ["Auto Farm Missing Items"] = "Auto Farm Items",
+    ["Use Selected Item Once"] = "Use Item",
+    ["Sync & Refresh Tracker"] = "Refresh",
+    ["Start Tower Floor Once"] = "Start Floor",
+    ["Start Story Stage Once"] = "Start Stage",
+    ["Show units I don't own"] = "Show All Units",
+    ["Show Last Cards / Pick"] = "Last Cards",
+    ["Select Evolution Quest"] = "Evo Quest",
+    ["Halloween Portal: Next"] = "Portal Next",
+    ["Auto Start Tower Floor"] = "Auto Tower",
+    ["Auto Start Story Stage"] = "Auto Story",
+    ["Auto Evolve when ready"] = "Auto Evolve",
+    ["Rejoin Current Server"] = "Rejoin",
+    ["Pause / Resume Potion"] = "Pause Potion",
+    ["Open Haunted Tower UI"] = "HTower UI",
+    ["Auto Claim Unit Index"] = "Auto Index",
+    ["Select Potion / Item"] = "Item",
+    ["Select NPC Questline"] = "NPC Quest",
+    ["Print Room List (F9)"] = "Room List (F9)",
+    ["Knock All Doors Once"] = "Knock Doors",
+    ["Item Farm Difficulty"] = "Farm Diff",
+    ["Claim All Quests Now"] = "Claim Quests",
+    ["Server Auto-Upgrade"] = "Auto Upgrade",
+    ["Open Raid Quests UI"] = "Raid Quests",
+    ["Auto Vote Skip Wave"] = "Auto Skip Wave",
+    ["Open Night Shop UI"] = "Night Shop",
+    ["Haunted Tower Mode"] = "HTower Mode",
+    ["Check Requirements"] = "Check",
+    ["Open Raid Shop UI"] = "Raid Shop",
+    ["Open Raid Menu UI"] = "Raid Menu",
+    ["Start Challenge Once"] = "Start Challenge",
+    ["Unit to evolve (Merlyn)"] = "Unit",
+    ["Evolution Quest"] = "Evo Quest",
+    ["Step I am on"] = "My Step",
+    ["Farm This Step"] = "Farm Step",
+    ["Stop Farming"] = "Stop Farm",
+    ["Card Priority (best first, comma separated)"] = "Custom Order",
+    ["Auto Start Hollow Hunt"] = "Auto Hollow Hunt",
+    ["Start Hollow Hunt Once"] = "Hollow Hunt",
+    ["Auto Start Boss Rush"] = "Auto Boss Rush",
+    ["Start Boss Rush Once"] = "Boss Rush",
+    ["Auto Start Gem Rush"] = "Auto Gem Rush",
+    ["Start Gem Rush Once"] = "Gem Rush",
+    ["Auto Start Invasion"] = "Auto Invasion",
+    ["Start Invasion Once"] = "Invasion",
+    ["Auto Start SBR Race"] = "Auto SBR Race",
+    ["Start SBR Race Once"] = "SBR Race",
+    ["Auto Start Rogue"] = "Auto Rogue",
+    ["Start Rogue Once"] = "Rogue",
+    ["Leave Portal Room"] = "Leave Room",
+    ["Show Last Result"] = "Last Result",
+    ["Start Questline"] = "Start",
+    ["Claim Step"] = "Claim",
+    ["Auto-start farm on load"] = "Autostart on load",
+    ["Auto Start Story"] = "Auto Story",
+    ["Pick Card 1"] = "Card 1",
+    ["Pick Card 2"] = "Card 2",
+    ["Pick Card 3"] = "Card 3",
+    ["Cards (inside portal)"] = "Cards",
+    ["Crafting & Chips"] = "Craft",
+    ["Evolution Questlines"] = "Evo Quests",
+    ["Evolution Quests"] = "Evo",
+    ["Halloween & Night Shops"] = "Shops",
+    ["Halloween Event"] = "Event",
+    ["Halloween Portal"] = "Portal",
+    ["Haunted Tower"] = "HTower",
+    ["Infinity Tower & Castle"] = "Tower",
+    ["Live Currency & Event Tracker"] = "Live",
+    ["Match Controls"] = "Match",
+    ["Merlyn Evolve"] = "Merlyn",
+    ["Next / Retry"] = "Retry",
+    ["Open Portal (lobby)"] = "Open",
+    ["RNG Roll & Units"] = "Roll",
+    ["Raid & Event Shops"] = "Shops",
+    ["Raids & Portals"] = "Raids",
+    ["Server & Codes"] = "Server",
+    ["Special NPC Questlines"] = "NPC",
+    ["Special Questlines"] = "NPC",
+    ["Story & Stages"] = "Story",
+    ["Unit Index & Warp"] = "Index",
+    ["Use Items & Potions"] = "Items",
+    ["Auto Quests"] = "Quests",
+}
+-- short label for the UI (long names made the window too wide)
+local function L(name)
+    name = tostring(name or "")
+    return SHORT[name] or name
+end
+
+-- ===== Tab class =====
+local TabClass = {}
+TabClass.__index = TabClass
+
+function TabClass:_box()
+    if self._tabbox then return self._tabbox end
+    local g = self._group
+    if g.Left <= g.Right then
+        self._tabbox = g.Tab:AddLeftTabbox(self.Name)
+        self._side = "Left"
+    else
+        self._tabbox = g.Tab:AddRightTabbox(self.Name)
+        self._side = "Right"
+    end
+    return self._tabbox
+end
+
+function TabClass:_target()
+    if not self._current then
+        self._current = self:_box():AddTab("Main")
+    end
+    local g = self._group
+    g[self._side] = g[self._side] + 1
+    return self._current
+end
+
+function TabClass:CreateSection(name)
+    self._current = self:_box():AddTab(L(name or "Section"))
+    local tab = self
+    return {
+        Set = function(_, newName)
+            tab._current = tab:_box():AddTab(L(newName))
+        end,
+    }
+end
+
+function TabClass:CreateDivider()
+    self:_target():AddDivider()
+    return { Set = function() end }
+end
+
+function TabClass:CreateLabel(text)
+    local label = self:_target():AddLabel(tostring(text or ""), true)
+    return {
+        Set = function(_, newText) label:SetText(tostring(newText)) end,
+    }
+end
+
+-- A paragraph = a title line + a fixed number of line labels.
+-- (one big label does not grow when its text changes, so long text got cut)
+function TabClass:CreateParagraph(opts)
+    opts = opts or {}
+    local target = self:_target()
+    local maxLines = tonumber(opts.Lines) or 14
+    -- find the real TextLabel behind a library label (to colour it)
+    local function textObj(lbl, marker)
+        local obj = rawget(lbl, "TextLabel") or rawget(lbl, "Label") or rawget(lbl, "Instance")
+        if typeof(obj) == "Instance" and obj:IsA("TextLabel") then return obj end
+        local root = (gethui and gethui()) or game:GetService("CoreGui")
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text == marker then return d end
+        end
+        return nil
+    end
+    uiCounter = uiCounter + 1
+    local tmark = "\1title" .. uiCounter
+    local title = target:AddLabel(tmark, true)
+    local titleObj = textObj(title, tmark)
+    local lines, objs = {}, {}
+    for i = 1, maxLines do
+        local mark = "\1line" .. uiCounter .. "_" .. i
+        lines[i] = target:AddLabel(mark, true)
+        objs[i] = textObj(lines[i], mark)
+    end
+    local GREEN, RED, WHITE = Color3.fromRGB(90, 230, 120), Color3.fromRGB(240, 95, 95), nil
+
+    local cur = { Title = opts.Title, Content = opts.Content }
+    local function render()
+        title:SetText("[ " .. tostring(cur.Title or "") .. " ]")
+        if titleObj then
+            local t = tostring(cur.Title or ""):upper()
+            titleObj.TextColor3 = t:find("READY") and GREEN or (t:find("MISSING") and RED or titleObj.TextColor3)
+        end
+        local WRAP = tonumber(opts.Wrap) or 48
+        local list = {}
+        for line in (tostring(cur.Content or "") .. "\n"):gmatch("(.-)\n") do
+            if #line <= WRAP then
+                list[#list + 1] = line
+            else
+                -- cut at spaces; continuation lines keep the colour of the first one
+                local prefix = line:sub(1, 2)
+                local tag = (prefix == "OK" or prefix == "--") and prefix or "  "
+                local rest, first, parts = line, true, 0
+                while #rest > 0 and parts < 3 do
+                    local chunk
+                    if #rest <= WRAP or parts == 2 then
+                        chunk, rest = rest, ""
+                    else
+                        local cut = rest:sub(1, WRAP):match("^.*() ")
+                        if cut and cut > 1 then
+                            chunk, rest = rest:sub(1, cut - 1), rest:sub(cut + 1)
+                        else
+                            chunk, rest = rest:sub(1, WRAP), rest:sub(WRAP + 1)
+                        end
+                    end
+                    list[#list + 1] = first and chunk or (tag .. "   " .. chunk)
+                    first, parts = false, parts + 1
+                end
+            end
+        end
+        if #list > maxLines then
+            list[maxLines] = "... (" .. (#list - maxLines + 1) .. " more)"
+        end
+        for i = 1, maxLines do
+            local text = list[i] or " "
+            local colourTag = text:sub(1, 2)
+            if text:sub(3, 5) == "   " and (colourTag == "OK" or colourTag == "--") and text:sub(1, 5) ~= text then
+                -- continuation: hide the tag but keep the colour
+                text = "     " .. text:sub(6)
+            end
+            local ok = pcall(function() lines[i]:SetText(text) end)
+            local o = objs[i]
+            if o then
+                pcall(function()
+                    if not ok then o.Text = text end -- fallback: write the text straight into the label
+                    if WHITE == nil then WHITE = o.TextColor3 end
+                    local t2 = colourTag
+                    o.TextColor3 = (t2 == "OK" and GREEN) or (t2 == "--" and RED) or WHITE
+                end)
+            end
+        end
+    end
+    render()
+    return {
+        Set = function(_, o)
+            o = o or {}
+            cur.Title = o.Title or cur.Title
+            cur.Content = o.Content or cur.Content
+            render()
+        end,
+    }
+end
+
+function TabClass:CreateButton(opts)
+    opts = opts or {}
+    local cb = safe(opts.Callback, opts.Name)
+    local btn = self:_target():AddButton({
+        Text = L(opts.Name or "Button"),
+        Func = cb,
+        DoubleClick = opts.DoubleClick or false,
+        Tooltip = opts.Tooltip,
+    })
+    return {
+        Set = function(_, newText) if btn and btn.SetText then btn:SetText(tostring(newText)) end end,
+    }
+end
+
+function TabClass:CreateToggle(opts)
+    opts = opts or {}
+    local idx = nextIdx(opts.Flag)
+    local cb = safe(opts.Callback, opts.Name)
+    local obj = { CurrentValue = opts.CurrentValue == true, Type = "Toggle" }
+
+    self:_target():AddToggle(idx, {
+        Text = L(opts.Name or idx),
+        Default = obj.CurrentValue,
+        Tooltip = opts.Tooltip,
+        Callback = function(v)
+            obj.CurrentValue = v
+            -- while the config loads, run toggles stay off unless Auto-start is enabled
+            if v and Rayfield.Loading and runToggles[idx]
+                and not (LToggles.AutoStartOnLoad and LToggles.AutoStartOnLoad.Value) then
+                return
+            end
+            cb(v)
+        end,
+    })
+
+    if opts.Flag and (opts.Run == true or (opts.Run == nil and RUN_GROUPS[self.Group])) then
+        runToggles[idx] = true
+    end
+
+    function obj:Set(v) LToggles[idx]:SetValue(v == true) end
+    if opts.Flag then Rayfield.Flags[opts.Flag] = obj end
+    return obj
+end
+
+function TabClass:CreateSlider(opts)
+    opts = opts or {}
+    local idx = nextIdx(opts.Flag)
+    local cb = safe(opts.Callback, opts.Name)
+    local range = opts.Range or { 0, 100 }
+    local obj = { CurrentValue = opts.CurrentValue or range[1], Type = "Slider" }
+
+    self:_target():AddSlider(idx, {
+        Text = L(opts.Name or idx),
+        Default = obj.CurrentValue,
+        Min = range[1],
+        Max = range[2],
+        Rounding = decimalsOf(opts.Increment),
+        Suffix = opts.Suffix and (" " .. tostring(opts.Suffix)) or nil,
+        Tooltip = opts.Tooltip,
+        Callback = function(v)
+            obj.CurrentValue = v
+            cb(v)
+        end,
+    })
+
+    function obj:Set(v) LOptions[idx]:SetValue(v) end
+    if opts.Flag then Rayfield.Flags[opts.Flag] = obj end
+    return obj
+end
+
+function TabClass:CreateDropdown(opts)
+    opts = opts or {}
+    local idx = nextIdx(opts.Flag)
+    local cb = safe(opts.Callback, opts.Name)
+    local multi = opts.MultipleOptions == true
+    local values = opts.Options or {}
+    local obj = { CurrentOption = toList(opts.CurrentOption), Options = values, Type = "Dropdown" }
+
+    self:_target():AddDropdown(idx, {
+        Text = L(opts.Name or idx),
+        Values = values,
+        Multi = multi,
+        Searchable = #values > 8,
+        AllowNull = true,
+        Tooltip = opts.Tooltip,
+        Callback = function(v)
+            obj.CurrentOption = toList(v)
+            cb(obj.CurrentOption)
+        end,
+    })
+
+    local dd = LOptions[idx]
+    if #obj.CurrentOption > 0 then
+        if multi then dd:SetValue(toSet(obj.CurrentOption)) else dd:SetValue(obj.CurrentOption[1]) end
+    end
+
+    function obj:Set(v)
+        local list = toList(v)
+        if multi then dd:SetValue(toSet(list)) else dd:SetValue(list[1]) end
+    end
+    function obj:Refresh(newValues)
+        obj.Options = newValues or {}
+        dd:SetValues(obj.Options)
+    end
+    if opts.Flag then Rayfield.Flags[opts.Flag] = obj end
+    return obj
+end
+
+function TabClass:CreateInput(opts)
+    opts = opts or {}
+    local idx = nextIdx(opts.Flag)
+    local cb = safe(opts.Callback, opts.Name)
+    local obj = { CurrentValue = tostring(opts.CurrentValue or ""), Type = "Input" }
+
+    self:_target():AddInput(idx, {
+        Text = L(opts.Name or idx),
+        Default = obj.CurrentValue,
+        Placeholder = opts.PlaceholderText or "",
+        Numeric = opts.Numeric or false,
+        Finished = true,
+        ClearTextOnFocus = false,
+        Tooltip = opts.Tooltip,
+        Callback = function(v)
+            obj.CurrentValue = v
+            cb(v)
+            if opts.RemoveTextAfterFocusLost and v ~= "" then
+                task.defer(function() LOptions[idx]:SetValue("") end)
+            end
+        end,
+    })
+
+    function obj:Set(v) LOptions[idx]:SetValue(tostring(v)) end
+    if opts.Flag then Rayfield.Flags[opts.Flag] = obj end
+    return obj
+end
+
+function TabClass:CreateKeybind(opts)
+    opts = opts or {}
+    local idx = nextIdx(opts.Flag)
+    local cb = safe(opts.Callback, opts.Name)
+    local obj = { CurrentKeybind = opts.CurrentKeybind or "None", Type = "Keybind" }
+
+    self:_target():AddLabel(L(opts.Name or idx)):AddKeyPicker(idx, {
+        Default = obj.CurrentKeybind,
+        Mode = opts.HoldToInteract and "Hold" or "Toggle",
+        Text = L(opts.Name or idx),
+        Callback = function(state) cb(state) end,
+        ChangedCallback = function(key)
+            obj.CurrentKeybind = typeof(key) == "EnumItem" and key.Name or tostring(key)
+        end,
+    })
+
+    function obj:Set(key) LOptions[idx]:SetValue({ key, opts.HoldToInteract and "Hold" or "Toggle" }) end
+    if opts.Flag then Rayfield.Flags[opts.Flag] = obj end
+    return obj
+end
+
+function TabClass:CreateColorPicker(opts)
+    opts = opts or {}
+    local idx = nextIdx(opts.Flag)
+    local cb = safe(opts.Callback, opts.Name)
+    local obj = { Color = opts.Color or Color3.new(1, 1, 1), Type = "ColorPicker" }
+
+    self:_target():AddLabel(L(opts.Name or idx)):AddColorPicker(idx, {
+        Default = obj.Color,
+        Title = tostring(opts.Name or idx),
+        Callback = function(c)
+            obj.Color = c
+            cb(c)
+        end,
+    })
+
+    function obj:Set(c) LOptions[idx]:SetValueRGB(c) end
+    if opts.Flag then Rayfield.Flags[opts.Flag] = obj end
+    return obj
+end
+
+-- ===== Window =====
+local WindowClass = {}
+WindowClass.__index = WindowClass
+
+function WindowClass:CreateTab(name, _icon)
+    name = tostring(name or "Tab")
+    local groupName = GroupOf[name] or name
+    local tab = setmetatable({
+        Name = name,
+        Group = groupName,
+        _group = getGroup(groupName),
+    }, TabClass)
+    return tab
+end
+
+function Rayfield:CreateWindow(opts)
+    opts = opts or {}
+    LWindow = Library:CreateWindow({
+        Title = opts.Name or SCRIPT_NAME,
+        Footer = opts.LoadingSubtitle or ("by " .. Players.LocalPlayer.Name),
+        Icon = opts.IconId,
+        Center = true,
+        AutoShow = true,
+        Resizable = true,
+        ShowCustomCursor = not IS_MOBILE,
+        NotifySide = "Right",
+        MobileButtonsSide = "Left",
+        Size = UDim2.fromOffset(WIN_W, WIN_H),
+    })
+    return setmetatable({}, WindowClass)
+end
+
+function Rayfield:Notify(opts)
+    opts = opts or {}
+    Library:Notify({
+        Title = tostring(opts.Title or SCRIPT_NAME),
+        Description = tostring(opts.Content or ""),
+        Time = opts.Duration or 5,
+    })
+end
+
+function Rayfield:OnUnload(fn)
+    table.insert(unloadHandlers, fn)
+end
+
+function Rayfield:Destroy()
+    Library:Unload()
+end
+
+local configLoaded = false
+
+function Rayfield:LoadConfiguration()
+    if configLoaded then return end
+    configLoaded = true
+    assert(LWindow, "[UI] Call Rayfield:CreateWindow before LoadConfiguration")
+
+    local settingsTab = LWindow:AddTab("UI Settings", "settings")
+    local menu = settingsTab:AddLeftGroupbox("Menu", "wrench")
+
+    menu:AddLabel("NAXX Hub - RightShift opens/closes the menu", true)
+    menu:AddToggle("AutoStartOnLoad", {
+        Text = "Autostart on load",
+        Default = false,
+        Tooltip = "When off, farm / boss / roll toggles load as OFF even if they were ON in the config",
+    })
+    menu:AddDivider()
+    menu:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
+        Default = "RightShift",
+        NoUI = true,
+        Text = "Menu keybind",
+    })
+    menu:AddButton({
+        Text = "Unload",
+        DoubleClick = true,
+        Func = function() Library:Unload() end,
+    })
+    Library.ToggleKeybind = LOptions.MenuKeybind
+
+    local prefFile = CONFIG_FOLDER .. "/autostart.txt"
+    local function readPref()
+        local ok, txt = pcall(function() return isfile and isfile(prefFile) and readfile(prefFile) end)
+        return ok and txt == "1"
+    end
+    local function writePref(v)
+        pcall(function()
+            if makefolder and isfolder and not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+            if writefile then writefile(prefFile, v and "1" or "0") end
+        end)
+    end
+    LToggles.AutoStartOnLoad:SetValue(readPref())
+    LToggles.AutoStartOnLoad:OnChanged(function() writePref(LToggles.AutoStartOnLoad.Value) end)
+
+    ThemeManager:SetLibrary(Library)
+    SaveManager:SetLibrary(Library)
+    SaveManager:IgnoreThemeSettings()
+    SaveManager:SetIgnoreIndexes(ignoreIdx)
+    ThemeManager:SetFolder(CONFIG_FOLDER)
+    SaveManager:SetFolder(CONFIG_FOLDER .. "/" .. tostring(game.PlaceId))
+    SaveManager:BuildConfigSection(settingsTab)
+    ThemeManager:ApplyToTab(settingsTab)
+
+    Rayfield.Loading = true
+    pcall(function() SaveManager:LoadAutoloadConfig() end)
+    Rayfield.Loading = false
+
+    if not LToggles.AutoStartOnLoad.Value then
+        for idx in pairs(runToggles) do
+            local t = LToggles[idx]
+            if t and t.Value then t:SetValue(false) end
+        end
+    end
+end
+
+Library:OnUnload(function()
+    for _, fn in ipairs(unloadHandlers) do
+        pcall(fn)
+    end
+end)
+
+-- ==================== end of UI ====================
+
+-- ==================== Game Integration (Anime Nexus RNG : HALLOWEEN) ====================
+local LocalPlayer = Players.LocalPlayer
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+-- the game keeps its data in ITS _G (P2_NWState, P2_HTowerState...). The executor has a separate _G.
+local GG = (getrenv and getrenv()._G) or _G
+
+local function fireRemote(name, ...)
+    local r = Remotes:FindFirstChild(name)
+    if r and r:IsA("RemoteEvent") then
+        pcall(r.FireServer, r, ...)
+    end
+end
+
+-- InvokeServer with a timeout so a loop never hangs if the server does not answer
+local INVOKE_TIMEOUT = 5
+local function invokeRemote(name, ...)
+    local r = Remotes:FindFirstChild(name)
+    if not (r and r:IsA("RemoteFunction")) then return nil end
+    local args, done, result = table.pack(...), false, nil
+    task.spawn(function()
+        local ok, res = pcall(r.InvokeServer, r, table.unpack(args, 1, args.n))
+        if ok then result = res end
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < INVOKE_TIMEOUT do task.wait() end
+    return result
+end
+
+-- One loop per key: turning a toggle off/on quickly never leaves two loops running
+local State
+local Gen = {}
+local function loop(key, enabled, interval, body)
+    Gen[key] = (Gen[key] or 0) + 1
+    if not enabled then return end
+    local my = Gen[key]
+    task.spawn(function()
+        while State.Running and Gen[key] == my do
+            local ok, err = pcall(body)
+            if not ok then warn("[" .. key .. "] " .. tostring(err)) end
+            if Gen[key] ~= my then break end
+            task.wait(type(interval) == "function" and interval() or interval)
+        end
+    end)
+end
+
+-- false until the UI is built: stops dropdown defaults from firing remotes at startup
+local Booted = false
+
+local function nwAction(payload)
+    fireRemote("NWAction", payload)
+end
+
+State = {
+    Running = true,
+    StoryMap = "InnovationCity",
+    StoryAct = "Act1",
+    StoryDifficulty = "Normal",
+    AutoStory = false,
+    SelectedRaid = "RaidBizarreTown",
+    AutoRaid = false,
+    AutoVoteSkip = false,
+    AutoReplay = false,
+    GameSpeed = "1x",
+    HwAuto = false,
+    AutoHwQuests = false,
+    AutoTrickOrTreat = false,
+    AutoRoll = false,
+    RollDelay = 0.6,
+    HTowerCategory = "Normal",
+    HTowerFloor = 1,
+    AutoHTower = false,
+    AutoHTowerClaim = false,
+    AutoInfTower = false,
+    SelectedPotion = "LuckPotion",
+    AutoUsePotion = false,
+    SelectedShopKey = "",
+    ShopBuyQty = 1,
+    AutoClaimAllQuests = false,
+    SelectedNpcQuest = "WhitebeardQuest",
+    SelectedEvoQuest = "GRIMMJOWEVOLUTION",
+    AntiAFK = true,
+}
+
+Rayfield:OnUnload(function()
+    State.Running = false
+end)
+
+local Window = Rayfield:CreateWindow({
+    Name = "NAXX Hub | Anime Nexus RNG",
+    LoadingSubtitle = "Halloween update",
+})
+
+-- ====================================================================
+-- 1. FARM GROUP ("Auto Farm" & "Kaiju Raid")
+-- ====================================================================
+local AutoFarmTab = Window:CreateTab("Auto Farm")
+AutoFarmTab:CreateSection("Story & Stages")
+
+-- verified with BossSpy: NWAction {type="StorySkip", op="Start", map=...} (from NWStoryAE)
+local STORY_MAPS = {
+    "InnovationCity", "CursedHighSchool", "BizarreTown", "Priestella", "Leaf_Village", "Namek",
+    "CapsuleCorp", "CapeCanaveral", "ChuninExams", "FinalValley", "Shibuya_City", "Shinjuku",
+    "HollowWorld", "Hueco_Mundo", "GoteiBarracks", "EisenbernCastle", "Vahrwelt", "SlimeIsland",
+    "RoswaalMansion", "CloverVillage", "FairyForest", "BullsHideout", "FinalSelection",
+    "HiddenGround", "PublicSafetyHQ", "TrainingGrounds",
+}
+
+AutoFarmTab:CreateDropdown({
+    Name = "Story World",
+    Options = STORY_MAPS,
+    CurrentOption = { "InnovationCity" },
+    Flag = "StoryMapDropdown",
+    Callback = function(opt)
+        State.StoryMap = opt[1] or "InnovationCity"
+    end,
+})
+
+-- verified with RemoteScan: StageEnd:FireServer("StartMatch", act, diff, "Go", map)
+AutoFarmTab:CreateDropdown({
+    Name = "Act",
+    Options = { "Act1", "Act2", "Act3", "Act4", "Act5", "Act6", "Infinite" },
+    CurrentOption = { "Act1" },
+    Flag = "StoryActDropdown",
+    Callback = function(opt) State.StoryAct = opt[1] or "Act1" end,
+})
+
+AutoFarmTab:CreateDropdown({
+    Name = "Difficulty",
+    Options = { "Normal", "Nightmare" },
+    CurrentOption = { "Normal" },
+    Flag = "StoryDiffDropdown",
+    Callback = function(opt) State.StoryDifficulty = opt[1] or "Normal" end,
+})
+
+local function startStory()
+    fireRemote("StageEnd", "StartMatch", State.StoryAct, State.StoryDifficulty, "Go", State.StoryMap)
+end
+
+AutoFarmTab:CreateButton({ Name = "Start Story Stage Once", Callback = startStory })
+
+AutoFarmTab:CreateToggle({
+    Name = "Auto Start Story Stage",
+    CurrentValue = false,
+    Flag = "AutoStoryToggle",
+    Callback = function(v)
+        State.AutoStory = v
+        loop("AutoStory", v, 5, startStory)
+    end,
+})
+
+-- verified with BossSpy: NWAction {type="StorySkip", op="Start", map=...}
+AutoFarmTab:CreateButton({
+    Name = "Story Skip (selected world)",
+    Callback = function()
+        nwAction({ type = "StorySkip", op = "Start", map = State.StoryMap })
+    end,
+})
+
+AutoFarmTab:CreateSection("Match Controls")
+
+AutoFarmTab:CreateToggle({
+    Name = "Auto Vote Skip Wave",
+    CurrentValue = false,
+    Flag = "AutoVoteSkipToggle",
+    Callback = function(v)
+        State.AutoVoteSkip = v
+        loop("AutoVoteSkip", v, 1.5, function()
+            fireRemote("StageEnd", "SkipWave") -- verified with Remote Spy
+        end)
+    end,
+})
+
+-- verified with RemoteScan: StageEnd "Replay" / "VoteYes"
+AutoFarmTab:CreateToggle({
+    Name = "Auto Replay on Stage End",
+    CurrentValue = false,
+    Flag = "AutoReplayToggle",
+    Callback = function(v)
+        State.AutoReplay = v
+        loop("AutoReplay", v, 3, function()
+            fireRemote("StageEnd", "Replay")
+        end)
+    end,
+})
+
+AutoFarmTab:CreateToggle({
+    Name = "Auto Vote Yes",
+    CurrentValue = false,
+    Flag = "AutoVoteYesToggle",
+    Callback = function(v)
+        loop("AutoVoteYes", v, 2, function()
+            fireRemote("StageEnd", "VoteYes")
+        end)
+    end,
+})
+
+AutoFarmTab:CreateDropdown({
+    Name = "Game Speed",
+    Options = { "1x", "2x", "3x" },
+    CurrentOption = { "1x" },
+    Flag = "GameSpeedDropdown",
+    Callback = function(opt)
+        State.GameSpeed = opt[1] or "1x"
+        local num = tonumber(State.GameSpeed:match("%d+")) or 1
+        if Booted then fireRemote("GameSpeed", num) end
+    end,
+})
+
+AutoFarmTab:CreateButton({
+    Name = "Teleport to AFK Chamber",
+    Callback = function()
+        fireRemote("TPAFK")
+    end,
+})
+
+local RaidTab = Window:CreateTab("Kaiju Raid")
+RaidTab:CreateSection("Raids & Portals")
+
+-- verified with RemoteScan: StageEnd "StartMatch" / "PrepareRaid" (act, diff, nil, raidKey)
+State.RaidAct = "Act1"
+State.RaidDiff = "Normal"
+
+RaidTab:CreateDropdown({
+    Name = "Select Raid",
+    Options = {
+        "RaidBizarreTown", "RaidCursedHighSchool", "RaidLasNoches", "RaidLeafVillage", "RaidMadara",
+        "RaidMarineford", "RaidPriestella", "RaidVahrwelt", "RaidVahrweltCoop",
+    },
+    CurrentOption = { "RaidBizarreTown" },
+    Flag = "SelectedRaidDropdown",
+    Callback = function(opt)
+        State.SelectedRaid = opt[1] or "RaidBizarreTown"
+    end,
+})
+
+RaidTab:CreateDropdown({
+    Name = "Raid Act",
+    Options = { "Act1", "Act2", "Act3", "Act4", "Act5", "Act6", "Infinite" },
+    CurrentOption = { "Act1" },
+    Flag = "RaidActDropdown",
+    Callback = function(opt) State.RaidAct = opt[1] or "Act1" end,
+})
+
+RaidTab:CreateDropdown({
+    Name = "Raid Difficulty",
+    Options = { "Normal", "Nightmare" },
+    CurrentOption = { "Normal" },
+    Flag = "RaidDiffDropdown",
+    Callback = function(opt) State.RaidDiff = opt[1] or "Normal" end,
+})
+
+local function startRaid()
+    -- the game sends PrepareRaid from the lobby and StartMatch on the raid server; sending both is harmless
+    fireRemote("StageEnd", "PrepareRaid", State.RaidAct, State.RaidDiff, nil, State.SelectedRaid)
+    task.wait(0.5)
+    fireRemote("StageEnd", "StartMatch", State.RaidAct, State.RaidDiff, nil, State.SelectedRaid)
+end
+
+RaidTab:CreateButton({ Name = "Start Selected Raid Once", Callback = startRaid })
+
+RaidTab:CreateToggle({
+    Name = "Auto Start Selected Raid",
+    CurrentValue = false,
+    Flag = "AutoRaidToggle",
+    Callback = function(v)
+        State.AutoRaid = v
+        loop("AutoRaid", v, 6, startRaid)
+    end,
+})
+
+RaidTab:CreateButton({
+    Name = "Open Raid Menu UI",
+    Callback = function()
+        if GG.P2_OpenRaidUI then
+            pcall(GG.P2_OpenRaidUI, State.SelectedRaid)
+        else
+            Rayfield:Notify({ Title = "Raid UI", Content = "Raid UI handler not loaded yet." })
+        end
+    end,
+})
+
+-- ====================================================================
+-- 2. BOSSES GROUP ("Halloween", "Custom Boss", "Secret Bosses")
+-- ====================================================================
+local HwTab = Window:CreateTab("Halloween")
+HwTab:CreateSection("Halloween Event")
+
+HwTab:CreateToggle({
+    Name = "Halloween Auto Mode (NWHwAuto)",
+    CurrentValue = false,
+    Flag = "HwAutoToggle",
+    Callback = function(v)
+        State.HwAuto = v
+        fireRemote("NWHwAuto", v)
+    end,
+})
+
+HwTab:CreateToggle({
+    Name = "Auto Claim Halloween Quests",
+    CurrentValue = false,
+    Flag = "AutoHwQuestsToggle",
+    Callback = function(v)
+        State.AutoHwQuests = v
+        loop("AutoHwQuests", v, 10, function()
+            fireRemote("NWHwQuestBoard", "sync")
+            task.wait(0.5)
+            fireRemote("NWHwQuestBoard", "claimall")
+        end)
+    end,
+})
+
+-- Trick or Treat: the game says "Walk up to the door", so the server checks distance.
+-- We walk (teleport) to every door in workspace.NW_HalloweenIsland.NWDoorBlocks, press its prompt
+-- if it has one, and send NWAction {type="TrickOrTreat", op="Knock", door=...} like the game does.
+local function getDoors()
+    local island = workspace:FindFirstChild("NW_HalloweenIsland")
+    local folder = island and island:FindFirstChild("NWDoorBlocks")
+    if not folder then return {} end
+    local doors = folder:GetChildren()
+    table.sort(doors, function(a, b)
+        local na, nb = tonumber(a.Name), tonumber(b.Name)
+        if na and nb then return na < nb end
+        return a.Name < b.Name
+    end)
+    return doors
+end
+
+local function doorCFrame(door)
+    if door:IsA("BasePart") then return door.CFrame end
+    if door:IsA("Model") then return door:GetPivot() end
+    local part = door:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.CFrame
+end
+
+-- doors are named Block_Door_1 .. Block_Door_7 -> the door id is the number at the end
+local function doorId(door, index)
+    return door:GetAttribute("Door") or door:GetAttribute("Id") or door:GetAttribute("Index")
+        or tonumber(door.Name:match("(%d+)$")) or index
+end
+
+local function knockAllDoors()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return 0 end
+    local doors = getDoors()
+    if #doors == 0 then return 0 end
+    local back = hrp.CFrame
+    nwAction({ type = "TrickOrTreat", op = "Sync" })
+    for index, door in ipairs(doors) do
+        if not State.Running then break end
+        local cf = doorCFrame(door)
+        if cf then
+            -- stand 4 studs in front of the door, facing it
+            local pos = cf.Position + cf.LookVector * 4
+            hrp.CFrame = CFrame.new(pos, cf.Position)
+            task.wait(0.6)
+            local prompt = door:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt and fireproximityprompt then pcall(fireproximityprompt, prompt) end
+            nwAction({ type = "TrickOrTreat", op = "Knock", door = doorId(door, index) })
+            task.wait(0.2)
+            nwAction({ type = "TrickOrTreat", op = "Knock", door = door.Name }) -- in case the server wants the name
+            task.wait(1.2)
+        end
+    end
+    hrp.CFrame = back
+    return #doors
+end
+
+HwTab:CreateButton({
+    Name = "Knock All Doors Once",
+    Callback = function()
+        task.spawn(function()
+            local n = knockAllDoors()
+            Rayfield:Notify({ Title = "Trick or Treat", Content = n > 0 and ("Knocked " .. n .. " doors")
+                or "No doors found (go to Halloween Island first)" })
+        end)
+    end,
+})
+
+HwTab:CreateToggle({
+    Name = "Auto Trick or Treat (walks to every door)",
+    CurrentValue = false,
+    Flag = "AutoTrickOrTreatToggle",
+    Callback = function(v)
+        State.AutoTrickOrTreat = v
+        loop("AutoTrickOrTreat", v, 20, knockAllDoors)
+    end,
+})
+
+HwTab:CreateButton({
+    Name = "Print Door Info (F9 console)",
+    Callback = function()
+        for index, door in ipairs(getDoors()) do
+            local attrs = {}
+            for k, val in pairs(door:GetAttributes()) do attrs[#attrs + 1] = k .. "=" .. tostring(val) end
+            print(string.format("[Door %d] %s (%s) id=%s | %s", index, door.Name, door.ClassName,
+                tostring(doorId(door, index)), table.concat(attrs, ", ")))
+        end
+    end,
+})
+
+HwTab:CreateButton({
+    Name = "Open Halloween Quest Board",
+    Callback = function()
+        if GG.P2_OpenHwQuestBoard then
+            pcall(GG.P2_OpenHwQuestBoard)
+        else
+            fireRemote("NWHwQuestBoard", "sync")
+        end
+    end,
+})
+
+HwTab:CreateButton({
+    Name = "Claim All Halloween Quests Now",
+    Callback = function()
+        fireRemote("NWHwQuestBoard", "claimall")
+        Rayfield:Notify({ Title = "Halloween", Content = "Sent Claim All request!" })
+    end,
+})
+
+-- all verified with RemoteScan: NWAction {type=<mode>, op="Start"}
+local SecretBossTab = Window:CreateTab("Secret Bosses")
+SecretBossTab:CreateSection("Invasion")
+SecretBossTab:CreateButton({
+    Name = "Start Invasion Once",
+    Callback = function() nwAction({ type = "Invasion", op = "Start" }) end,
+})
+
+SecretBossTab:CreateToggle({
+    Name = "Auto Start Invasion",
+    CurrentValue = false,
+    Flag = "AutoInvasionToggle",
+    Callback = function(v)
+        loop("AutoInvasion", v, 6, function() nwAction({ type = "Invasion", op = "Start" }) end)
+    end,
+})
+
+SecretBossTab:CreateSection("Hollow Hunt")
+SecretBossTab:CreateButton({
+    Name = "Start Hollow Hunt Once",
+    Callback = function() nwAction({ type = "HollowHunt", op = "Start" }) end,
+})
+
+SecretBossTab:CreateToggle({
+    Name = "Auto Start Hollow Hunt",
+    CurrentValue = false,
+    Flag = "AutoHollowHuntToggle",
+    Callback = function(v)
+        loop("AutoHollowHunt", v, 6, function() nwAction({ type = "HollowHunt", op = "Start" }) end)
+    end,
+})
+
+SecretBossTab:CreateSection("Rogue")
+SecretBossTab:CreateButton({
+    Name = "Start Rogue Once",
+    Callback = function() nwAction({ type = "Rogue", op = "Start" }) end,
+})
+
+SecretBossTab:CreateToggle({
+    Name = "Auto Start Rogue",
+    CurrentValue = false,
+    Flag = "AutoRogueToggle",
+    Callback = function(v)
+        loop("AutoRogue", v, 6, function() nwAction({ type = "Rogue", op = "Start" }) end)
+    end,
+})
+
+SecretBossTab:CreateSection("SBR Race")
+SecretBossTab:CreateButton({
+    Name = "Start SBR Race Once",
+    Callback = function() nwAction({ type = "SBRRace", op = "Start" }) end,
+})
+
+SecretBossTab:CreateToggle({
+    Name = "Auto Start SBR Race",
+    CurrentValue = false,
+    Flag = "AutoSBRRaceToggle",
+    Callback = function(v)
+        loop("AutoSBRRace", v, 6, function() nwAction({ type = "SBRRace", op = "Start" }) end)
+    end,
+})
+
+
+local CustomBossTab = Window:CreateTab("Custom Boss")
+CustomBossTab:CreateSection("Halloween Portal")
+
+-- verified with RemoteScan: NWHwPortal:InvokeServer("claim" / "next" / "state")
+CustomBossTab:CreateButton({
+    Name = "Claim Halloween Portal Rewards",
+    Callback = function() task.spawn(invokeRemote, "NWHwPortal", "claim") end,
+})
+
+CustomBossTab:CreateButton({
+    Name = "Halloween Portal: Next",
+    Callback = function() task.spawn(invokeRemote, "NWHwPortal", "next") end,
+})
+
+CustomBossTab:CreateToggle({
+    Name = "Auto Claim Halloween Portal",
+    CurrentValue = false,
+    Flag = "AutoHwPortalClaimToggle",
+    Callback = function(v)
+        loop("AutoHwPortalClaim", v, 10, function() invokeRemote("NWHwPortal", "claim") end)
+    end,
+})
+
+CustomBossTab:CreateButton({
+    Name = "Open Halloween Portal UI",
+    Callback = function()
+        if GG.P2_HwPortalTop then pcall(GG.P2_HwPortalTop) end
+    end,
+})
+
+-- Boss modes verified with BossSpy (NWAction)
+local BossModesTab = Window:CreateTab("Boss Modes")
+BossModesTab:CreateSection("Boss Rush")
+
+BossModesTab:CreateButton({
+    Name = "Start Boss Rush Once",
+    Callback = function()
+        nwAction({ type = "BossRush", op = "Start" })
+    end,
+})
+
+BossModesTab:CreateToggle({
+    Name = "Auto Start Boss Rush",
+    CurrentValue = false,
+    Flag = "AutoBossRushToggle",
+    Callback = function(v)
+        loop("AutoBossRush", v, 5, function()
+            nwAction({ type = "BossRush", op = "Start" })
+        end)
+    end,
+})
+
+BossModesTab:CreateSection("Challenge")
+
+-- verified with RemoteScan: NWAction {type="Challenge", op="Start", period=...}; period value not known yet
+-- verified with PortalSpy: NWChallengeInfo answer uses period = "daily" / "weekly"
+State.ChallengePeriod = "daily"
+BossModesTab:CreateDropdown({
+    Name = "Challenge Period",
+    Options = { "daily", "weekly" },
+    CurrentOption = { "daily" },
+    Flag = "ChallengePeriodDropdown",
+    Callback = function(opt) State.ChallengePeriod = opt[1] or "daily" end,
+})
+
+BossModesTab:CreateButton({
+    Name = "Start Challenge Once",
+    Callback = function()
+        nwAction({ type = "Challenge", op = "Start", period = State.ChallengePeriod })
+    end,
+})
+
+BossModesTab:CreateSection("Gem Rush")
+
+BossModesTab:CreateButton({
+    Name = "Start Gem Rush Once",
+    Callback = function()
+        nwAction({ type = "GemRush", op = "Start", mods = {} })
+    end,
+})
+
+BossModesTab:CreateToggle({
+    Name = "Auto Start Gem Rush",
+    CurrentValue = false,
+    Flag = "AutoGemRushToggle",
+    Callback = function(v)
+        loop("AutoGemRush", v, 5, function()
+            nwAction({ type = "GemRush", op = "Start", mods = {} })
+        end)
+    end,
+})
+
+
+-- ====================================================================
+-- PUMPKIN PORTAL (Halloween) — verified with PortalSpy / Cobalt
+--   lobby : NWHwPortalRoom:InvokeServer("create", tier, {mods}) -> ("list") -> ("join", roomId)
+--   portal: NWRogue:FireServer({op="Pick", i=1..3})   (cards)
+--           ChangeSetting "AutoCards" / "AutoRetry" / "AutoNext"
+--           StageEnd OnClientEvent "ShowResults" (end of game)
+--   potions: NWPotHold:InvokeServer(potionName)  (pause / resume)
+-- ====================================================================
+local LOBBY_PLACE  = 85962582687820
+local PORTAL_PLACE = 135920189096514
+local IN_LOBBY  = game.PlaceId == LOBBY_PLACE
+local IN_PORTAL = game.PlaceId == PORTAL_PLACE
+
+State.PortalTier = 3
+State.PortalMods = {}
+State.CardMode = "Game Auto Cards"
+State.LastCardEvent = "none yet"
+State.LastRoomList = nil
+
+local PortalTab = Window:CreateTab("Pumpkin Portal")
+
+-- ---------- lobby: open + join ----------
+PortalTab:CreateSection("Open Portal (lobby)")
+
+PortalTab:CreateLabel(IN_LOBBY and "Place: LOBBY" or (IN_PORTAL and "Place: PORTAL" or "Place: match"))
+
+PortalTab:CreateDropdown({
+    Name = "Portal Tier",
+    Options = { "1", "2", "3", "4", "5", "6" },
+    CurrentOption = { "3" },
+    Flag = "PortalTierDropdown",
+    Callback = function(opt) State.PortalTier = tonumber(opt[1]) or 3 end,
+})
+
+PortalTab:CreateDropdown({
+    Name = "Modifiers",
+    Options = { "RestlessDead", "DreadFog", "BloodMoon", "WraithRage", "CrackedCrystal", "WitchCurse", "GraveLords" },
+    CurrentOption = {},
+    MultipleOptions = true,
+    Flag = "PortalModsDropdown",
+    Callback = function(opt) State.PortalMods = opt or {} end,
+})
+
+local function roomIdFrom(list)
+    if type(list) ~= "table" then return nil end
+    local rooms = list.rooms or list.list or list.Rooms or list
+    if type(rooms) ~= "table" then return nil end
+    local me, myId = LocalPlayer.Name, LocalPlayer.UserId
+    local best
+    for key, r in pairs(rooms) do
+        if type(r) == "table" then
+            local id = r.id or r.Id or r.room or tonumber(key)
+            local owner = r.owner or r.host or r.Owner or r.Host or r.ownerId or r.hostId or r.userId or r.name
+            local mine = owner == me or owner == myId or tostring(owner) == tostring(myId)
+            if not mine and type(r.players) == "table" then
+                for _, p in pairs(r.players) do
+                    if p == me or p == myId or (type(p) == "table" and (p.name == me or p.userId == myId)) then mine = true end
+                end
+            end
+            if id and mine then return id end
+            if id and (not best or (tonumber(id) or 0) > (tonumber(best) or 0)) then best = id end
+        end
+    end
+    return best -- fallback: newest room
+end
+
+local function openAndJoinPortal()
+    if not IN_LOBBY then return false, "not in lobby" end
+    local res = invokeRemote("NWHwPortalRoom", "create", State.PortalTier, State.PortalMods)
+    if type(res) == "table" and res.ok == false then return false, tostring(res.msg or "create failed") end
+    task.wait(1)
+    local list = invokeRemote("NWHwPortalRoom", "list")
+    State.LastRoomList = list
+    local id = roomIdFrom(list)
+    if not id then return false, "room id not found (press Print Room List)" end
+    local j = invokeRemote("NWHwPortalRoom", "join", id)
+    return type(j) == "table" and j.ok ~= false, "join " .. tostring(id)
+end
+
+PortalTab:CreateButton({
+    Name = "Open & Join Portal Once",
+    Callback = function()
+        task.spawn(function()
+            local ok, msg = openAndJoinPortal()
+            Rayfield:Notify({ Title = "Portal", Content = (ok and "OK: " or "Failed: ") .. tostring(msg) })
+        end)
+    end,
+})
+
+PortalTab:CreateToggle({
+    Name = "Auto Open & Join Portal (lobby)",
+    CurrentValue = false,
+    Flag = "AutoPortalToggle",
+    Run = false,
+    Callback = function(v)
+        loop("AutoPortal", v and IN_LOBBY, 15, function() openAndJoinPortal() end)
+    end,
+})
+
+PortalTab:CreateButton({
+    Name = "Leave Portal Room",
+    Callback = function() task.spawn(invokeRemote, "NWHwPortalRoom", "leave") end,
+})
+
+PortalTab:CreateButton({
+    Name = "Print Room List (F9)",
+    Callback = function()
+        task.spawn(function()
+            local list = invokeRemote("NWHwPortalRoom", "list")
+            local function dump(v, d)
+                d = d or 0
+                if type(v) ~= "table" then return tostring(v) end
+                if d > 4 then return "{...}" end
+                local t = {}
+                for k, x in pairs(v) do t[#t + 1] = tostring(k) .. "=" .. dump(x, d + 1) end
+                return "{" .. table.concat(t, ", ") .. "}"
+            end
+            print("[Portal] room list: " .. dump(list))
+        end)
+    end,
+})
+
+-- ---------- inside the portal: cards ----------
+-- verified with PortalSpy:
+--   server -> NWRogue("open", {options = {{id, name, rarity, up, down}, x3}, seconds = 6, auto = <timeout pick>, wave})
+--   you    -> NWRogue:FireServer({op = "Pick", i = 1..3})
+--   server -> NWRogue("result", {how = "player"/"time", title, index}) and NWRogue("state", {...})
+PortalTab:CreateSection("Cards (inside portal)")
+
+-- all 21 cards (CardDump). Presets, best first. Score = damage gain / extra enemy HP, then the downside.
+local CARD_PRESETS = {
+    -- most damage; accepts risky downsides (unit HP drain stops at 25%)
+    ["Max Damage"] = "BloodPact, Overclock, Berserk, GlassCrystal, Annihilation, Greed, GoldenAge, Adrenaline, Erosion, Tailwind, Bounty, QuickHands, Ascension, Weaken, PowerSurge, TimeWarp, Sharpened, Mud, Repair, Fortify, Frenzy",
+    -- avoids cards that make enemies hit harder or hurt the crystal (good for hard portals)
+    ["Safe"] = "Overclock, Annihilation, BloodPact, Adrenaline, Ascension, Erosion, Greed, GoldenAge, Bounty, QuickHands, PowerSurge, Weaken, TimeWarp, Sharpened, Mud, Fortify, Repair, Tailwind, GlassCrystal, Berserk, Frenzy",
+    -- Overclock / Annihilation also give extra Candy & Coins
+    ["Candy Farm"] = "Overclock, Annihilation, BloodPact, Berserk, GlassCrystal, Greed, GoldenAge, Adrenaline, Erosion, Tailwind, Bounty, QuickHands, Ascension, Weaken, PowerSurge, TimeWarp, Sharpened, Mud, Repair, Fortify, Frenzy",
+}
+local DEFAULT_CARD_ORDER = CARD_PRESETS["Max Damage"]
+local RARITY_SCORE = { Legendary = 4, Mythic = 5, Secret = 6, Epic = 3, Rare = 2, Common = 1 }
+
+State.CardMode = "Priority List"
+State.CardOrder = {}
+State.LastCards = "none yet"
+State.LastPick = "-"
+
+local function parseOrder(text)
+    local list = {}
+    for id in tostring(text or ""):gmatch("[^,%s]+") do list[#list + 1] = id end
+    State.CardOrder = list
+end
+parseOrder(DEFAULT_CARD_ORDER)
+
+local function choose(options, autoIndex)
+    local mode = State.CardMode
+    if mode == "Always 1" then return 1 end
+    if mode == "Always 2" then return 2 end
+    if mode == "Always 3" then return 3 end
+    if mode == "Random" then return math.random(1, #options) end
+    if mode == "Priority List" then
+        for _, want in ipairs(State.CardOrder) do
+            for i, o in ipairs(options) do
+                if type(o) == "table" and (o.id == want or o.name == want) then return i end
+            end
+        end
+    end
+    -- "Best Rarity", or no card from the list: highest rarity wins, the game's own pick breaks ties
+    local best, bestScore = autoIndex or 1, -1
+    for i, o in ipairs(options) do
+        local sc = RARITY_SCORE[type(o) == "table" and o.rarity or ""] or 0
+        if i == autoIndex then sc = sc + 0.5 end
+        if sc > bestScore then best, bestScore = i, sc end
+    end
+    return best
+end
+
+PortalTab:CreateDropdown({
+    Name = "Card Mode",
+    Options = { "Priority List", "Best Rarity", "Random", "Always 1", "Always 2", "Always 3", "Game Auto Cards", "Off" },
+    CurrentOption = { "Priority List" },
+    Flag = "CardModeDropdown",
+    Callback = function(opt)
+        State.CardMode = opt[1] or "Priority List"
+        -- the game's own auto-pick must be off when the script picks
+        if Booted then fireRemote("ChangeSetting", "AutoCards", State.CardMode == "Game Auto Cards") end
+    end,
+})
+
+PortalTab:CreateDropdown({
+    Name = "Card Preset",
+    Options = { "Max Damage", "Safe", "Candy Farm", "Custom (box below)" },
+    CurrentOption = { "Max Damage" },
+    Flag = "CardPresetDropdown",
+    Callback = function(opt)
+        local preset = CARD_PRESETS[opt[1] or ""]
+        if preset then
+            parseOrder(preset)
+        elseif State.CustomCardOrder and State.CustomCardOrder ~= "" then
+            parseOrder(State.CustomCardOrder)
+        end
+    end,
+})
+
+-- after the config is loaded, turn the game's AutoCards on/off to match Card Mode
+task.spawn(function()
+    while not Booted do task.wait(0.5) end
+    task.wait(2)
+    fireRemote("ChangeSetting", "AutoCards", State.CardMode == "Game Auto Cards")
+end)
+
+PortalTab:CreateInput({
+    Name = "Custom Priority (best first, comma separated)",
+    CurrentValue = DEFAULT_CARD_ORDER,
+    PlaceholderText = DEFAULT_CARD_ORDER,
+    Flag = "CardOrderInput",
+    Callback = function(txt)
+        State.CustomCardOrder = txt
+        local presetOpt = Rayfield.Flags.CardPresetDropdown and Rayfield.Flags.CardPresetDropdown.CurrentOption[1]
+        if presetOpt == "Custom (box below)" and txt and txt ~= "" then parseOrder(txt) end
+    end,
+})
+
+PortalTab:CreateLabel("Custom Order works when Preset = Custom")
+
+do
+    local rogue = Remotes:FindFirstChild("NWRogue")
+    if rogue and rogue:IsA("RemoteEvent") then
+        rogue.OnClientEvent:Connect(function(kind, data)
+            if not State.Running then return end
+            if kind == "open" and type(data) == "table" and type(data.options) == "table" then
+                local names = {}
+                for i, o in ipairs(data.options) do
+                    names[#names + 1] = i .. "=" .. tostring(o.id) .. "(" .. tostring(o.rarity) .. ")"
+                end
+                State.LastCards = "wave " .. tostring(data.wave) .. ": " .. table.concat(names, "  ")
+                local mode = State.CardMode
+                if mode == "Off" or mode == "Game Auto Cards" then return end
+                local i = choose(data.options, tonumber(data.auto))
+                task.delay(0.8, function()
+                    fireRemote("NWRogue", { op = "Pick", i = i })
+                end)
+            elseif kind == "result" and type(data) == "table" then
+                State.LastPick = tostring(data.title) .. " (" .. tostring(data.how) .. ")"
+            end
+        end)
+    end
+end
+
+PortalTab:CreateButton({ Name = "Pick Card 1", Callback = function() fireRemote("NWRogue", { op = "Pick", i = 1 }) end })
+PortalTab:CreateButton({ Name = "Pick Card 2", Callback = function() fireRemote("NWRogue", { op = "Pick", i = 2 }) end })
+PortalTab:CreateButton({ Name = "Pick Card 3", Callback = function() fireRemote("NWRogue", { op = "Pick", i = 3 }) end })
+PortalTab:CreateButton({
+    Name = "Show Last Cards / Pick",
+    Callback = function()
+        Rayfield:Notify({ Title = "Cards", Content = State.LastCards .. "\nPicked: " .. State.LastPick, Duration = 10 })
+    end,
+})
+
+-- ---------- end of game ----------
+PortalTab:CreateSection("Next / Retry")
+
+PortalTab:CreateToggle({
+    Name = "Auto Retry (game setting)",
+    CurrentValue = false,
+    Flag = "PortalAutoRetryToggle",
+    Run = false,
+    Callback = function(v) if Booted then fireRemote("ChangeSetting", "AutoRetry", v) end end,
+})
+
+PortalTab:CreateToggle({
+    Name = "Auto Next (game setting)",
+    CurrentValue = false,
+    Flag = "PortalAutoNextToggle",
+    Run = false,
+    Callback = function(v) if Booted then fireRemote("ChangeSetting", "AutoNext", v) end end,
+})
+
+State.ResultsSeen = 0
+State.LastResult = "-"
+do
+    local se = Remotes:FindFirstChild("StageEnd")
+    if se and se:IsA("RemoteEvent") then
+        se.OnClientEvent:Connect(function(kind, info)
+            if not State.Running then return end
+            if kind == "ShowResults" and type(info) == "table" then
+                State.ResultsSeen = State.ResultsSeen + 1
+                State.LastResult = string.format("%s | %s | wave %s", tostring(info.Label or info.StageName),
+                    tostring(info.Result), tostring(info.Wave))
+            end
+        end)
+    end
+end
+
+PortalTab:CreateButton({
+    Name = "Show Last Result",
+    Callback = function()
+        Rayfield:Notify({ Title = "Results (" .. State.ResultsSeen .. ")", Content = State.LastResult, Duration = 8 })
+    end,
+})
+
+-- ---------- portal minigames (NWPortalMini) ----------
+-- verified from NWPortalMiniGame: the server sends the answer of every round
+--   you -> NWPortalMini:FireServer("start", kind) / "sync" / "cancel"
+--   server -> ("round", data) ("win", {wins, mult}) ("fail", {readyAt}) ("state", {wins, maxWins, mult, cd, playing})
+--   answers: lock "hit" t | cups "pick" ball | memory "answer" seq | whack "whack" t cell | quick "draw" t | bats "count" n
+PortalTab:CreateSection("Minigames")
+
+local MINI_KINDS = { "lock", "cups", "memory", "whack", "quick", "bats" }
+local MINI_NAMES = { lock = "Lock", cups = "Cups", memory = "Memory", whack = "Ghost Whack", quick = "Quick Draw", bats = "Bat Count" }
+local Mini = { busy = false, busyUntil = 0, wins = 0, maxWins = 0, mult = 1, cd = {}, last = "-", pick = "All" }
+-- the remote can appear late (the game itself waits up to 120 s for it)
+local miniRemote = Remotes:FindFirstChild("NWPortalMini")
+local function miniSend(...)
+    miniRemote = miniRemote or Remotes:FindFirstChild("NWPortalMini")
+    if miniRemote then pcall(miniRemote.FireServer, miniRemote, ...) end
+    Mini.sent = (Mini.sent or 0) + 1
+end
+local function now() return workspace:GetServerTimeNow() end
+local function waitUntil(t) while now() < t do task.wait() end end
+
+local function solveRound(kind, d)
+    local t0 = tonumber(d.t0) or now()
+    if kind == "lock" then
+        -- needle: v = (t - t0) * speed % 2, position = v (<= 1) or 2 - v; hit when position = zone centre c
+        local sp, c = tonumber(d.speed) or 1, tonumber(d.c) or 0.5
+        local base = math.max(0, (now() - t0) * sp) + 0.08 * sp
+        local k, best = math.floor(base / 2), nil
+        for kk = k, k + 2 do
+            for _, v in ipairs({ c, 2 - c }) do
+                local x = 2 * kk + v
+                if x >= base then
+                    local t = t0 + x / sp
+                    if not best or t < best then best = t end
+                end
+            end
+        end
+        task.spawn(function() waitUntil(best or now()) miniSend("hit", now()) end)
+    elseif kind == "cups" then
+        local ready = t0 + (tonumber(d.show) or 1.6) + #(type(d.seq) == "table" and d.seq or {}) * (tonumber(d.dur) or 0.4)
+        task.spawn(function() waitUntil(ready + 0.15) miniSend("pick", tonumber(d.ball) or 1) end)
+    elseif kind == "memory" then
+        local seq = type(d.seq) == "table" and d.seq or {}
+        local ready = t0 + #seq * (tonumber(d.flash) or 0.6)
+        local ans = {}
+        for i, v in ipairs(seq) do ans[i] = v end
+        task.spawn(function() waitUntil(ready + 0.2) miniSend("answer", ans) end)
+    elseif kind == "whack" then
+        for _, g in ipairs(type(d.ghosts) == "table" and d.ghosts or {}) do
+            local cell, at = g[1], tonumber(g[2])
+            if cell and at then
+                task.spawn(function() waitUntil(at + 0.06) miniSend("whack", now(), cell) end)
+            end
+        end
+    elseif kind == "quick" then
+        local go = tonumber(d.go) or (now() + 2)
+        task.spawn(function() waitUntil(go + 0.02) miniSend("draw", now()) end)
+    elseif kind == "bats" then
+        local ready = t0 + (tonumber(d.show) or 3)
+        task.spawn(function() waitUntil(ready + 0.15) miniSend("count", tonumber(d.count) or 5) end)
+    end
+end
+
+task.spawn(function()
+    miniRemote = miniRemote or Remotes:WaitForChild("NWPortalMini", 120)
+    if not (miniRemote and miniRemote:IsA("RemoteEvent")) then
+        Mini.last = "NWPortalMini remote not found here"
+        return
+    end
+    miniRemote.OnClientEvent:Connect(function(ev, d)
+        if not State.Running then return end
+        Mini.got = (Mini.got or 0) + 1
+        Mini.lastEv = tostring(ev)
+        d = type(d) == "table" and d or {}
+        if ev == "state" then
+            Mini.wins = tonumber(d.wins) or Mini.wins
+            Mini.maxWins = tonumber(d.maxWins) or Mini.maxWins
+            Mini.mult = tonumber(d.mult) or Mini.mult
+            Mini.cd = type(d.cd) == "table" and d.cd or Mini.cd
+            if not d.playing then Mini.busy = false end
+        elseif ev == "round" then
+            if State.MiniAuto or Mini.solveManual then solveRound(d.kind or Mini.kind, d) end
+        elseif ev == "win" then
+            Mini.busy = false
+            Mini.wins = tonumber(d.wins) or Mini.wins
+            Mini.mult = tonumber(d.mult) or Mini.mult
+            Mini.last = "WIN " .. tostring(MINI_NAMES[d.kind] or d.kind)
+        elseif ev == "fail" then
+            Mini.busy = false
+            if d.kind then Mini.cd[d.kind] = tonumber(d.readyAt) or (now() + 10) end
+            Mini.last = "FAIL " .. tostring(MINI_NAMES[d.kind] or d.kind)
+        end
+    end)
+end)
+
+PortalTab:CreateLabel("Portal Arcade works only INSIDE a portal")
+local MiniInfo = PortalTab:CreateParagraph({ Title = "Minigames", Content = "-", Lines = 3 })
+local function miniShow()
+    MiniInfo:Set({ Title = "Minigames", Content = string.format("Wins %d / %s | Bonus x%.2f\nLast: %s\nsent %d | got %d (%s)",
+        Mini.wins, Mini.maxWins > 0 and tostring(Mini.maxWins) or "?", Mini.mult, Mini.last,
+        Mini.sent or 0, Mini.got or 0, Mini.lastEv or "-") })
+end
+
+PortalTab:CreateDropdown({
+    Name = "Game",
+    Options = { "All", "lock", "cups", "memory", "whack", "quick", "bats" },
+    CurrentOption = { "All" },
+    Flag = "MiniGameDropdown",
+    Callback = function(opt) Mini.pick = opt[1] or "All" end,
+})
+
+local function nextMini()
+    local list = Mini.pick == "All" and MINI_KINDS or { Mini.pick }
+    for _, k in ipairs(list) do
+        if (tonumber(Mini.cd[k]) or 0) <= now() then return k end
+    end
+    return nil
+end
+
+-- the minigames belong to the Portal Keeper on Halloween Island: stand next to him first
+State.MiniTP = false
+local function keeperCFrame()
+    local k = workspace:FindFirstChild("NW_HwPortalKeeper")
+    if not k then return nil end
+    local ok, cf = pcall(function() return k:GetPivot() end)
+    return ok and cf or nil
+end
+local function goToKeeper()
+    if not State.MiniTP then return true end
+    local cf = keeperCFrame()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not (cf and hrp) then return false end
+    if (hrp.Position - cf.Position).Magnitude > 12 then
+        local spot = cf.Position + cf.LookVector * 6 + Vector3.new(0, 3, 0)
+        hrp.CFrame = CFrame.new(spot, cf.Position)
+        task.wait(1.2)
+    end
+    return true
+end
+
+-- open the game's own minigame window (_G.P2_OpenPortalMini, from NWPortalMiniGame): it sends "sync" itself
+local function openMiniWindow()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local gui = pg and pg:FindFirstChild("NW_PortalMiniGame")
+    if gui and gui.Enabled then return true end
+    local f = GG.P2_OpenPortalMini
+    if type(f) == "function" then
+        local ok, err = pcall(f)
+        if not ok then Mini.last = "open failed: " .. tostring(err) end
+        task.wait(0.8)
+        return ok
+    end
+    Mini.last = IN_PORTAL and "window not loaded yet, wait a bit" or "only inside a Pumpkin Portal"
+    return false
+end
+
+local function playMini()
+    local k = nextMini()
+    if not k then return false end
+    openMiniWindow()
+    Mini.kind, Mini.busy, Mini.busyUntil = k, true, os.clock() + 90
+    miniSend("start", k)
+    return true
+end
+
+PortalTab:CreateButton({
+    Name = "Open Minigames",
+    Callback = function()
+        task.spawn(function()
+            openMiniWindow()
+            task.wait(1)
+            miniShow()
+        end)
+    end,
+})
+
+PortalTab:CreateToggle({
+    Name = "TP to Portal Keeper",
+    CurrentValue = false,
+    Flag = "MiniTPToggle",
+    Run = false,
+    Callback = function(v) State.MiniTP = v end,
+})
+
+PortalTab:CreateButton({
+    Name = "Go to Portal Keeper",
+    Callback = function()
+        local old = State.MiniTP
+        State.MiniTP = true
+        local ok = goToKeeper()
+        State.MiniTP = old
+        if not ok then Rayfield:Notify({ Title = "Minigames", Content = "Portal Keeper not found" }) end
+    end,
+})
+
+PortalTab:CreateButton({
+    Name = "Play Once",
+    Callback = function()
+        Mini.solveManual = true
+        goToKeeper()
+        openMiniWindow()
+        miniSend("sync")
+        task.wait(0.8)
+        if not playMini() then Rayfield:Notify({ Title = "Minigames", Content = "All on cooldown" }) end
+        task.delay(2, miniShow)
+    end,
+})
+
+PortalTab:CreateToggle({
+    Name = "Auto Minigames",
+    CurrentValue = false,
+    Flag = "AutoMiniToggle",
+    Run = false,
+    Callback = function(v)
+        State.MiniAuto = v
+        -- Portal Arcade only exists inside the portal server (NWHwPortals.IsPortalPlace)
+        if v and not IN_PORTAL then
+            Mini.last = "waiting: starts when you are inside a portal"
+            miniShow()
+        end
+        loop("AutoMini", v and IN_PORTAL, 3, function()
+            if Mini.busy and os.clock() < Mini.busyUntil then miniShow() return end
+            Mini.busy = false
+            if Mini.maxWins > 0 and Mini.wins >= Mini.maxWins then miniShow() return end
+            goToKeeper()
+            openMiniWindow()
+            miniSend("sync")
+            task.wait(0.8)
+            playMini()
+            miniShow()
+        end)
+    end,
+})
+
+-- ---------- potions ----------
+PortalTab:CreateSection("Potions")
+
+State.HoldPotion = "GreaterLuckPotion"
+PortalTab:CreateDropdown({
+    Name = "Potion",
+    Options = { "LuckPotion", "GreaterLuckPotion", "UltraLuckPotion", "ExtraRollPotion" },
+    CurrentOption = { "GreaterLuckPotion" },
+    Flag = "HoldPotionDropdown",
+    Callback = function(opt) State.HoldPotion = opt[1] or "GreaterLuckPotion" end,
+})
+
+-- verified: NWPotHold:InvokeServer(name) pauses / resumes the potion timer
+PortalTab:CreateButton({
+    Name = "Pause / Resume Potion",
+    Callback = function()
+        task.spawn(function()
+            local r = invokeRemote("NWPotHold", State.HoldPotion)
+            Rayfield:Notify({ Title = "Potion", Content = State.HoldPotion .. ": " .. (type(r) == "table" and tostring(r.msg or r.ok) or tostring(r)) })
+        end)
+    end,
+})
+
+-- ---------- keep the script running after teleport ----------
+PortalTab:CreateSection("Teleport")
+PortalTab:CreateLabel("Save as workspace/NAXX.lua = auto re-run after teleport")
+
+do
+    local queued = false
+    LocalPlayer.OnTeleport:Connect(function(st)
+        if not State.Running then return end
+        if st == Enum.TeleportState.Started and not queued and queue_on_teleport then
+            queued = true
+            pcall(queue_on_teleport, [[
+                if isfile and isfile("NAXX.lua") then
+                    loadstring(readfile("NAXX.lua"))()
+                end
+            ]])
+        end
+    end)
+end
+
+-- ====================================================================
+-- 3. ROLL & TOWER GROUP ("Roll & Tower", "Infinity Tower")
+-- ====================================================================
+local RollTab = Window:CreateTab("Roll & Tower")
+RollTab:CreateSection("RNG Roll & Units")
+
+-- verified with BossSpy: RequestRoll {auto, reqId, count, fast}; reqId goes up by 1 every roll
+local rollReq = 100000
+
+RollTab:CreateToggle({
+    Name = "Auto Roll (RequestRoll)",
+    CurrentValue = false,
+    Flag = "AutoRollToggle",
+    Callback = function(v)
+        State.AutoRoll = v
+        loop("AutoRoll", v, function() return math.max(0.3, State.RollDelay) end, function()
+            rollReq = rollReq + 1
+            fireRemote("RequestRoll", { auto = true, reqId = rollReq, count = 1, fast = false })
+        end)
+    end,
+})
+
+RollTab:CreateSlider({
+    Name = "Roll Delay",
+    Range = { 0.3, 3.0 },
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = 0.6,
+    Flag = "RollDelaySlider",
+    Callback = function(v)
+        State.RollDelay = v
+    end,
+})
+
+RollTab:CreateToggle({
+    Name = "Server Auto-Upgrade",
+    CurrentValue = false,
+    Flag = "AutoUpgradeToggle",
+    Run = false,
+    Callback = function(v)
+        fireRemote("AutoUpgrade", v)
+    end,
+})
+
+RollTab:CreateSection("Haunted Tower")
+
+RollTab:CreateDropdown({
+    Name = "Haunted Tower Mode",
+    Options = { "Normal", "Pure" },
+    CurrentOption = { "Normal" },
+    Flag = "HTowerCatDropdown",
+    Callback = function(opt)
+        State.HTowerCategory = opt[1] or "Normal"
+        if Booted then nwAction({ type = "HauntedTower", op = "Cat", cat = State.HTowerCategory }) end
+    end,
+})
+
+RollTab:CreateSlider({
+    Name = "Target Floor",
+    Range = { 1, 100 },
+    Increment = 1,
+    Suffix = "Floor",
+    CurrentValue = 1,
+    Flag = "HTowerFloorSlider",
+    Callback = function(v)
+        State.HTowerFloor = v
+    end,
+})
+
+RollTab:CreateToggle({
+    Name = "Auto Start Haunted Tower Floor",
+    CurrentValue = false,
+    Flag = "AutoHTowerToggle",
+    Callback = function(v)
+        State.AutoHTower = v
+        loop("AutoHTower", v, 4, function()
+            nwAction({
+                type = "HauntedTower",
+                op = "Start",
+                floor = State.HTowerFloor,
+                cat = State.HTowerCategory,
+            })
+        end)
+    end,
+})
+
+RollTab:CreateToggle({
+    Name = "Auto Claim Haunted Tower Milestones",
+    CurrentValue = false,
+    Flag = "AutoHTowerClaimToggle",
+    Callback = function(v)
+        State.AutoHTowerClaim = v
+        loop("AutoHTowerClaim", v, 10, function()
+            nwAction({ type = "HauntedTower", op = "Sync" })
+            task.wait(1)
+            local st = GG.P2_HTowerState
+            if st and type(st.Milestones) == "table" then
+                for _, m in ipairs(st.Milestones) do
+                    if m.floor and not m.claimed then
+                        nwAction({ type = "HauntedTower", op = "Claim", floor = m.floor })
+                        task.wait(0.25)
+                    end
+                end
+            end
+        end)
+    end,
+})
+
+RollTab:CreateButton({
+    Name = "Open Haunted Tower UI",
+    Callback = function()
+        if GG.P2_OpenHauntedTower then
+            pcall(GG.P2_OpenHauntedTower)
+        else
+            nwAction({ type = "HauntedTower", op = "Sync" })
+        end
+    end,
+})
+
+local InfTowerTab = Window:CreateTab("Infinity Tower")
+InfTowerTab:CreateSection("Infinity Tower & Castle")
+
+-- verified with BossSpy: NWAction {type="Tower", op="Sync"} then {type="Tower", op="Start", floor=N}
+State.TowerFloor = 1
+
+InfTowerTab:CreateSlider({
+    Name = "Tower Floor",
+    Range = { 1, 200 },
+    Increment = 1,
+    Suffix = "Floor",
+    CurrentValue = 1,
+    Flag = "TowerFloorSlider",
+    Callback = function(v)
+        State.TowerFloor = v
+    end,
+})
+
+InfTowerTab:CreateButton({
+    Name = "Start Tower Floor Once",
+    Callback = function()
+        nwAction({ type = "Tower", op = "Sync" })
+        task.wait(0.3)
+        nwAction({ type = "Tower", op = "Start", floor = State.TowerFloor })
+    end,
+})
+
+InfTowerTab:CreateButton({
+    Name = "Claim All Tower Rewards",
+    Callback = function() nwAction({ type = "Tower", op = "ClaimAll" }) end,
+})
+
+InfTowerTab:CreateToggle({
+    Name = "Auto Start Tower Floor",
+    CurrentValue = false,
+    Flag = "AutoInfTowerToggle",
+    Callback = function(v)
+        State.AutoInfTower = v
+        loop("AutoInfTower", v, 5, function()
+            nwAction({ type = "Tower", op = "Sync" })
+            task.wait(0.3)
+            nwAction({ type = "Tower", op = "Start", floor = State.TowerFloor, cat = State.TowerCat })
+        end)
+    end,
+})
+
+-- ====================================================================
+-- 4. ITEMS GROUP ("Potions", "Crafting", "Raid Shop", "Candy Shop")
+-- ====================================================================
+local PotionsTab = Window:CreateTab("Potions")
+PotionsTab:CreateSection("Use Items & Potions")
+
+PotionsTab:CreateDropdown({
+    Name = "Select Potion / Item",
+    Options = { "LuckPotion", "GreaterLuckPotion", "SuperStatChip", "StatChip", "TraitRerolls" },
+    CurrentOption = { "LuckPotion" },
+    Flag = "SelectedPotionDropdown",
+    Callback = function(opt)
+        State.SelectedPotion = opt[1] or "LuckPotion"
+    end,
+})
+
+PotionsTab:CreateButton({
+    Name = "Use Selected Item Once",
+    Callback = function()
+        fireRemote("UseItem", State.SelectedPotion, 1)
+    end,
+})
+
+PotionsTab:CreateToggle({
+    Name = "Auto Use Selected Potion",
+    CurrentValue = false,
+    Flag = "AutoUsePotionToggle",
+    Run = false,
+    Callback = function(v)
+        State.AutoUsePotion = v
+        loop("AutoUsePotion", v, 5, function()
+            fireRemote("UseItem", State.SelectedPotion, 1)
+        end)
+    end,
+})
+
+local CraftingTab = Window:CreateTab("Crafting")
+CraftingTab:CreateSection("Crafting & Chips")
+
+CraftingTab:CreateButton({
+    Name = "Convert Stat Chips (ConvertChips)",
+    Callback = function()
+        fireRemote("ConvertChips")
+    end,
+})
+
+local RaidShopTab = Window:CreateTab("Raid Shop")
+RaidShopTab:CreateSection("Raid & Event Shops")
+
+RaidShopTab:CreateButton({
+    Name = "Open Raid Shop UI",
+    Callback = function()
+        if GG.P2_OpenRaidShop then
+            pcall(GG.P2_OpenRaidShop)
+        end
+    end,
+})
+
+RaidShopTab:CreateButton({
+    Name = "Open Hueco Mundo Shop UI",
+    Callback = function()
+        if GG.P2_OpenHuecoShop then
+            pcall(GG.P2_OpenHuecoShop)
+        end
+    end,
+})
+
+RaidShopTab:CreateButton({
+    Name = "Open Shanks / Jujutsu Shop UI",
+    Callback = function()
+        if GG.P2_OpenShanksShop then
+            pcall(GG.P2_OpenShanksShop)
+        elseif GG.P2_OpenJujutsuShop then
+            pcall(GG.P2_OpenJujutsuShop)
+        end
+    end,
+})
+
+local CandyShopTab = Window:CreateTab("Candy Shop")
+CandyShopTab:CreateSection("Halloween & Night Shops")
+
+CandyShopTab:CreateButton({
+    Name = "Open Pumpkin / Candy Shop UI",
+    Callback = function()
+        if GG.P2_OpenPumpkinShop then
+            pcall(GG.P2_OpenPumpkinShop)
+        end
+    end,
+})
+
+CandyShopTab:CreateButton({
+    Name = "Open Night Shop UI",
+    Callback = function()
+        if GG.P2_OpenNightShop then
+            pcall(GG.P2_OpenNightShop)
+        end
+    end,
+})
+
+CandyShopTab:CreateInput({
+    Name = "Shop Item Key (BuyRaidShop)",
+    PlaceholderText = "e.g. TraitRerolls",
+    Flag = "ShopItemKeyInput",
+    Callback = function(txt)
+        State.SelectedShopKey = txt
+    end,
+})
+
+CandyShopTab:CreateSlider({
+    Name = "Buy Quantity",
+    Range = { 1, 50 },
+    Increment = 1,
+    CurrentValue = 1,
+    Flag = "ShopBuyQtySlider",
+    Callback = function(v)
+        State.ShopBuyQty = v
+    end,
+})
+
+CandyShopTab:CreateButton({
+    Name = "Buy Item by Key",
+    Callback = function()
+        if State.SelectedShopKey ~= "" then
+            nwAction({
+                type = "BuyRaidShop",
+                key = State.SelectedShopKey,
+                qty = State.ShopBuyQty,
+            })
+            Rayfield:Notify({ Title = "Shop", Content = "Buy request sent: " .. State.SelectedShopKey .. " x" .. tostring(State.ShopBuyQty) })
+        else
+            Rayfield:Notify({ Title = "Shop", Content = "Enter an item key first." })
+        end
+    end,
+})
+
+-- ====================================================================
+-- 5. MISC GROUP ("Quests", "NPCs", "Server & Rejoin")
+-- ====================================================================
+local QuestsTab = Window:CreateTab("Quests")
+QuestsTab:CreateSection("Auto Quests")
+
+local function claimAllQuestsOnce()
+    nwAction({ type = "Sync" })
+    nwAction({ type = "ClaimRaidQuest", all = true })
+    fireRemote("NWHwQuestBoard", "claimall")
+    local st = GG.P2_NWState
+    if st then
+        if type(st.Quests) == "table" and type(st.Quests.list) == "table" then
+            for _, q in ipairs(st.Quests.list) do
+                if q.id and not q.claimed and (tonumber(q.progress) or 0) >= (tonumber(q.goal) or 1) then
+                    nwAction({ type = "ClaimQuest", id = q.id })
+                end
+            end
+        end
+        if type(st.UpdateQuests) == "table" and type(st.UpdateQuests.list) == "table" then
+            for _, q in ipairs(st.UpdateQuests.list) do
+                if q.id and not q.claimed and (tonumber(q.progress) or 0) >= (tonumber(q.goal) or 1) then
+                    fireRemote("NWUpdateQuests", "Claim", q.id)
+                end
+            end
+        end
+    end
+    fireRemote("ClaimMainMilestone")
+    fireRemote("ClaimAFKMilestone")
+    -- verified with RemoteScan
+    nwAction({ type = "ClaimDaily" })
+    nwAction({ type = "ClaimBPAll" })
+    nwAction({ type = "StayReward" })
+    nwAction({ type = "Tower", op = "ClaimAll" })
+    nwAction({ type = "UnitIndex", op = "ClaimAll" })
+    for idx = 1, 12 do
+        nwAction({ type = "ClaimPlaytime", idx = idx })
+    end
+end
+
+QuestsTab:CreateToggle({
+    Name = "Auto Claim All Quests (Daily/Raid/Update/Event)",
+    CurrentValue = false,
+    Flag = "AutoClaimAllQuestsToggle",
+    Run = false,
+    Callback = function(v)
+        State.AutoClaimAllQuests = v
+        loop("AutoClaimAllQuests", v, 8, function()
+            claimAllQuestsOnce()
+        end)
+    end,
+})
+
+QuestsTab:CreateButton({
+    Name = "Claim All Quests Now",
+    Callback = function()
+        claimAllQuestsOnce()
+        Rayfield:Notify({ Title = "Quests", Content = "Claimed all ready quests & milestones!" })
+    end,
+})
+
+QuestsTab:CreateButton({
+    Name = "Open Raid Quests UI",
+    Callback = function()
+        if GG.P2_OpenRaidQuests then
+            pcall(GG.P2_OpenRaidQuests, State.SelectedRaid)
+        end
+    end,
+})
+
+local NPCsTab = Window:CreateTab("NPCs")
+NPCsTab:CreateSection("Special NPC Questlines")
+
+NPCsTab:CreateDropdown({
+    Name = "Select NPC Questline",
+    Options = {
+        "WhitebeardQuest",
+        "JohnnyQuest",
+        "FrierenQuest",
+        "MadaraQuest",
+        "RimuruQuest",
+        "IchigoQuest",
+    },
+    CurrentOption = { "WhitebeardQuest" },
+    Flag = "SelectedNpcQuestDropdown",
+    Callback = function(opt)
+        State.SelectedNpcQuest = opt[1] or "WhitebeardQuest"
+    end,
+})
+
+NPCsTab:CreateButton({
+    Name = "Start / Accept NPC Questline",
+    Callback = function()
+        nwAction({ type = State.SelectedNpcQuest, op = "Start" })
+    end,
+})
+
+NPCsTab:CreateButton({
+    Name = "Claim Current NPC Quest Step",
+    Callback = function()
+        nwAction({ type = State.SelectedNpcQuest, op = "Claim" })
+    end,
+})
+
+NPCsTab:CreateButton({
+    Name = "Start NPC Trial (If Available)",
+    Callback = function()
+        nwAction({ type = State.SelectedNpcQuest, op = "Trial" })
+    end,
+})
+
+NPCsTab:CreateSection("Unit Index & Warp")
+
+-- verified with BossSpy: NWAction {type="UnitIndex", op="ClaimAll"}
+NPCsTab:CreateButton({
+    Name = "Claim All Unit Index Rewards",
+    Callback = function()
+        nwAction({ type = "UnitIndex", op = "Sync" })
+        task.wait(0.3)
+        nwAction({ type = "UnitIndex", op = "ClaimAll" })
+    end,
+})
+
+NPCsTab:CreateToggle({
+    Name = "Auto Claim Unit Index",
+    CurrentValue = false,
+    Flag = "AutoUnitIndexToggle",
+    Run = false,
+    Callback = function(v)
+        loop("AutoUnitIndex", v, 30, function()
+            nwAction({ type = "UnitIndex", op = "ClaimAll" })
+        end)
+    end,
+})
+
+-- verified with BossSpy: NWWarp "QuestHall" / "HallOfFame"
+State.WarpTarget = "QuestHall"
+NPCsTab:CreateDropdown({
+    Name = "Warp To",
+    Options = { "QuestHall", "HallOfFame" },
+    CurrentOption = { "QuestHall" },
+    Flag = "WarpTargetDropdown",
+    Callback = function(opt)
+        State.WarpTarget = opt[1] or "QuestHall"
+    end,
+})
+
+NPCsTab:CreateButton({
+    Name = "Warp",
+    Callback = function()
+        fireRemote("NWWarp", State.WarpTarget)
+    end,
+})
+
+NPCsTab:CreateSection("Evolution Questlines")
+
+NPCsTab:CreateDropdown({
+    Name = "Select Evolution Quest",
+    Options = {
+        "GRIMMJOWEVOLUTION",
+        "KISUKEEVOLUTION",
+        "GINEVOLUTION",
+        "MUGESTU_ICHIGOEVOLUTION",
+        "SSJ3GOKUEVOLUTION",
+        "MAJINVEGETAEVOLUTION",
+        "GOHANEVOLUTION",
+        "BUUEVOLUTION",
+    },
+    CurrentOption = { "GRIMMJOWEVOLUTION" },
+    Flag = "SelectedEvoQuestDropdown",
+    Callback = function(opt)
+        State.SelectedEvoQuest = opt[1] or "GRIMMJOWEVOLUTION"
+    end,
+})
+
+NPCsTab:CreateButton({
+    Name = "Start Selected Evolution Quest",
+    Callback = function()
+        fireRemote("Questline", "Start", State.SelectedEvoQuest)
+        Rayfield:Notify({ Title = "Evolution Quest", Content = "Started: " .. State.SelectedEvoQuest })
+    end,
+})
+
+local ServerTab = Window:CreateTab("Server & Rejoin")
+ServerTab:CreateSection("Server & Codes")
+
+ServerTab:CreateInput({
+    Name = "Redeem Code",
+    PlaceholderText = "Enter code...",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(code)
+        if code and code ~= "" then
+            fireRemote("RedeemCode", code)
+            Rayfield:Notify({ Title = "Code", Content = "Attempted to redeem: " .. code })
+        end
+    end,
+})
+
+ServerTab:CreateToggle({
+    Name = "Anti-AFK",
+    CurrentValue = true,
+    Flag = "AntiAFKToggle",
+    Run = false,
+    Callback = function(v)
+        State.AntiAFK = v
+    end,
+})
+
+local idleConn = LocalPlayer.Idled:Connect(function()
+    if State.Running and State.AntiAFK then
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end
+end)
+Rayfield:OnUnload(function() idleConn:Disconnect() end)
+
+ServerTab:CreateButton({
+    Name = "Rejoin Current Server",
+    DoubleClick = true,
+    Callback = function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end,
+})
+
+ServerTab:CreateButton({
+    Name = "Server Hop",
+    DoubleClick = true,
+    Callback = function()
+        local ok, res = pcall(function()
+            return HttpService:JSONDecode(game:HttpGet(
+                "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100"
+            ))
+        end)
+        if ok and res and type(res.data) == "table" then
+            for _, srv in ipairs(res.data) do
+                if srv.id ~= game.JobId and (tonumber(srv.playing) or 0) < (tonumber(srv.maxPlayers) or 0) then
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LocalPlayer)
+                    return
+                end
+            end
+        end
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end,
+})
+
+-- The game's own settings (verified with BossSpy: ChangeSetting "<Key>", bool)
+local GameSettingsTab = Window:CreateTab("Game Settings")
+local GAME_SETTINGS = {
+    { "Automation", {
+        { "AutoPlay", "Auto Play" }, { "AutoStartMatch", "Auto Start Match" },
+        { "AutoSkipWaves", "Auto Skip Waves" }, { "AutoMaxSpeed", "Auto Max Speed" },
+        { "AutoRetry", "Auto Retry" }, { "AutoNext", "Auto Next" },
+        { "AutoRoll", "Auto Roll (game)" }, { "AutoUseAbilities", "Auto Use Abilities" },
+        { "AutoRebirth", "Auto Rebirth" }, { "FastAuto", "Fast Auto" },
+        { "SmartGuard", "Smart Guard" }, { "AfkPerformance", "AFK Performance" },
+    } },
+    { "Performance", {
+        { "LowDetailMode", "Low Detail Mode" }, { "ShadowsOn", "Shadows" },
+        { "HideOthers", "Hide Others" }, { "DisableVisualEffects", "Disable Visual Effects" },
+        { "DisableAttackVFX", "Disable Attack VFX" }, { "DisableOtherVFX", "Disable Other VFX" },
+        { "DisableDamageIndicators", "Disable Damage Numbers" }, { "DisableUnitTags", "Disable Unit Tags" },
+        { "DisableEnemyTags", "Disable Enemy Tags" }, { "ScreenShake", "Screen Shake" },
+        { "ShowOthersVFX", "Show Others VFX" },
+    } },
+}
+
+for _, section in ipairs(GAME_SETTINGS) do
+    GameSettingsTab:CreateSection(section[1])
+    for _, item in ipairs(section[2]) do
+        local key, label = item[1], item[2]
+        GameSettingsTab:CreateToggle({
+            Name = label,
+            CurrentValue = false,
+            Flag = "GS_" .. key,
+            Run = false,
+            Callback = function(v)
+                if Booted then fireRemote("ChangeSetting", key, v) end
+            end,
+        })
+    end
+end
+
+
+-- ====================================================================
+-- QUEST HELPER — reads the questline requirements and farms the next step
+--   special questlines: GG.P2_<Name>QuestState = {Started, Step, Steps = {{kind, desc, goal, progress, status, ready}}}
+--                       NWAction {type="<Name>Quest", op="Start" / "Sync" / "Claim" / "Trial"}
+--   evolution quests  : ReplicatedStorage.Modules.GameData.EvolutionQuests (requirements only, progress is server side)
+--                       Questline:FireServer("Start", key)
+-- ====================================================================
+local QuestTab = Window:CreateTab("Quest Helper")
+
+-- turn one of the existing farm toggles on/off by its Flag
+local function setFlag(flag, v)
+    local f = Rayfield.Flags[flag]
+    if f and f.Set then f:Set(v) end
+end
+local FARM_FLAGS = { "AutoStoryToggle", "AutoBossRushToggle", "AutoInfTowerToggle", "AutoPortalToggle", "AutoRollToggle" }
+local function farmOnly(flag)
+    for _, f in ipairs(FARM_FLAGS) do setFlag(f, f == flag) end
+end
+
+-- ---------- special questlines ----------
+QuestTab:CreateSection("Special Questlines")
+
+local SPECIAL_Q = {
+    Frieren = "FrierenQuest", Gokuna = "GokunaQuest", Ichigo = "IchigoQuest", Itaduri = "ItaduriQuest",
+    Johnny = "JohnnyQuest", Madara = "MadaraQuest", Rimuru = "RimuruQuest", Whitebeard = "WhitebeardQuest",
+}
+State.QuestNpc = "Frieren"
+
+local function questState(npc)
+    local t = SPECIAL_Q[npc]
+    local st = t and GG["P2_" .. t .. "State"]
+    return t, (type(st) == "table" and st or nil)
+end
+
+-- the step to work on: claimable first, then the active one, then the first not finished
+local function currentStep(st)
+    if type(st) ~= "table" or type(st.Steps) ~= "table" then return nil end
+    for _, s in ipairs(st.Steps) do if type(s) == "table" and s.ready then return s end end
+    for _, s in ipairs(st.Steps) do if type(s) == "table" and s.status == "active" then return s end end
+    for _, s in ipairs(st.Steps) do
+        if type(s) == "table" and s.status ~= "done" and s.status ~= "claimed" and s.status ~= "complete" then return s end
+    end
+    return nil
+end
+
+QuestTab:CreateDropdown({
+    Name = "Questline",
+    Options = { "Frieren", "Gokuna", "Ichigo", "Itaduri", "Johnny", "Madara", "Rimuru", "Whitebeard" },
+    CurrentOption = { "Frieren" },
+    Flag = "QuestNpcDropdown",
+    Callback = function(opt) State.QuestNpc = opt[1] or "Frieren" end,
+})
+
+local QuestInfo = QuestTab:CreateParagraph({ Title = "Current step", Content = "press Refresh" })
+
+local function stepText(npc)
+    local t, st = questState(npc)
+    if not st then return "no data yet (press Refresh)" end
+    local s = currentStep(st)
+    local head = string.format("%s | started: %s | %d steps", npc, tostring(st.Started), #(st.Steps or {}))
+    if not s then return head .. "\nall steps done" end
+    return string.format("%s\nStep %s: %s\n%s\nProgress: %s / %s | %s%s | kind: %s", head,
+        tostring(s.index), tostring(s.name), tostring(s.desc), tostring(s.progress), tostring(s.goal),
+        tostring(s.status), s.ready and " | READY TO CLAIM" or "", tostring(s.kind))
+end
+
+local function refreshQuest()
+    local t = SPECIAL_Q[State.QuestNpc]
+    if t then nwAction({ type = t, op = "Sync" }) end
+    task.wait(0.8)
+    QuestInfo:Set({ Title = "Current step", Content = stepText(State.QuestNpc) })
+end
+
+QuestTab:CreateButton({ Name = "Refresh", Callback = function() task.spawn(refreshQuest) end })
+QuestTab:CreateButton({
+    Name = "Start Questline",
+    Callback = function() nwAction({ type = SPECIAL_Q[State.QuestNpc], op = "Start" }) end,
+})
+QuestTab:CreateButton({
+    Name = "Claim Step",
+    Callback = function() nwAction({ type = SPECIAL_Q[State.QuestNpc], op = "Claim" }) end,
+})
+QuestTab:CreateButton({
+    Name = "Start Trial (trial steps)",
+    Callback = function() nwAction({ type = SPECIAL_Q[State.QuestNpc], op = "Trial" }) end,
+})
+
+-- which farm a step needs (from its kind / description)
+local function farmForStep(s)
+    local kind, desc = tostring(s.kind), tostring(s.desc):lower()
+    if kind == "portals" or desc:find("pumpkin portal") then return "AutoPortalToggle", "Pumpkin Portal" end
+    if kind == "tower" or desc:find("tower") then
+        State.TowerFloor = tonumber(s.goal) or State.TowerFloor
+        return "AutoInfTowerToggle", "Tower floor " .. tostring(s.goal)
+    end
+    if desc:find("roll") then return "AutoRollToggle", "Auto Roll" end
+    if desc:find("boss") then return "AutoBossRushToggle", "Boss Rush" end
+    if kind == "best" or desc:find("wave") then
+        State.StoryAct = "Infinite"
+        return "AutoStoryToggle", "Story (Infinite) for waves"
+    end
+    if kind == "stat" or kind == "kills" or kind == "wins" or kind == "level" or kind == "dmg"
+        or desc:find("defeat") or desc:find("win") or desc:find("level") then
+        return "AutoStoryToggle", "Story stages"
+    end
+    return nil, "this step needs you (" .. kind .. "): " .. tostring(s.desc)
+end
+
+QuestTab:CreateToggle({
+    Name = "Auto Questline (start, claim, farm next step)",
+    CurrentValue = false,
+    Flag = "AutoQuestlineToggle",
+    Callback = function(v)
+        -- only stop the farms if this toggle was really on before (config load also sends false)
+        if not v and State.AutoQuestlineOn then farmOnly(nil) end
+        State.AutoQuestlineOn = v
+        loop("AutoQuestline", v, 10, function()
+            local t, st = questState(State.QuestNpc)
+            nwAction({ type = t, op = "Sync" })
+            task.wait(1)
+            t, st = questState(State.QuestNpc)
+            if not st then return end
+            if not st.Started then nwAction({ type = t, op = "Start" }) return end
+            local s = currentStep(st)
+            if not s then
+                farmOnly(nil)
+                Rayfield:Notify({ Title = "Quest Helper", Content = State.QuestNpc .. ": all steps done" })
+                return
+            end
+            if s.ready then nwAction({ type = t, op = "Claim" }) return end
+            if s.kind == "trial" then nwAction({ type = t, op = "Trial" }) end
+            local flag, what = farmForStep(s)
+            if flag then
+                if not (Rayfield.Flags[flag] and Rayfield.Flags[flag].CurrentValue) then
+                    farmOnly(flag)
+                    Rayfield:Notify({ Title = "Quest Helper", Content = "Farming: " .. what })
+                end
+            else
+                farmOnly(nil)
+                Rayfield:Notify({ Title = "Quest Helper", Content = what, Duration = 10 })
+            end
+            QuestInfo:Set({ Title = "Current step", Content = stepText(State.QuestNpc) })
+        end)
+    end,
+})
+
+-- ---------- evolution quests ----------
+QuestTab:CreateSection("Evolution Quests")
+
+local EvoData = {}
+pcall(function() EvoData = require(ReplicatedStorage.Modules.GameData.EvolutionQuests) end)
+local evoKeys = {}
+for k, q in pairs(EvoData) do if type(q) == "table" and q.Steps then evoKeys[#evoKeys + 1] = k end end
+table.sort(evoKeys)
+State.EvoKey = evoKeys[1] or ""
+State.EvoStep = 1
+
+local EvoInfo = QuestTab:CreateParagraph({ Title = "Evolution steps", Content = "choose a quest" })
+
+local function objSummary(obj)
+    local parts = {}
+    for typ, targets in pairs(obj or {}) do
+        for target, info in pairs(type(targets) == "table" and targets or {}) do
+            local goal = type(info) == "table" and info.Goal or "?"
+            local placed = type(info) == "table" and type(info.Placed) == "table" and (" with " .. table.concat(info.Placed, "+")) or ""
+            parts[#parts + 1] = string.format("%s %s x%s%s", typ, tostring(target), tostring(goal), placed)
+        end
+    end
+    return table.concat(parts, "; ")
+end
+
+local function showEvo()
+    local q = EvoData[State.EvoKey]
+    if type(q) ~= "table" then return end
+    local lines = { tostring(q.QuestName) }
+    for i, step in ipairs(q.Steps or {}) do
+        lines[#lines + 1] = string.format("%s%d. %s (%s)", i == State.EvoStep and ">> " or "", i,
+            tostring(step.Description), objSummary(step.Objectives))
+    end
+    EvoInfo:Set({ Title = State.EvoKey, Content = table.concat(lines, "\n") })
+end
+
+QuestTab:CreateDropdown({
+    Name = "Evolution Quest",
+    Options = evoKeys,
+    CurrentOption = { evoKeys[1] },
+    Flag = "EvoKeyDropdown",
+    Callback = function(opt) State.EvoKey = opt[1] or State.EvoKey; showEvo() end,
+})
+
+QuestTab:CreateSlider({
+    Name = "Step I am on",
+    Range = { 1, 10 },
+    Increment = 1,
+    CurrentValue = 1,
+    Flag = "EvoStepSlider",
+    Callback = function(v) State.EvoStep = v; showEvo() end,
+})
+
+QuestTab:CreateButton({
+    Name = "Start Evolution Questline",
+    Callback = function() fireRemote("Questline", "Start", State.EvoKey) end,
+})
+
+-- objective type -> farm
+local function evoFarm()
+    local q = EvoData[State.EvoKey]
+    local step = q and q.Steps and q.Steps[State.EvoStep]
+    if not step then return nil, "no such step" end
+    for typ, targets in pairs(step.Objectives or {}) do
+        local target, info = next(targets)
+        local goal = type(info) == "table" and info.Goal or 1
+        if typ == "TowerFloor" then
+            State.TowerFloor = tonumber(goal) or State.TowerFloor
+            State.TowerCat = tostring(target)
+            return "AutoInfTowerToggle", "Tower " .. tostring(target) .. " floor " .. tostring(goal)
+        elseif typ == "DefeatBoss" or typ == "Defeat" then
+            return "AutoBossRushToggle", "Boss Rush (" .. tostring(target) .. ")"
+        elseif typ == "Takedowns" or typ == "UnitLevel" or typ == "ClearStage" or typ == "UnitDeaths" then
+            return "AutoStoryToggle", "Story stages (" .. typ .. " " .. tostring(target) .. ") - put the unit in your team"
+        else
+            return nil, typ .. " " .. tostring(target) .. ": do this step yourself"
+        end
+    end
+    return nil, "unknown objective"
+end
+
+QuestTab:CreateButton({
+    Name = "Farm This Step",
+    Callback = function()
+        local flag, what = evoFarm()
+        if flag then farmOnly(flag) end
+        Rayfield:Notify({ Title = "Evolution", Content = (flag and "Farming: " or "") .. what, Duration = 8 })
+    end,
+})
+
+QuestTab:CreateButton({ Name = "Stop Farming", Callback = function() farmOnly(nil) end })
+
+
+-- ---------- Merlyn evolutions (items) ----------
+--   recipes  : ReplicatedStorage.Modules.Shared.Data.NWEvolutionData.STEPS[unit] = {to, level, yen, gems, items, tasks}
+--   items    : found in memory (table item -> amount, e.g. StatChip = 2204)
+--   obtain   : ReplicatedStorage.Items.ItemData / Shared.Data.ItemsData  (Obtain = "where it drops")
+--   evolve   : NWAction {type = "Evolve", uuid = <unit uuid>}   (from RemoteScan, payload not confirmed yet)
+QuestTab:CreateSection("Merlyn Evolve")
+
+local EvoSteps = {}
+pcall(function()
+    local d = require(ReplicatedStorage.Modules.Shared.Data.NWEvolutionData)
+    EvoSteps = (type(d) == "table" and d.STEPS) or {}
+end)
+local merlynKeys = {}
+for k in pairs(EvoSteps) do merlynKeys[#merlynKeys + 1] = k end
+table.sort(merlynKeys)
+
+-- item info (display name + where it drops), searched by item key in every item data module
+local ItemInfo = {}
+local function indexItems(t, depth)
+    if type(t) ~= "table" or depth > 3 then return end
+    for k, v in pairs(t) do
+        if type(v) == "table" then
+            if v.Obtain or v.Des or v.desc or v.obtain then
+                ItemInfo[k] = v
+                if v.key then ItemInfo[v.key] = v end
+            else
+                indexItems(v, depth + 1)
+            end
+        end
+    end
+end
+for _, path in ipairs({ { "Items", "ItemData" }, { "Modules", "Shared", "Data", "ItemsData" }, { "Modules", "Shared", "Data", "NWItemDescriptions" } }) do
+    pcall(function()
+        local m = ReplicatedStorage
+        for _, n in ipairs(path) do m = m:FindFirstChild(n) end
+        if m then indexItems(require(m), 0) end
+    end)
+end
+
+-- your items: the table in memory that holds StatChip / SuperStatChip amounts
+local invCache, invTime = nil, 0
+local function findInventory()
+    if invCache and os.clock() - invTime < 30 then return invCache end
+    if not getgc then return nil end
+    local ok, gc = pcall(getgc, true)
+    if not ok then return nil end
+    for _, t in ipairs(gc) do
+        if type(t) == "table" and type(rawget(t, "StatChip")) == "number" and type(rawget(t, "SuperStatChip")) == "number"
+            and rawget(t, "Gems") == nil then
+            invCache, invTime = t, os.clock()
+            return t
+        end
+    end
+    return nil
+end
+
+-- ALL your units in one scan: the table keyed by uuid whose values name units
+local ownedCache, ownedTime = nil, 0
+local function unitNameOf(v)
+    return rawget(v, "Name") or rawget(v, "Unit") or rawget(v, "Key") or rawget(v, "N") or rawget(v, "UnitName")
+end
+local function ownedUnits(force)
+    if ownedCache and not force and os.clock() - ownedTime < 30 then return ownedCache end
+    local best = {}
+    if not getgc then return best end
+    local ok, gc = pcall(getgc, true)
+    if not ok then return best end
+    local bestCount = 0
+    for _, t in ipairs(gc) do
+        if type(t) == "table" then
+            local found, count = {}, 0
+            for k, v in pairs(t) do
+                if type(k) == "string" and #k >= 30 and k:find("%-") and type(v) == "table" then
+                    local name = unitNameOf(v)
+                    if type(name) == "string" then
+                        count = count + 1
+                        local lv = tonumber(rawget(v, "Level") or rawget(v, "Lv") or rawget(v, "L")) or 0
+                        local cur = found[name]
+                        if not cur or lv > cur.level then found[name] = { uuid = k, level = lv } end
+                    end
+                end
+            end
+            -- the real inventory is the biggest such table
+            if count > bestCount then best, bestCount = found, count end
+        end
+    end
+    ownedCache, ownedTime = best, os.clock()
+    return best
+end
+
+-- your units: tables keyed by uuid whose value names a unit from the recipes
+local function findUnits(unitName)
+    local o = ownedUnits()[unitName]
+    if o then return { o } end
+    local res = {}
+    if not getgc then return res end
+    local ok, gc = pcall(getgc, true)
+    if not ok then return res end
+    for _, t in ipairs(gc) do
+        if type(t) == "table" then
+            for k, v in pairs(t) do
+                if type(k) == "string" and #k >= 30 and k:find("%-") and type(v) == "table" then
+                    local name = rawget(v, "Name") or rawget(v, "Unit") or rawget(v, "Key") or rawget(v, "N") or rawget(v, "UnitName")
+                    if name == unitName then
+                        res[#res + 1] = { uuid = k, level = tonumber(rawget(v, "Level") or rawget(v, "Lv") or rawget(v, "L")) or 0 }
+                    end
+                end
+            end
+            if #res > 0 then break end
+        end
+    end
+    table.sort(res, function(a, b) return a.level > b.level end)
+    return res
+end
+
+-- recipe items come as {key = n} or {{key, n}} or {{item = key, n = n}}
+local function recipeItems(step)
+    local list = {}
+    for k, v in pairs(type(step.items) == "table" and step.items or {}) do
+        if type(k) == "string" and type(v) == "number" then
+            list[#list + 1] = { key = k, n = v }
+        elseif type(v) == "table" then
+            local key = v[1] or v.key or v.item or v.id or v.name
+            local n = v[2] or v.n or v.amount or v.count or 1
+            if key then list[#list + 1] = { key = tostring(key), n = tonumber(n) or 1 } end
+        end
+    end
+    return list
+end
+
+-- where every item drops: StageData.<Map>.<Mode>.<Act>.LootPool = { Item = {Chance, Pity, Quantity} }
+local LootIndex, lootBuilt = {}, false
+local function buildLootIndex()
+    if lootBuilt then return end
+    lootBuilt = true
+    local sd = ReplicatedStorage:FindFirstChild("Modules")
+    sd = sd and sd:FindFirstChild("Shared")
+    sd = sd and sd:FindFirstChild("Data")
+    sd = sd and sd:FindFirstChild("StageData")
+    if not sd then return end
+    local n = 0
+    for _, mapF in ipairs(sd:GetChildren()) do
+        for _, modeF in ipairs(mapF:GetChildren()) do
+            for _, act in ipairs(modeF:GetChildren()) do
+                if act:IsA("ModuleScript") then
+                    n = n + 1
+                    local ok, data = pcall(require, act)
+                    if ok and type(data) == "table" and type(data.LootPool) == "table" then
+                        for item, info in pairs(data.LootPool) do
+                            local list = LootIndex[item] or {}
+                            LootIndex[item] = list
+                            list[#list + 1] = {
+                                map = mapF.Name, mode = modeF.Name, act = act.Name,
+                                chance = tonumber(type(info) == "table" and info.Chance) or 0,
+                                pity = type(info) == "table" and info.Pity or nil,
+                            }
+                        end
+                    end
+                    if n % 20 == 0 then task.wait() end
+                end
+            end
+        end
+    end
+    -- best place first
+    for _, list in pairs(LootIndex) do
+        table.sort(list, function(a, b) return a.chance > b.chance end)
+    end
+end
+
+-- items that are not in any LootPool but drop in Infinite mode (from the in-game tooltip)
+--   Rainbow Star Essence: "Drops in Infinite mode on every map from wave 35"
+local INFINITE_ITEMS = { RelicEssence_Mythic = 35 }
+-- items from Pumpkin Portals (tooltips):
+--   ZafkielClockCore : "Phantom Portal VI: every win"
+--   ZafkielSecondHand: "Night of Terror: clear a tier IV or V Pumpkin Portal with at least 2 Hexes"
+local PORTAL_ITEMS = {
+    ZafkielClockCore = { tier = 6, mods = 0, text = "Portal VI win" },
+    ZafkielSecondHand = { tier = 4, mods = 2, text = "Portal IV + 2 Hex" },
+}
+
+local function bestSource(item)
+    local list = LootIndex[item]
+    if list and list[1] then return list[1] end
+    if PORTAL_ITEMS[item] then
+        local p = PORTAL_ITEMS[item]
+        return { portal = true, tier = p.tier, mods = p.mods, map = "Pumpkin Portal", act = "Tier " .. p.tier,
+            chance = 1, text = p.text }
+    end
+    if INFINITE_ITEMS[item] then
+        return { map = State.StoryMap or "InnovationCity", mode = "Story", act = "Infinite", chance = 0,
+            infinite = true, wave = INFINITE_ITEMS[item] }
+    end
+    return nil
+end
+
+State.MerlynUnit = merlynKeys[1] or ""
+State.MissingItem = nil
+local MerlynInfo = QuestTab:CreateParagraph({ Title = "Merlyn", Content = "choose a unit", Lines = 22 })
+
+local merlynBusy, merlynAgain = false, false
+local merlynCheckRaw
+local function merlynCheck()
+    if merlynBusy then
+        merlynAgain = true
+        return false, nil
+    end
+    merlynBusy = true
+    local ok, a, b = pcall(merlynCheckRaw)
+    merlynBusy = false
+    if merlynAgain then
+        merlynAgain = false
+        return merlynCheck()
+    end
+    if not ok then warn("[Merlyn] " .. tostring(a)) return false, nil end
+    return a, b
+end
+
+merlynCheckRaw = function()
+    buildLootIndex() -- may take a moment the first time: done BEFORE reading the selected unit
+    local unitKey = State.MerlynUnit
+    local step = EvoSteps[unitKey]
+    if type(step) ~= "table" then return false, "no recipe" end
+    local invFound = findInventory()
+    local inv = invFound or {}
+    State.InvReadable = invFound ~= nil
+    local units = findUnits(unitKey)
+    local best = units[1]
+    local lines, ready = {}, true
+    lines[#lines + 1] = string.format("%s -> %s", unitKey, tostring(step.to))
+    local lvOk = best and best.level >= (tonumber(step.level) or 0)
+    if not lvOk then ready = false end
+    lines[#lines + 1] = string.format("%s Level %s / %s%s", lvOk and "OK" or "--", best and best.level or "?",
+        tostring(step.level or 0), best and "" or " (unit not found)")
+    if (tonumber(step.yen) or 0) > 0 then lines[#lines + 1] = "   Yen " .. tostring(step.yen) end
+    if (tonumber(step.gems) or 0) > 0 then lines[#lines + 1] = "   Gems " .. tostring(step.gems) end
+    buildLootIndex()
+    State.MissingItem = nil
+    local okLines, missLines = {}, {}
+    local total, met = 1, (lvOk and 1 or 0)
+    for _, it in ipairs(recipeItems(step)) do
+        total = total + 1
+        local have = tonumber(inv[it.key]) or 0
+        local ok = have >= it.n
+        if ok then met = met + 1 else ready = false end
+        local src = bestSource(it.key)
+        local info = ItemInfo[it.key]
+        local where = ""
+        if not ok then
+            if src and src.portal then
+                where = " <- " .. src.text
+            elseif src and src.infinite then
+                where = string.format(" <- Inf %s w%d+", src.map, src.wave)
+            elseif src then
+                where = string.format(" <- %s %s %d%%%s", src.map:gsub("^Legend", "L."), src.act, math.floor(src.chance * 100 + 0.5),
+                    src.pity and (" p" .. tostring(src.pity)) or "")
+            elseif info and (info.Obtain or info.obtain) then
+                where = "  <- " .. tostring(info.Obtain or info.obtain)
+            else
+                where = " <- ?"
+            end
+            if src and not State.MissingItem then State.MissingItem = { key = it.key, need = it.n, src = src } end
+        end
+        local line
+        if State.InvReadable then
+            line = string.format("%s %s %d / %d%s", ok and "OK" or "--", it.key, have, it.n, where)
+        else
+            line = string.format("   %s ? / %d", it.key, it.n) -- unknown here
+        end
+        if ok then okLines[#okLines + 1] = line else missLines[#missLines + 1] = line end
+    end
+    for _, l in ipairs(okLines) do lines[#lines + 1] = l end
+    for _, l in ipairs(missLines) do lines[#lines + 1] = l end
+    State.MerlynScore = string.format("%d/%d", met, total)
+    if State.MissingItem then
+        lines[#lines + 1] = "Next: " .. State.MissingItem.key .. " @ " .. State.MissingItem.src.map .. " " .. State.MissingItem.src.act
+    end
+    if type(step.tasks) == "table" then
+        for _, t in ipairs(step.tasks) do
+            if type(t) == "table" then
+                lines[#lines + 1] = "   Task: " .. tostring(t.short or t.label or t.key)
+            end
+        end
+    end
+    if not State.InvReadable then
+        ready = false
+        State.MissingItem = nil
+        table.insert(lines, 2, "In match: items unknown, check in lobby")
+    end
+    MerlynInfo:Set({
+        Title = (not State.InvReadable and "Items unknown here") or (ready and "READY TO EVOLVE") or "Missing items",
+        Content = table.concat(lines, "\n"),
+    })
+    return ready, best and best.uuid
+end
+
+-- how close a unit is to its evolution (0..1), from level + items
+local function readiness(unitKey, owned, inv)
+    local step = EvoSteps[unitKey]
+    if type(step) ~= "table" then return 0 end
+    local o = owned[unitKey]
+    local total, met = 1, (o and o.level >= (tonumber(step.level) or 0)) and 1 or 0
+    for _, it in ipairs(recipeItems(step)) do
+        total = total + 1
+        if (tonumber(inv[it.key]) or 0) >= it.n then met = met + 1 end
+    end
+    return met / total
+end
+
+State.ShowAllUnits = false
+local function merlynList()
+    local owned = ownedUnits(true)
+    local inv = findInventory() or {}
+    local list = {}
+    for _, k in ipairs(merlynKeys) do
+        if State.ShowAllUnits or owned[k] then list[#list + 1] = k end
+    end
+    local score = {}
+    for _, k in ipairs(list) do score[k] = (owned[k] and 1 or 0) + readiness(k, owned, inv) end
+    table.sort(list, function(a, b)
+        if score[a] ~= score[b] then return score[a] > score[b] end
+        return a < b
+    end)
+    if #list == 0 then list = { "(no evolvable units found)" } end
+    return list
+end
+
+local MerlynDD = QuestTab:CreateDropdown({
+    Name = "Unit to evolve (yours, closest first)",
+    Options = merlynKeys,
+    CurrentOption = { merlynKeys[1] },
+    Flag = "MerlynUnitDropdown",
+    Callback = function(opt)
+        local k = opt[1]
+        if k and EvoSteps[k] then
+            State.MerlynUnit = k
+            task.spawn(merlynCheck)
+        end
+    end,
+})
+
+local function refreshMerlynList()
+    local list = merlynList()
+    MerlynDD:Refresh(list)
+    local keep = State.MerlynUnit
+    local found = false
+    for _, k in ipairs(list) do if k == keep then found = true end end
+    MerlynDD:Set(found and keep or list[1])
+end
+
+QuestTab:CreateToggle({
+    Name = "Show units I don't own",
+    CurrentValue = false,
+    Flag = "MerlynShowAllToggle",
+    Run = false,
+    Callback = function(v)
+        State.ShowAllUnits = v
+        if Booted then task.spawn(refreshMerlynList) end
+    end,
+})
+
+QuestTab:CreateButton({ Name = "Refresh My Units", Callback = function() task.spawn(refreshMerlynList) end })
+
+task.spawn(function()
+    while not Booted do task.wait(0.5) end
+    task.wait(3)
+    pcall(refreshMerlynList)
+end)
+
+QuestTab:CreateButton({ Name = "Check Requirements", Callback = function() task.spawn(merlynCheck) end })
+
+QuestTab:CreateButton({
+    Name = "Copy Recipe (to verify)",
+    Callback = function()
+        local step = EvoSteps[State.MerlynUnit]
+        if type(step) ~= "table" then return end
+        local inv = findInventory() or {}
+        local o = ownedUnits()[State.MerlynUnit]
+        local out = { "unit: " .. State.MerlynUnit .. " -> " .. tostring(step.to),
+            "level need " .. tostring(step.level) .. " | have " .. tostring(o and o.level),
+            "yen " .. tostring(step.yen) .. " | gems " .. tostring(step.gems) }
+        for _, it in ipairs(recipeItems(step)) do
+            out[#out + 1] = string.format("item %s need %d have %s", it.key, it.n, tostring(inv[it.key]))
+        end
+        if setclipboard then setclipboard(table.concat(out, "\n")) end
+        Rayfield:Notify({ Title = "Merlyn", Content = "Recipe copied (" .. #out .. " lines)" })
+    end,
+})
+
+local function doEvolve(uuid)
+    if not uuid then
+        Rayfield:Notify({ Title = "Merlyn", Content = "unit uuid not found" })
+        return
+    end
+    nwAction({ type = "Evolve", uuid = uuid })
+    Rayfield:Notify({ Title = "Merlyn", Content = "Evolve sent: " .. State.MerlynUnit })
+end
+
+QuestTab:CreateButton({
+    Name = "Evolve Now",
+    DoubleClick = true,
+    Callback = function()
+        task.spawn(function()
+            local _, uuid = merlynCheck()
+            doEvolve(uuid)
+        end)
+    end,
+})
+
+State.ItemFarmDiff = "Normal"
+QuestTab:CreateDropdown({
+    Name = "Item Farm Difficulty",
+    Options = { "Normal", "Nightmare" },
+    CurrentOption = { "Normal" },
+    Flag = "ItemFarmDiffDropdown",
+    Callback = function(opt) State.ItemFarmDiff = opt[1] or "Normal" end,
+})
+
+-- start the stage that drops an item (same call the game uses: StageEnd "StartMatch", act, diff, "Go", map)
+local function startItemStage(src)
+    if src.portal then
+        State.PortalTier = src.tier
+        if src.mods > 0 and #State.PortalMods < src.mods then
+            State.PortalMods = { "RestlessDead", "DreadFog" }
+        end
+        task.spawn(openAndJoinPortal)
+        return
+    end
+    fireRemote("ChangeSetting", "AutoRetry", true)
+    if src.infinite then
+        -- same call the game uses for Infinite: StageEnd "StartMatch", "Infinite", "Normal", "Prepare", map
+        fireRemote("StageEnd", "StartMatch", "Infinite", "Normal", "Prepare", src.map)
+    else
+        fireRemote("StageEnd", "StartMatch", src.act, State.ItemFarmDiff, "Go", src.map)
+    end
+end
+
+QuestTab:CreateToggle({
+    Name = "Auto Farm Missing Items",
+    CurrentValue = false,
+    Flag = "AutoItemFarmToggle",
+    Run = false,
+    Callback = function(v)
+        State.AutoItemFarm = v
+        -- in the lobby: go to the stage of the first missing item
+        loop("AutoItemFarm", v and IN_LOBBY, 25, function()
+            invCache = nil
+            local ready = merlynCheck()
+            if ready then return end -- Auto Evolve does the rest
+            local m = State.MissingItem
+            if m then
+                Rayfield:Notify({ Title = "Item Farm", Content = "Going to " .. m.src.map .. " " .. m.src.act .. " for " .. m.key })
+                startItemStage(m.src)
+            end
+        end)
+    end,
+})
+
+-- inside a stage: at the end, keep retrying while the item is still missing, else go back to the lobby
+do
+    local se = Remotes:FindFirstChild("StageEnd")
+    if se and se:IsA("RemoteEvent") then
+        se.OnClientEvent:Connect(function(kind)
+            if not State.Running or not State.AutoItemFarm or IN_LOBBY then return end
+            if kind ~= "ShowResults" then return end
+            task.delay(3, function()
+                invCache = nil
+                local ready = merlynCheck()
+                State.ItemRuns = (State.ItemRuns or 0) + 1
+                local goBack
+                if not State.InvReadable then
+                    -- items unknown in here: portal items come on a win -> go check after every portal,
+                    -- stage drops -> check after every 5 runs
+                    goBack = IN_PORTAL or State.ItemRuns >= 5
+                else
+                    goBack = ready or not State.MissingItem
+                end
+                if goBack then
+                    State.ItemRuns = 0
+                    fireRemote("ChangeSetting", "AutoRetry", false)
+                    nwAction({ type = "Return" }) -- back to the lobby: it re-checks and goes again if needed
+                end
+            end)
+        end)
+    end
+end
+
+QuestTab:CreateToggle({
+    Name = "Auto Evolve when ready",
+    CurrentValue = false,
+    Flag = "AutoMerlynToggle",
+    Run = false,
+    Callback = function(v)
+        loop("AutoMerlyn", v and IN_LOBBY, 30, function()
+            invCache = nil
+            local ready, uuid = merlynCheck()
+            if ready and uuid then doEvolve(uuid) end
+        end)
+    end,
+})
+
+task.spawn(function()
+    while not Booted do task.wait(0.5) end
+    showEvo()
+    pcall(refreshQuest)
+end)
+
+
+-- ====================================================================
+-- COLLECTOR — finds hidden items in the map, walks (teleports) to them and picks them up
+--   works with ProximityPrompts, ClickDetectors and touch pickups whose names match
+-- ====================================================================
+local CollectTab = Window:CreateTab("Collector")
+
+local COLLECT = {
+    { key = "Fingers",     words = { "finger" },                       note = "Sukuno fingers (Itaduri quest), Curse Lair" },
+    { key = "Chests",      words = { "chest", "grimoire" },            avoid = { "mimic" }, note = "Grimoire chests (Frieren), Halloween Island" },
+    { key = "Horseshoes",  words = { "horseshoe" },                    note = "Golden Horseshoes (Johnny): lobby, Quest Hall, Event Hall" },
+    { key = "Reishi",      words = { "reishi" },                       note = "Reishi orbs (Ichigo) near the lobby NPCs" },
+    { key = "Dragonballs", words = { "dragonball", "dragon ball", "1star", "2star", "3star", "4star", "5star", "6star", "7star" }, note = "Dragon Balls (Potara)" },
+    { key = "Ghosts",      words = { "hwghost", "ghost" },             note = "Halloween ghosts (daily: catch 15)" },
+}
+
+local function lower(s) return tostring(s or ""):lower() end
+local function hasAny(s, list)
+    s = lower(s)
+    for _, w in ipairs(list or {}) do if s:find(w, 1, true) then return true end end
+    return false
+end
+
+-- the name chain of an object (its own name + 3 parents), used to match the words
+local function nameChain(inst)
+    local parts, cur = {}, inst
+    for _ = 1, 4 do
+        if not cur or cur == workspace then break end
+        parts[#parts + 1] = cur.Name
+        cur = cur.Parent
+    end
+    return table.concat(parts, " ")
+end
+
+local function isMine(inst)
+    local char = LocalPlayer.Character
+    if char and inst:IsDescendantOf(char) then return true end
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl.Character and inst:IsDescendantOf(pl.Character) then return true end
+    end
+    return false
+end
+
+local function looksMimic(inst)
+    local cur = inst
+    for _ = 1, 4 do
+        if not cur then break end
+        if cur:GetAttribute("Mimic") == true or cur:GetAttribute("IsMimic") == true or lower(cur.Name):find("mimic", 1, true) then
+            return true
+        end
+        cur = cur.Parent
+    end
+    return false
+end
+
+local function partOf(inst)
+    if inst:IsA("BasePart") then return inst end
+    local p = inst.Parent
+    if p and p:IsA("BasePart") then return p end
+    if p and p:IsA("Model") then return p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart", true) end
+    if p and p:IsA("Attachment") and p.Parent and p.Parent:IsA("BasePart") then return p.Parent end
+    return nil
+end
+
+-- every pickup of one kind: {part, prompt / click / touch}
+local function scanKind(kind)
+    local found, used = {}, {}
+    for _, d in ipairs(workspace:GetDescendants()) do
+        local isPrompt = d:IsA("ProximityPrompt")
+        local isClick = d:IsA("ClickDetector")
+        local isTouch = d:IsA("TouchTransmitter")
+        if (isPrompt or isClick or isTouch) and not isMine(d) then
+            local text = nameChain(d) .. (isPrompt and (" " .. d.ActionText .. " " .. d.ObjectText) or "")
+            if hasAny(text, kind.words) and not hasAny(text, kind.avoid) and not (kind.avoid and looksMimic(d)) then
+                local part = partOf(d)
+                if part and not used[part] and (not isPrompt or d.Enabled) then
+                    used[part] = true
+                    found[#found + 1] = { part = part, prompt = isPrompt and d or nil, click = isClick and d or nil, touch = isTouch }
+                end
+            end
+        end
+    end
+    return found
+end
+
+local function pickUp(item, hrp)
+    local part = item.part
+    if not part or not part.Parent then return end
+    hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
+    task.wait(0.35)
+    if item.prompt and fireproximityprompt then
+        pcall(fireproximityprompt, item.prompt)
+    elseif item.click and fireclickdetector then
+        pcall(fireclickdetector, item.click)
+    elseif item.touch and firetouchinterest then
+        pcall(firetouchinterest, hrp, part, 0)
+        task.wait(0.05)
+        pcall(firetouchinterest, hrp, part, 1)
+    end
+    task.wait(0.5)
+end
+
+local collectBusy = false
+local function collectKind(kind, quiet)
+    if collectBusy then return 0 end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return 0 end
+    collectBusy = true
+    local back = hrp.CFrame
+    local list = scanKind(kind)
+    for _, item in ipairs(list) do
+        if not State.Running then break end
+        pcall(pickUp, item, hrp)
+    end
+    hrp.CFrame = back
+    collectBusy = false
+    if not quiet then
+        Rayfield:Notify({ Title = "Collector", Content = string.format("%s: %d found", kind.key, #list) })
+    end
+    return #list
+end
+
+local CollectInfo = CollectTab:CreateParagraph({ Title = "Scan", Content = "press Scan All", Lines = 8 })
+
+CollectTab:CreateSection("Collect")
+CollectTab:CreateButton({
+    Name = "Scan All",
+    Callback = function()
+        local lines = {}
+        for _, kind in ipairs(COLLECT) do
+            local n = #scanKind(kind)
+            lines[#lines + 1] = string.format("%s %s: %d", n > 0 and "OK" or "--", kind.key, n)
+        end
+        lines[#lines + 1] = "Some items only load near them (go to the area)"
+        CollectInfo:Set({ Title = "Scan", Content = table.concat(lines, "\n") })
+    end,
+})
+
+CollectTab:CreateButton({
+    Name = "Collect All Now",
+    Callback = function()
+        task.spawn(function()
+            for _, kind in ipairs(COLLECT) do collectKind(kind, true) end
+            Rayfield:Notify({ Title = "Collector", Content = "done" })
+        end)
+    end,
+})
+
+for _, kind in ipairs(COLLECT) do
+    CollectTab:CreateToggle({
+        Name = "Auto " .. kind.key,
+        CurrentValue = false,
+        Flag = "AutoCollect" .. kind.key,
+        Run = false,
+        Callback = function(v)
+            loop("Collect" .. kind.key, v, 20, function() collectKind(kind, true) end)
+        end,
+    })
+end
+
+CollectTab:CreateSection("Where")
+CollectTab:CreateButton({ Name = "Warp Quest Hall", Callback = function() fireRemote("NWWarp", "QuestHall") end })
+CollectTab:CreateButton({ Name = "Warp Hall of Fame", Callback = function() fireRemote("NWWarp", "HallOfFame") end })
+CollectTab:CreateButton({
+    Name = "Go Halloween Island",
+    Callback = function()
+        local gate = workspace:FindFirstChild("NW_HwPortalGate")
+        local prompt = gate and gate:FindFirstChildWhichIsA("ProximityPrompt", true)
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if prompt and hrp and prompt.Parent:IsA("BasePart") then
+            hrp.CFrame = CFrame.new(prompt.Parent.Position + Vector3.new(0, 3, 0))
+            task.wait(0.4)
+            if fireproximityprompt then pcall(fireproximityprompt, prompt) end
+        end
+    end,
+})
+CollectTab:CreateButton({
+    Name = "Print Found (F9)",
+    Callback = function()
+        for _, kind in ipairs(COLLECT) do
+            for _, it in ipairs(scanKind(kind)) do
+                print(string.format("[Collector] %s -> %s", kind.key, it.part:GetFullName()))
+            end
+        end
+    end,
+})
+CollectTab:CreateLabel("Fingers: Curse Lair | Chests: Halloween Island | Horseshoes: lobby + halls")
+
+
+-- ====================================================================
+-- TELEPORT — every NPC (search by name) and every area of the lobby
+--   NPCs  : models with a talk prompt (ObjectText = NPC name) + workspace.npcs
+--   Areas : NW_HwTravelAnchors, P2_Portals, spawn points, halls (NWWarp), Halloween Island
+-- ====================================================================
+local TeleportTab = Window:CreateTab("Teleport")
+
+local function hrpNow()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function tpTo(target)
+    local hrp = hrpNow()
+    if not hrp or not target then return false end
+    local cf
+    if typeof(target) == "CFrame" then cf = target
+    elseif typeof(target) == "Vector3" then cf = CFrame.new(target)
+    elseif typeof(target) == "Instance" and target.Parent then
+        local ok, piv = pcall(function() return target:IsA("BasePart") and target.CFrame or target:GetPivot() end)
+        cf = ok and piv or nil
+    end
+    if not cf then return false end
+    -- stand a few studs in front, a bit higher, facing the target
+    local pos = cf.Position + cf.LookVector * 5 + Vector3.new(0, 3, 0)
+    hrp.CFrame = CFrame.new(pos, cf.Position)
+    return true
+end
+
+-- ---------- NPCs ----------
+local NpcMap = {}
+local function topModel(inst)
+    local cur = inst
+    while cur.Parent and cur.Parent ~= workspace and not (cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid")) do
+        cur = cur.Parent
+    end
+    return cur
+end
+
+local function scanNpcs()
+    local map, names = {}, {}
+    local function add(name, inst)
+        name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if name == "" or map[name] then return end
+        map[name] = inst
+        names[#names + 1] = name
+    end
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and not isMine(d) then
+            local m = topModel(d)
+            local isNpc = m:IsA("Model") and m:FindFirstChildOfClass("Humanoid")
+            if isNpc or d.Name:lower():find("talk", 1, true) then
+                local name = d.ObjectText ~= "" and d.ObjectText or m.Name
+                local extra = d.ActionText ~= "" and (" (" .. d.ActionText .. ")") or ""
+                add(name .. extra, m)
+            end
+        end
+    end
+    local folder = workspace:FindFirstChild("npcs") or workspace:FindFirstChild("NPCs") or workspace:FindFirstChild("Npcs")
+    if folder then
+        for _, m in ipairs(folder:GetChildren()) do add(m.Name, m) end
+    end
+    table.sort(names, function(a, b) return a:lower() < b:lower() end)
+    NpcMap = map
+    if #names == 0 then names = { "(no NPC found, press Refresh)" } end
+    return names
+end
+
+TeleportTab:CreateSection("NPCs")
+local NpcDD = TeleportTab:CreateDropdown({
+    Name = "NPC (type to search)",
+    Options = scanNpcs(),
+    Callback = function(opt)
+        State.LastNpc = opt[1]
+        local target = NpcMap[opt[1] or ""]
+        if Booted and target then tpTo(target) end
+    end,
+})
+TeleportTab:CreateButton({
+    Name = "TP Again",
+    Callback = function() tpTo(NpcMap[State.LastNpc or ""]) end,
+})
+TeleportTab:CreateButton({ Name = "Refresh NPCs", Callback = function() NpcDD:Refresh(scanNpcs()) end })
+
+-- ---------- areas / worlds ----------
+local AreaMap = {}
+local function scanAreas()
+    local map, names = {}, {}
+    local function add(name, target)
+        if not target or map[name] then return end
+        map[name] = target
+        names[#names + 1] = name
+    end
+    add("Lobby (spawn)", function()
+        local sp = workspace:FindFirstChildWhichIsA("SpawnLocation", true)
+        return sp
+    end)
+    add("Quest Hall (warp)", "warp:QuestHall")
+    add("Hall of Fame (warp)", "warp:HallOfFame")
+    add("Halloween Island", function() return workspace:FindFirstChild("NW_HwPortalKeeper") end)
+    add("Halloween Island Gate", function()
+        local g = workspace:FindFirstChild("NW_HwPortalGate")
+        return g and g:FindFirstChild("PromptPart") or g
+    end)
+    local anchors = workspace:FindFirstChild("NW_HwTravelAnchors")
+    if anchors then
+        for _, a in ipairs(anchors:GetChildren()) do add("Island: " .. a.Name, a) end
+    end
+    local portals = workspace:FindFirstChild("P2_Portals")
+    if portals then
+        for _, pt in ipairs(portals:GetChildren()) do add("Portal pad: " .. pt.Name, pt) end
+    end
+    for _, d in ipairs(workspace:GetChildren()) do
+        local n = d.Name:lower()
+        if (d:IsA("Model") or d:IsA("Folder")) and (n:find("hall", 1, true) or n:find("island", 1, true)
+            or n:find("zone", 1, true) or n:find("area", 1, true) or n:find("lair", 1, true) or n:find("arena", 1, true)) then
+            if d:IsA("Model") then add("Area: " .. d.Name, d)
+            else
+                local part = d:FindFirstChildWhichIsA("BasePart", true)
+                if part then add("Area: " .. d.Name, part) end
+            end
+        end
+    end
+    AreaMap = map
+    return names
+end
+
+local function goArea(name)
+    local t = AreaMap[name]
+    if type(t) == "function" then t = t() end
+    if type(t) == "string" and t:sub(1, 5) == "warp:" then
+        fireRemote("NWWarp", t:sub(6))
+        return
+    end
+    if not tpTo(t) then Rayfield:Notify({ Title = "Teleport", Content = "not loaded: " .. tostring(name) }) end
+end
+
+TeleportTab:CreateSection("Areas")
+local AreaDD = TeleportTab:CreateDropdown({
+    Name = "Area (type to search)",
+    Options = scanAreas(),
+    Callback = function(opt)
+        State.LastArea = opt[1]
+        if Booted and opt[1] then goArea(opt[1]) end
+    end,
+})
+TeleportTab:CreateButton({
+    Name = "Go Again",
+    Callback = function() if State.LastArea then goArea(State.LastArea) end end,
+})
+TeleportTab:CreateButton({ Name = "Refresh Areas", Callback = function() AreaDD:Refresh(scanAreas()) end })
+
+-- ---------- worlds (stages) ----------
+TeleportTab:CreateSection("Worlds")
+State.TpWorld = "InnovationCity"
+TeleportTab:CreateDropdown({
+    Name = "World",
+    Options = STORY_MAPS,
+    CurrentOption = { "InnovationCity" },
+    Callback = function(opt) State.TpWorld = opt[1] or State.TpWorld end,
+})
+TeleportTab:CreateButton({
+    Name = "Go to World (Act 1)",
+    Callback = function()
+        fireRemote("StageEnd", "StartMatch", "Act1", "Normal", "Go", State.TpWorld)
+    end,
+})
+TeleportTab:CreateLabel("Worlds are stages: this starts Act 1 of the world")
+
+-- refresh once the map has streamed in
+task.spawn(function()
+    while not Booted do task.wait(0.5) end
+    task.wait(4)
+    pcall(function() NpcDD:Refresh(scanNpcs()) end)
+    pcall(function() AreaDD:Refresh(scanAreas()) end)
+end)
+
+-- ====================================================================
+-- 6. TRACKER GROUP ("Tracker")
+-- ====================================================================
+local TrackerTab = Window:CreateTab("Tracker")
+TrackerTab:CreateSection("Live Currency & Event Tracker")
+
+local TrackerPara = TrackerTab:CreateParagraph({
+    Title = "Player State (GG.P2_NWState)",
+    Content = "Click 'Sync & Refresh Tracker' to load live stats.",
+})
+
+local function updateTracker()
+    local st = GG.P2_NWState or {}
+    local hw = GG.P2_HwQuestBoardState or {}
+    local ht = GG.P2_HTowerState or {}
+    local lines = {
+        "Raid Coins: " .. tostring(st.RaidCoin or 0),
+        "Pumpkin Coins: " .. tostring(st.PumpkinCoin or hw.Coins or 0),
+        "Halloween Candy: " .. tostring(hw.Candy or st.Candy or 0),
+        "Night Coins: " .. tostring(st.NightCoin or 0),
+        "Haunted Tower Cleared: Floor " .. tostring(ht.Cleared or ht.BestFloor or 0),
+    }
+    TrackerPara:Set({
+        Title = "Live Stats (" .. os.date("%H:%M:%S") .. ")",
+        Content = table.concat(lines, "\n"),
+    })
+end
+
+TrackerTab:CreateButton({
+    Name = "Sync & Refresh Tracker",
+    Callback = function()
+        nwAction({ type = "Sync" })
+        fireRemote("NWHwQuestBoard", "sync")
+        nwAction({ type = "HauntedTower", op = "Sync" })
+        task.delay(0.5, updateTracker)
+    end,
+})
+
+task.spawn(function()
+    while State.Running do
+        if Library.Toggled ~= false then pcall(updateTracker) end
+        task.wait(10)
+    end
+end)
+
+-- Load configuration and build UI Settings tab at the very end
+Booted = true
+Rayfield:LoadConfiguration()
