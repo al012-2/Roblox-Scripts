@@ -6,6 +6,7 @@
 --  - Boss Farmer يسوي تيليبورت اللعبة الرسمي للعالم ثم يقاتل ويطبع رد السيرفر
 --  - تبويب Teleports يستخدم ريموت اللعبة بدل تحريك CFrame
 --  - مزامنة الإعدادات مع السيرفر + backoff لبدء البرج
+--  - Multi Battle: البرج يكمل وجنبه ستوري/رايد/بوس (معركتين بنفس الوقت)
 -- ====================================================================
 
 if getgenv().AnimeDuelsHubInstance then
@@ -62,6 +63,7 @@ local Hub = {
         AutoAbilities = true,
         AutoNextFloor = true,
         HideBattle = false,
+        MultiBattle = false, -- Multi Battle: معركتين بنفس الوقت (البرج + ستوري/رايد/بوس)
 
         AutoStory = false,
         StoryWorlds = {
@@ -87,6 +89,9 @@ local Hub = {
 
     State = {
         InBattle = false,
+        ActiveBattles = 0,   -- عدد المعارك الشغالة الحين (للـ Multi Battle)
+        BattleStarts = 0,    -- عداد أحداث Start
+        LastEndByMode = {},  -- [mode] = os.clock() آخر End لهالنوع
         SuccessfulRolls = 0,
         ConsecutiveFailures = 0,
         Server = nil,
@@ -672,6 +677,12 @@ battleBox:AddToggle("AutoAbilitiesToggle", {
         end
     end,
 })
+battleBox:AddToggle("MultiBattleToggle", {
+    Text = "Multi Battle (2 at once)",
+    Tooltip = "Turn on if Multi Battle is ACTIVE: tower keeps running while Story/Raid/Boss fight in the 2nd slot",
+    Default = false,
+    Callback = function(val) Hub.Settings.MultiBattle = val end,
+})
 addGameToggles(battleBox, {
     { "Game Auto-Battle",          "AutoBattle" },
     { "Game Auto-Retry",           "AutoRetry" },
@@ -957,8 +968,49 @@ end
 local function inBattle()
     if os.clock() - Hub.State.LastBattleEvent > 90 then
         Hub.State.InBattle = false
+        Hub.State.ActiveBattles = 0
     end
     return Hub.State.InBattle
+end
+
+-- ====================== Multi Battle ======================
+local function multiOn() return Hub.Settings.MultiBattle == true end
+local function battleSlots() return multiOn() and 2 or 1 end
+
+-- فيه خانة فاضية لمعركة جديدة؟ (بدون Multi Battle = نفس not inBattle())
+local function freeSlot()
+    inBattle()
+    return Hub.State.ActiveBattles < battleSlots()
+end
+
+-- علامة قبل ما نطلب معركة، عشان نعرف إذا بدأت معركتنا
+local function battleMark()
+    return { ev = Hub.State.LastBattleEvent, starts = Hub.State.BattleStarts, t = os.clock() }
+end
+
+local function battleStarted(mark)
+    -- في Multi Battle أحداث البرج تغير LastBattleEvent، فنعتمد على عداد Start
+    if multiOn() then return Hub.State.BattleStarts > mark.starts end
+    return Hub.State.LastBattleEvent ~= mark.ev
+end
+
+-- ننتظر نهاية معركتنا (mode = "story" أو "raid")
+local function waitBattleEnd(mode, mark, timeout)
+    while Hub.Running do
+        if multiOn() then
+            -- البرج شغال جنبنا، فما نقدر نعتمد على inBattle()
+            if (Hub.State.LastEndByMode[mode] or 0) > mark.t then return true end
+            inBattle()
+            if Hub.State.ActiveBattles == 0 then return true end
+            if os.clock() - mark.t > timeout then
+                print("[Hub] waitBattleEnd timeout:", mode)
+                return false
+            end
+        elseif not inBattle() then
+            return true
+        end
+        task.wait(0.5)
+    end
 end
 
 local function bossReady()
@@ -1005,9 +1057,26 @@ if BattleEventRemote then
     table.insert(Hub.Connections, BattleEventRemote.OnClientEvent:Connect(function(kind, data)
         Hub.State.LastBattleEvent = os.clock()
         if kind == "Start" then
+            Hub.State.ActiveBattles = math.min(Hub.State.ActiveBattles + 1, 2)
+            Hub.State.BattleStarts += 1
             Hub.State.InBattle = true
         elseif kind == "End" then
-            Hub.State.InBattle = false
+            -- نفس الـ End وصل مرتين؟ نتجاهله عشان العداد ما ينقص مرتين
+            local d = type(data) == "table" and data or {}
+            local story = type(d.story) == "table" and d.story or {}
+            local endKey = tostring(d.mode) .. "|" .. tostring(story.stage) .. "|"
+                .. tostring(story.difficulty) .. "|" .. tostring(d.result)
+            if Hub.State.LastAnyEndKey == endKey and os.clock() - (Hub.State.LastAnyEndAt or 0) < 2 then
+                return
+            end
+            Hub.State.LastAnyEndKey, Hub.State.LastAnyEndAt = endKey, os.clock()
+
+            Hub.State.ActiveBattles = math.max(Hub.State.ActiveBattles - 1, 0)
+            Hub.State.InBattle = Hub.State.ActiveBattles > 0
+            if type(d.mode) == "string" then
+                local m = d.mode:find("raid") and "raid" or d.mode
+                Hub.State.LastEndByMode[m] = os.clock()
+            end
             -- نتيجة الستوري: {mode="story", result="Victory", story={stage, difficulty}}
             if type(data) == "table" and data.mode == "story" and type(data.story) == "table" then
                 local key = tostring(data.story.stage) .. "|" .. tostring(data.story.difficulty)
@@ -1102,6 +1171,8 @@ end
 
 -- البرج مسموح إذا ما فيه ستوري/رايد/بوس محتاج الوقت
 towerAllowed = function()
+    -- Multi Battle: البرج ياخذ خانة والستوري/الرايد/البوس ياخذ الثانية، فما نوقفه
+    if multiOn() then return true end
     if Hub.State.Busy or Hub.Settings.AutoStoryBoss then return false end
     if Hub.Settings.AutoStory then
         if not (Hub.Settings.TowerInDowntime and Hub.State.StoryIdle) then return false end
@@ -1117,9 +1188,9 @@ table.insert(Hub.Threads, task.spawn(function()
         local quiet = 6 + math.min(fails * 10, 120)
         if Hub.Settings.AutoTower
             and towerAllowed()
-            and not inBattle()
+            and freeSlot()
             and os.clock() - math.max(Hub.State.LastTowerEvent, Hub.State.LastTowerAttempt or 0) > quiet
-            and os.clock() - Hub.State.LastBattleEvent > 6 then
+            and (multiOn() or os.clock() - Hub.State.LastBattleEvent > 6) then
             -- فيه رن موقوف؟ نكمله بدل ما نبدأ جديد ("You have a paused run - Resume it")
             local good = towerAction("Resume")
             if not good then good = towerAction("Start") end
@@ -1140,8 +1211,8 @@ end))
 table.insert(Hub.Threads, task.spawn(function()
     while Hub.Running do
         if Hub.Settings.AutoStoryBoss and not Hub.Settings.AutoStory
-            and StoryFightRemote and not inBattle() and bossReady() then
-            if towerActive() then
+            and StoryFightRemote and freeSlot() and bossReady() then
+            if towerActive() and not multiOn() then
                 towerPause()
                 task.wait(2)
             end
@@ -1174,14 +1245,14 @@ table.insert(Hub.Threads, task.spawn(function()
             task.wait(1)
         elseif place and Hub.State.Busy then
             task.wait(1)
-        elseif place and inBattle() then
-            -- معركة شغالة (غالباً البرج): نوقف البرج وننتظر نهاية المعركة
-            if towerActive() then
+        elseif place and not freeSlot() then
+            -- ما فيه خانة فاضية (غالباً البرج): نوقف البرج وننتظر نهاية المعركة
+            if towerActive() and not multiOn() then
                 Hub.State.TowerYield = true
                 towerPause()
             end
             local t0 = os.clock()
-            while Hub.Running and inBattle() and os.clock() - t0 < 45 do task.wait(0.5) end
+            while Hub.Running and not freeSlot() and os.clock() - t0 < 45 do task.wait(0.5) end
             task.wait(1)
         else
             if not place then
@@ -1190,7 +1261,7 @@ table.insert(Hub.Threads, task.spawn(function()
                     or "nothing ready"
                 task.wait(3)
             else
-                if towerActive() then
+                if towerActive() and not multiOn() then
                     Hub.State.TowerYield = true
                     towerPause()
                     task.wait(2)
@@ -1202,7 +1273,7 @@ table.insert(Hub.Threads, task.spawn(function()
                     warn("[Hub] ما قدرت أوصل", place)
                     task.wait(10)
                 else
-                    local startedBefore = Hub.State.LastBattleEvent
+                    local mark = battleMark()
                     local ok, res = invoke(StoryFightRemote, stage, diff)
                     print("[Hub] StoryFight ->", stage, diff, ok, res)
 
@@ -1221,11 +1292,11 @@ table.insert(Hub.Threads, task.spawn(function()
                         Hub.State.LastStoryResult = "fighting " .. stage .. " [" .. diff .. "]"
                         -- ننتظر بداية المعركة ثم نهايتها
                         local t0 = os.clock()
-                        while Hub.Running and Hub.State.LastBattleEvent == startedBefore
+                        while Hub.Running and not battleStarted(mark)
                             and os.clock() - t0 < 5 do
                             task.wait(0.2)
                         end
-                        if Hub.State.LastBattleEvent == startedBefore then
+                        if not battleStarted(mark) then
                             -- ما بدأت معركة = رفض صامت: نتخطاه ونطلب الأوقات من جديد
                             Hub.State.StorySkipUntil[stage] = os.clock() + 90
                             Hub.State.LastStoryResult = stage .. ": no battle started, skipped"
@@ -1233,7 +1304,7 @@ table.insert(Hub.Threads, task.spawn(function()
                             fetchSnapshot()
                             task.wait(1)
                         else
-                            while Hub.Running and inBattle() do task.wait(0.5) end
+                            waitBattleEnd("story", mark, 300)
                             humanWait(1) -- مهلة + تأخير عشوائي بين المعارك
                         end
                     end
@@ -1295,13 +1366,13 @@ table.insert(Hub.Threads, task.spawn(function()
                 and string.format("Dracula back in %dm %02ds", left // 60, left % 60)
                 or "Dracula not up"
             task.wait(3)
-        elseif inBattle() or Hub.State.Busy or not Hub.State.StoryIdle then
+        elseif not freeSlot() or Hub.State.Busy or not Hub.State.StoryIdle then
             Hub.State.RaidWaiting = false
             task.wait(2)
         else
             Hub.State.RaidWaiting = false
             Hub.State.Busy = true
-            if towerActive() then
+            if towerActive() and not multiOn() then
                 towerPause()
                 task.wait(2)
             end
@@ -1310,7 +1381,7 @@ table.insert(Hub.Threads, task.spawn(function()
                 warn("[Hub] ما وصلت ساحة Dracula، بنحاول القتال على أي حال")
             end
 
-            local startedBefore = Hub.State.LastBattleEvent
+            local mark = battleMark()
             local ok, res = invoke(RaidFightRemote, "Fight")
             local good = ok and type(res) == "table" and res.ok == true
             print("[Hub] RaidFight Fight ->", ok, type(res) == "table" and (res.ok and "ok" or res.reason) or res)
@@ -1324,11 +1395,11 @@ table.insert(Hub.Threads, task.spawn(function()
             else
                 Hub.State.LastRaidResult = "fighting Dracula"
                 local t0 = os.clock()
-                while Hub.Running and Hub.State.LastBattleEvent == startedBefore
+                while Hub.Running and not battleStarted(mark)
                     and os.clock() - t0 < 8 do
                     task.wait(0.3)
                 end
-                while Hub.Running and inBattle() do task.wait(0.5) end
+                waitBattleEnd("raid", mark, 600)
                 Hub.State.Busy = false
                 humanWait(1)
             end
@@ -1385,6 +1456,8 @@ table.insert(Hub.Threads, task.spawn(function()
             "Uptime: " .. fmtTime(os.clock() - Hub.State.StartTime),
             "Rolls this session: " .. Hub.State.SuccessfulRolls .. "   (Auto-Roll: " .. onOff(S.AutoRoll) .. ")",
             "Battle: " .. (inBattle() and "In battle" or "Idle")
+                .. " (" .. Hub.State.ActiveBattles .. "/" .. battleSlots()
+                .. (multiOn() and " Multi" or "") .. ")"
                 .. " | World: " .. tostring(Hub.State.CurrentPlace or "?"),
             "Tower: " .. onOff(S.AutoTower) .. " | " .. S.TowerMode
                 .. " | " .. (Hub.State.TowerPaused and "Paused" or "Running")
