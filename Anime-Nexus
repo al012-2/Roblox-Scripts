@@ -26,6 +26,8 @@
 
 -- ===== Settings =====
 local SCRIPT_NAME   = "Anime Nexus RNG"
+-- where the script is hosted (used to re-run it after a teleport when there is no local workspace/NAXX.lua)
+local LOADER_URL    = "https://raw.githubusercontent.com/al012-2/Roblox-Scripts/refs/heads/main/Anime-Nexus"
 local CONFIG_FOLDER = "AnimeNexusRNG"
 local OBSIDIAN_REF  = "main"
 local FALLBACK_REF  = "main"
@@ -1904,7 +1906,7 @@ PortalTab:CreateButton({
 
 -- ---------- keep the script running after teleport ----------
 PortalTab:CreateSection("Teleport")
-PortalTab:CreateLabel("Save as workspace/NAXX.lua = auto re-run after teleport")
+PortalTab:CreateLabel("Re-runs by itself after every teleport")
 
 do
     local queued = false
@@ -1912,11 +1914,15 @@ do
         if not State.Running then return end
         if st == Enum.TeleportState.Started and not queued and queue_on_teleport then
             queued = true
-            pcall(queue_on_teleport, [[
+            -- local file first (your own copy), else the GitHub copy (your friends)
+            pcall(queue_on_teleport, ([[
+                if not game:IsLoaded() then game.Loaded:Wait() end
                 if isfile and isfile("NAXX.lua") then
                     loadstring(readfile("NAXX.lua"))()
+                else
+                    loadstring(game:HttpGet("%s"))()
                 end
-            ]])
+            ]]):format(LOADER_URL))
         end
     end)
 end
