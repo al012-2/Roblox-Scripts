@@ -6,12 +6,17 @@
     Menu key: RightShift.  Running it again closes the old copy.
 
     Tabs
-      Farm     : Story (any world / act), Raids, Auto Replay, Skip Wave
-      Bosses   : Halloween (doors, quests), Boss Rush, Gem Rush, Invasion, Hollow Hunt, Rogue, SBR
-      Portal   : Pumpkin Portals (open + join), smart card picks, Portal Arcade minigames, potions
-      Roll     : Auto Roll, Haunted Tower, Infinity Tower
-      Items    : potions, shops, crafting
-      Misc     : quests, NPC questlines, unit index, server tools, the game's own Auto settings
+      Story     : story worlds, acts, story skip
+      Battle    : skip wave, replay, vote, game speed, smart abilities
+      Raid      : raids + raid shops
+      Halloween : doors, ghosts, halloween quests, haunted tower, candy shop, portal rewards
+      Portal    : Pumpkin Portals (open + join, tier order), cards, Portal Arcade
+      Modes     : Boss Rush, Challenge, Gem Rush, Invasion, Hollow Hunt, Rogue, SBR
+      Roll      : Auto Roll
+      Tower     : Infinity Tower
+      Items     : potions (on / off), crafting
+      Quests    : auto quests, NPC questlines, unit index
+      Misc      : server tools, the game's own Auto settings
       Evolve   : Merlyn evolutions (reads YOUR units and items, farms what is missing, evolves)
       Collect  : hidden items in the map (fingers, chests, horseshoes, reishi, dragon balls, ghosts)
       Teleport : every NPC (search by name) and every area / world
@@ -32,7 +37,7 @@ local CONFIG_FOLDER = "AnimeNexusRNG"
 local OBSIDIAN_REF  = "main"
 local FALLBACK_REF  = "main"
 
-local RUN_GROUPS = { ["Farm"] = true, ["Bosses"] = true, ["Roll"] = true }
+local RUN_GROUPS = { ["Story"] = true, ["Raid"] = true, ["Modes"] = true, ["Roll"] = true, ["Tower"] = true, ["Battle"] = true }
 
 -- ===== Only one copy at a time: running the script again closes the old one first =====
 local GENV = (getgenv and getgenv()) or _G
@@ -159,32 +164,33 @@ local function toSet(list)
 end
 
 -- ===== Grouping =====
+-- Which sidebar tab every part goes to.  One mode = one tab (Story alone, Raid alone, Halloween alone ...)
 local GroupOf = {
-    ["Auto Farm"] = "Farm", ["Kaiju Raid"] = "Farm",
-    ["Custom Boss"] = "Bosses", ["Secret Bosses"] = "Bosses", ["Halloween"] = "Bosses",
-    ["Roll & Tower"] = "Roll", ["Infinity Tower"] = "Roll",
-    ["Prestige Tower"] = "Roll", ["Endless Raid"] = "Roll",
-    ["Potions"] = "Items", ["Crafting"] = "Items", ["Raid Shop"] = "Items", ["Candy Shop"] = "Items",
-    ["NPCs"] = "Misc", ["Quests"] = "Misc", ["Server & Rejoin"] = "Misc",
-    ["Tracker"] = "Tracker",
-    ["Boss Modes"] = "Bosses",
+    ["Auto Farm"] = "Story",
+    ["Kaiju Raid"] = "Raid", ["Raid Shop"] = "Raid",
+    ["Halloween"] = "Halloween", ["Custom Boss"] = "Halloween", ["Candy Shop"] = "Halloween",
     ["Pumpkin Portal"] = "Portal",
-    ["Game Settings"] = "Misc",
+    ["Secret Bosses"] = "Modes", ["Boss Modes"] = "Modes",
+    ["Roll & Tower"] = "Roll",
+    ["Infinity Tower"] = "Tower", ["Prestige Tower"] = "Tower", ["Endless Raid"] = "Tower",
+    ["Potions"] = "Items", ["Crafting"] = "Items",
+    ["Quests"] = "Quests", ["NPCs"] = "Quests",
+    ["Server & Rejoin"] = "Misc", ["Game Settings"] = "Misc",
     ["Quest Helper"] = "Evolve",
     ["Collector"] = "Collect",
     ["Teleport"] = "Teleport",
+    ["Tracker"] = "Tracker",
+}
+-- Some sections move to another sidebar tab than the rest of their tab
+local SectionGroup = {
+    ["Match Controls"] = "Match",
+    ["Haunted Tower"] = "HTower",
 }
 local GroupIcons = {
-    ["Farm"] = "swords",
-    ["Bosses"] = "skull",
-    ["Roll"] = "dice-5",
-    ["Items"] = "flask-conical",
-    ["Misc"] = "compass",
-    ["Tracker"] = "activity",
-    ["Portal"] = "ghost",
-    ["Evolve"] = "sparkles",
-    ["Collect"] = "search",
-    ["Teleport"] = "map-pin",
+    ["Story"] = "book-open", ["Battle"] = "swords", ["Raid"] = "shield", ["Halloween"] = "ghost",
+    ["Portal"] = "door-open", ["Modes"] = "skull", ["Roll"] = "dice-5", ["Tower"] = "castle",
+    ["Items"] = "flask-conical", ["Quests"] = "scroll", ["Misc"] = "compass", ["Evolve"] = "sparkles",
+    ["Collect"] = "search", ["Teleport"] = "map-pin", ["Tracker"] = "activity",
 }
 local DEFAULT_ICON = "layout-grid"
 
@@ -200,8 +206,14 @@ local function getGroup(groupName)
 end
 
 local SHORT = {
+    ["Performance"] = "Graphics",
+    ["Automation"] = "Auto",
+    ["Pause / Run"] = "On/Off",
+    ["SBR Race"] = "SBR",
+    ["Hollow Hunt"] = "Hollow",
+    ["Gem Rush"] = "Gems",
+    ["Boss Rush"] = "Rush",
     ["Potions"] = "Pot",
-    ["Cards (inside portal)"] = "Cards",
     ["Tier Order (first = most wanted)"] = "Tier Order",
     ["Many = enemies in range"] = "Min Enemies",
     ["Area (type to search)"] = "Area",
@@ -335,11 +347,11 @@ local SHORT = {
     ["Pick Card 3"] = "Card 3",
     ["Cards (inside portal)"] = "Cards",
     ["Crafting & Chips"] = "Craft",
-    ["Evolution Questlines"] = "Evo Quests",
+    ["Evolution Questlines"] = "Evo",
     ["Evolution Quests"] = "Evo",
-    ["Halloween & Night Shops"] = "Shops",
+    ["Halloween & Night Shops"] = "Shop",
     ["Halloween Event"] = "Event",
-    ["Halloween Portal"] = "Portal",
+    ["Halloween Portal"] = "Rewards",
     ["Haunted Tower"] = "HTower",
     ["Infinity Tower & Castle"] = "Tower",
     ["Live Currency & Event Tracker"] = "Live",
@@ -348,15 +360,15 @@ local SHORT = {
     ["Next / Retry"] = "Retry",
     ["Open Portal (lobby)"] = "Open",
     ["RNG Roll & Units"] = "Roll",
-    ["Raid & Event Shops"] = "Shops",
-    ["Raids & Portals"] = "Raids",
+    ["Raid & Event Shops"] = "Shop",
+    ["Raids & Portals"] = "Raid",
     ["Server & Codes"] = "Server",
     ["Special NPC Questlines"] = "NPC",
     ["Special Questlines"] = "NPC",
     ["Story & Stages"] = "Story",
     ["Unit Index & Warp"] = "Index",
     ["Use Items & Potions"] = "Items",
-    ["Auto Quests"] = "Quests",
+    ["Auto Quests"] = "Daily",
 }
 -- short label for the UI (long names made the window too wide)
 local function L(name)
@@ -391,6 +403,14 @@ function TabClass:_target()
 end
 
 function TabClass:CreateSection(name)
+    -- a section can live in another sidebar tab (e.g. Match Controls -> Battle)
+    local moveTo = SectionGroup[name]
+    if moveTo and moveTo ~= self.Group then
+        self.Group = moveTo
+        self._group = getGroup(moveTo)
+        self._tabbox = nil
+        self._current = nil
+    end
     self._current = self:_box():AddTab(L(name or "Section"))
     local tab = self
     return {
@@ -1110,12 +1130,12 @@ AutoFarmTab:CreateToggle({
 
 AutoFarmTab:CreateDropdown({
     Name = "Game Speed",
-    Options = { "1x", "2x", "3x" },
-    CurrentOption = { "1x" },
+    Options = { "1", "1.25", "1.5", "2" },
+    CurrentOption = { "1" },
     Flag = "GameSpeedDropdown",
     Callback = function(opt)
-        State.GameSpeed = opt[1] or "1x"
-        local num = tonumber(State.GameSpeed:match("%d+")) or 1
+        State.GameSpeed = opt[1] or "1"
+        local num = tonumber(State.GameSpeed) or 1
         if Booted then fireRemote("GameSpeed", num) end
     end,
 })
@@ -1724,7 +1744,7 @@ local function ownedPortals()
     local owned = type(st) == "table" and st.Owned
     if type(owned) == "table" then return owned end
     -- fallback: item counts HwPortal1..HwPortal6
-    local inv = (type(findInventory) == "function" and findInventory()) or {}
+    local inv = (State.FindInventory and State.FindInventory()) or {}
     local out = {}
     for t = 1, 6 do out[t] = tonumber(inv["HwPortal" .. t]) or 0 end
     return out
@@ -1816,9 +1836,14 @@ function openAndJoinPortal()
     local list = invokeRemote("NWHwPortalRoom", "list")
     State.LastRoomList = list
     local id = roomIdFrom(list)
-    if not id then return false, "room id not found (press Print Room List)" end
+    if not id then
+        invokeRemote("NWHwPortalRoom", "leave")
+        return false, "room id not found (press Room List)"
+    end
     local j = invokeRemote("NWHwPortalRoom", "join", id)
-    return type(j) == "table" and j.ok ~= false, "join " .. tostring(id)
+    local ok = type(j) == "table" and j.ok ~= false
+    if not ok then invokeRemote("NWHwPortalRoom", "leave") end
+    return ok, (ok and "join " or "join failed ") .. tostring(id)
 end
 
 PortalTab:CreateButton({
@@ -2301,26 +2326,7 @@ PortalTab:CreateToggle({
 
 -- ---------- potions ----------
 PortalTab:CreateSection("Potions")
-
-State.HoldPotion = "GreaterLuckPotion"
-PortalTab:CreateDropdown({
-    Name = "Potion",
-    Options = { "LuckPotion", "GreaterLuckPotion", "UltraLuckPotion", "ExtraRollPotion" },
-    CurrentOption = { "GreaterLuckPotion" },
-    Flag = "HoldPotionDropdown",
-    Callback = function(opt) State.HoldPotion = opt[1] or "GreaterLuckPotion" end,
-})
-
--- verified: NWPotHold:InvokeServer(name) pauses / resumes the potion timer
-PortalTab:CreateButton({
-    Name = "Pause / Resume Potion",
-    Callback = function()
-        task.spawn(function()
-            local r = invokeRemote("NWPotHold", State.HoldPotion)
-            Rayfield:Notify({ Title = "Potion", Content = State.HoldPotion .. ": " .. (type(r) == "table" and tostring(r.msg or r.ok) or tostring(r)) })
-        end)
-    end,
-})
+PortalTab:CreateLabel("Potions moved: Items > Potions")
 
 -- ---------- keep the script running after teleport ----------
 PortalTab:CreateLabel("Auto re-run after teleport")
@@ -2386,7 +2392,7 @@ RollTab:CreateToggle({
     Flag = "AutoUpgradeToggle",
     Run = false,
     Callback = function(v)
-        fireRemote("AutoUpgrade", v)
+        if Booted then nwAction({ type = "SetAutoUpgrade", on = v }) end
     end,
 })
 
@@ -2519,37 +2525,94 @@ end -- ===== section end =====
 -- ====================================================================
 do -- ===== section =====
 local PotionsTab = Window:CreateTab("Potions")
-PotionsTab:CreateSection("Use Items & Potions")
 
-PotionsTab:CreateDropdown({
-    Name = "Select Potion / Item",
-    Options = { "LuckPotion", "GreaterLuckPotion", "SuperStatChip", "StatChip", "TraitRerolls" },
-    CurrentOption = { "LuckPotion" },
-    Flag = "SelectedPotionDropdown",
-    Callback = function(opt)
-        State.SelectedPotion = opt[1] or "LuckPotion"
-    end,
-})
+-- One switch per potion.  ON = potion timer running, OFF = paused.
+-- NWPotHold:InvokeServer(potion) flips pause / run on the server (verified with Cobalt).
+-- The switch only sends when YOU change it; the answer of the server is shown under it.
+local POTIONS = {
+    { key = "LuckPotion", label = "Luck" },
+    { key = "GreaterLuckPotion", label = "Greater Luck" },
+    { key = "UltraLuckPotion", label = "Ultra Luck" },
+    { key = "ExtraRollPotion", label = "Extra Roll" },
+    { key = "ShinyPotion", label = "Shiny" },
+    { key = "AllWeatherPotion", label = "All Weather" },
+}
+local potState = {}   -- key -> "RUN" / "PAUSED" / "?"
+local potAnswer = {}  -- key -> short text of the last server answer
 
+-- read pause/run out of the server answer (several possible field names)
+local function answerState(res)
+    if type(res) ~= "table" then return nil end
+    for _, k in ipairs({ "held", "hold", "paused", "onHold", "isHeld", "Held", "Paused" }) do
+        if type(res[k]) == "boolean" then return res[k] and "PAUSED" or "RUN" end
+    end
+    for _, k in ipairs({ "active", "running", "Active", "Running" }) do
+        if type(res[k]) == "boolean" then return res[k] and "RUN" or "PAUSED" end
+    end
+    return nil
+end
+
+local function shortAnswer(res)
+    if type(res) ~= "table" then return tostring(res) end
+    local t = {}
+    for k, v in pairs(res) do
+        if type(v) ~= "table" then t[#t + 1] = tostring(k) .. "=" .. tostring(v) end
+        if #t >= 3 then break end
+    end
+    return table.concat(t, " ")
+end
+
+local PotInfo = PotionsTab:CreateParagraph({ Title = "My potions", Content = "press Refresh", Lines = 7 })
+local function showPotions()
+    local inv = (State.FindInventory and State.FindInventory()) or {}
+    local lines = {}
+    for _, p in ipairs(POTIONS) do
+        local st = potState[p.key] or "?"
+        local mark = st == "RUN" and "OK" or (st == "PAUSED" and "--" or "  ")
+        lines[#lines + 1] = string.format("%s %s x%s  %s", mark, p.label, tostring(tonumber(inv[p.key]) or 0), st)
+    end
+    PotInfo:Set({ Title = "My potions (OK = running, -- = paused)", Content = table.concat(lines, "\n") })
+end
+
+local function setPotion(p, wantRun)
+    local res = invokeRemote("NWPotHold", p.key)
+    potAnswer[p.key] = shortAnswer(res)
+    local st = answerState(res)
+    if st and (st == "RUN") ~= wantRun then
+        -- the server was in the other state: flip once more
+        res = invokeRemote("NWPotHold", p.key)
+        potAnswer[p.key] = shortAnswer(res)
+        st = answerState(res)
+    end
+    potState[p.key] = st or (wantRun and "RUN" or "PAUSED")
+    showPotions()
+end
+
+PotionsTab:CreateSection("Pause / Run")
+for _, p in ipairs(POTIONS) do
+    PotionsTab:CreateToggle({
+        Name = p.label,
+        CurrentValue = true,
+        Callback = function(v)
+            if not Booted or Rayfield.Loading then return end
+            task.spawn(setPotion, p, v)
+        end,
+    })
+end
+PotionsTab:CreateButton({ Name = "Refresh", Callback = function() task.spawn(showPotions) end })
 PotionsTab:CreateButton({
-    Name = "Use Selected Item Once",
+    Name = "Last Answers (F9)",
     Callback = function()
-        fireRemote("UseItem", State.SelectedPotion, 1)
+        for _, p in ipairs(POTIONS) do print("[Potion] " .. p.key .. ": " .. tostring(potAnswer[p.key] or "-")) end
     end,
 })
+PotionsTab:CreateLabel("ON = running   OFF = paused")
 
-PotionsTab:CreateToggle({
-    Name = "Auto Use Selected Potion",
-    CurrentValue = false,
-    Flag = "AutoUsePotionToggle",
-    Run = false,
-    Callback = function(v)
-        State.AutoUsePotion = v
-        loop("AutoUsePotion", v, 5, function()
-            fireRemote("UseItem", State.SelectedPotion, 1)
-        end)
-    end,
-})
+task.spawn(function()
+    while not Booted do task.wait(0.5) end
+    task.wait(3)
+    pcall(showPotions)
+end)
 end -- ===== section end =====
 
 do -- ===== section =====
@@ -3278,6 +3341,8 @@ local function ownedUnits(force)
     return best
 end
 
+State.FindInventory = findInventory
+
 -- your units: tables keyed by uuid whose value names a unit from the recipes
 local function findUnits(unitName)
     local o = ownedUnits()[unitName]
@@ -3763,9 +3828,17 @@ local function partOf(inst)
 end
 
 -- every pickup of one kind: {part, prompt / click / touch}
+local descCache, descTime = nil, 0
+local function mapObjects()
+    if not descCache or os.clock() - descTime > 3 then
+        descCache, descTime = workspace:GetDescendants(), os.clock()
+    end
+    return descCache
+end
+
 local function scanKind(kind)
     local found, used = {}, {}
-    for _, d in ipairs(workspace:GetDescendants()) do
+    for _, d in ipairs(mapObjects()) do
         local isPrompt = d:IsA("ProximityPrompt")
         local isClick = d:IsA("ClickDetector")
         local isTouch = d:IsA("TouchTransmitter")
@@ -4085,14 +4158,15 @@ local TrackerPara = TrackerTab:CreateParagraph({
 
 local function updateTracker()
     local st = GG.P2_NWState or {}
-    local hw = GG.P2_HwQuestBoardState or {}
-    local ht = GG.P2_HTowerState or {}
+    local inv = (State.FindInventory and State.FindInventory()) or {}
+    local function n(v) return tostring(tonumber(v) or 0) end
     local lines = {
-        "Raid Coins: " .. tostring(st.RaidCoin or 0),
-        "Pumpkin Coins: " .. tostring(st.PumpkinCoin or hw.Coins or 0),
-        "Halloween Candy: " .. tostring(hw.Candy or st.Candy or 0),
-        "Night Coins: " .. tostring(st.NightCoin or 0),
-        "Haunted Tower Cleared: Floor " .. tostring(ht.Cleared or ht.BestFloor or 0),
+        "Raid Coin " .. n(st.RaidCoin) .. " | Jujutsu " .. n(st.JujutsuCoin),
+        "Hueco " .. n(st.HuecoCoin) .. " | Shanks " .. n(st.ShanksCoin),
+        "Pumpkin " .. n(inv.PumpkinCoin) .. " | Candy " .. n(inv.HalloweenCandy),
+        "Ghost Soul " .. n(inv.GhostSoul) .. " | Time Token " .. n(inv.TimeToken),
+        "Stat Chip " .. n(inv.StatChip) .. " | Super " .. n(inv.SuperStatChip),
+        "Luck Pot " .. n(inv.LuckPotion) .. " | Greater " .. n(inv.GreaterLuckPotion),
     }
     TrackerPara:Set({
         Title = "Live Stats (" .. os.date("%H:%M:%S") .. ")",
