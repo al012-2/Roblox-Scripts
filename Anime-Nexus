@@ -91,7 +91,7 @@ end
 
 local vp = getViewport()
 local IS_MOBILE = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-local WIN_W = math.floor(math.clamp(vp.X - 40, 480, 760))
+local WIN_W = math.floor(math.clamp(vp.X - 40, 480, 840))
 local WIN_H = math.floor(math.clamp(vp.Y - 80, 360, 820))
 
 -- ===== Rayfield shim state =====
@@ -200,7 +200,40 @@ local function getGroup(groupName)
 end
 
 local SHORT = {
-    ["Auto Claim All Quests (Daily/Raid/Update/Event)"] = "Auto Claim Quests",
+    ["Tier Order (first = most wanted)"] = "Tier Order",
+    ["Many = enemies in range"] = "Min Enemies",
+    ["Area (type to search)"] = "Area",
+    ["NPC (type to search)"] = "NPC",
+    ["Go to World (Act 1)"] = "Go World",
+    ["Go Halloween Island"] = "HW Island",
+    ["Go to Portal Keeper"] = "Go Keeper",
+    ["TP to Portal Keeper"] = "TP Keeper",
+    ["Ability Check (F9)"] = "Check (F9)",
+    ["Warp Hall of Fame"] = "Hall of Fame",
+    ["Warp Quest Hall"] = "Quest Hall",
+    ["Print Found (F9)"] = "List (F9)",
+    ["Refresh My Units"] = "Refresh Units",
+    ["Challenge Period"] = "Period",
+    ["Auto Claim Portal"] = "Claim Portal",
+    ["Auto Claim HTower"] = "Claim HTower",
+    ["Smart Abilities"] = "Ability",
+    ["Minigames"] = "Arcade",
+    ["Teleport"] = "TP",
+    ["Ability Mode"] = "Mode",
+    ["Use Tier Order"] = "Tier Order On",
+    ["Check Portals"] = "My Portals",
+    ["Refresh NPCs"] = "Refresh",
+    ["Refresh Areas"] = "Refresh",
+    ["Open Minigames"] = "Open Arcade",
+    ["Auto Minigames"] = "Auto Arcade",
+    ["Custom Order"] = "Custom",
+    ["Card Preset"] = "Preset",
+    ["Card Mode"] = "Mode",
+    ["Portal Tier"] = "Tier",
+    ["Scan All"] = "Scan",
+    ["Collect All Now"] = "Collect All",
+    ["Portal Next"] = "Next",
+    ["Auto Claim All Quests (Daily/Raid/Update/Event)"] = "Auto Claim",
     ["Custom Priority (best first, comma separated)"] = "Custom Order",
     ["Auto Questline (start, claim, farm next step)"] = "Auto Questline",
     ["Auto Trick or Treat (walks to every door)"] = "Auto Trick/Treat",
@@ -412,7 +445,7 @@ function TabClass:CreateParagraph(opts)
             local t = tostring(cur.Title or ""):upper()
             titleObj.TextColor3 = t:find("READY") and GREEN or (t:find("MISSING") and RED or titleObj.TextColor3)
         end
-        local WRAP = tonumber(opts.Wrap) or 48
+        local WRAP = tonumber(opts.Wrap) or 40
         local list = {}
         for line in (tostring(cur.Content or "") .. "\n"):gmatch("(.-)\n") do
             if #line <= WRAP then
@@ -705,10 +738,10 @@ function Rayfield:LoadConfiguration()
     configLoaded = true
     assert(LWindow, "[UI] Call Rayfield:CreateWindow before LoadConfiguration")
 
-    local settingsTab = LWindow:AddTab("UI Settings", "settings")
+    local settingsTab = LWindow:AddTab("Settings", "settings")
     local menu = settingsTab:AddLeftGroupbox("Menu", "wrench")
 
-    menu:AddLabel("NAXX Hub - RightShift opens/closes the menu", true)
+    menu:AddLabel("RightShift = open / close", true)
     menu:AddToggle("AutoStartOnLoad", {
         Text = "Autostart on load",
         Default = false,
@@ -1087,6 +1120,174 @@ AutoFarmTab:CreateButton({
     Name = "Teleport to AFK Chamber",
     Callback = function()
         fireRemote("TPAFK")
+    end,
+})
+
+-- ---------- Smart Abilities: use a unit's ability only when a boss / enemy is in ITS range ----------
+--   ability : Character.CharacterHandler.Remotes.UnitAction:FireServer("Active", unitModel, 1)   (verified)
+--   units / enemies : workspace.Entities (name = "<Unit>_<number>")
+--   unit range : model attribute Range, else UnitData.Units.<Unit>.BaseStats.Range
+--   bosses : names in UnitData.Bosses, or attribute Boss / IsBoss
+AutoFarmTab:CreateSection("Smart Abilities")
+
+local UD = ReplicatedStorage:FindFirstChild("Modules")
+UD = UD and UD:FindFirstChild("Shared")
+UD = UD and UD:FindFirstChild("Data")
+UD = UD and UD:FindFirstChild("UnitData")
+local UNIT_SET, BOSS_SET, RANGE_CACHE = {}, {}, {}
+if UD then
+    local u = UD:FindFirstChild("Units")
+    if u then for _, m in ipairs(u:GetChildren()) do UNIT_SET[m.Name] = m end end
+    local b = UD:FindFirstChild("Bosses")
+    if b then for _, m in ipairs(b:GetChildren()) do BOSS_SET[m.Name] = true end end
+end
+
+local function baseName(model)
+    return (model.Name:match("^(.-)_%d[%d%.]*$")) or model.Name
+end
+
+local function unitRange(model, base)
+    for _, a in ipairs({ "Range", "range", "Rng", "UnitRange" }) do
+        local v = tonumber(model:GetAttribute(a))
+        if v and v > 0 then return v end
+    end
+    if RANGE_CACHE[base] == nil then
+        RANGE_CACHE[base] = false
+        local mod = UNIT_SET[base]
+        if mod and mod:IsA("ModuleScript") then
+            local ok, d = pcall(require, mod)
+            local r = ok and type(d) == "table" and ((type(d.BaseStats) == "table" and d.BaseStats.Range) or d.Range)
+            if tonumber(r) then RANGE_CACHE[base] = tonumber(r) end
+        end
+    end
+    return RANGE_CACHE[base] or State.AbilityDefaultRange
+end
+
+local function isBoss(model, base)
+    if BOSS_SET[base] then return true end
+    if model:GetAttribute("Boss") == true or model:GetAttribute("IsBoss") == true then return true end
+    local n = base:lower()
+    return n:find("_boss", 1, true) ~= nil or n:sub(-4) == "boss"
+end
+
+local function isMyUnit(model, base)
+    if not UNIT_SET[base] or BOSS_SET[base] then return false end
+    local owner = model:GetAttribute("Owner") or model:GetAttribute("OwnerId") or model:GetAttribute("Player")
+    if owner ~= nil and owner ~= LocalPlayer.Name and owner ~= LocalPlayer.UserId and tostring(owner) ~= tostring(LocalPlayer.UserId) then
+        return false
+    end
+    return true
+end
+
+local function posOf(model)
+    local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+    return root and root.Position
+end
+
+State.AbilityMode = "Bosses only"
+State.AbilityDefaultRange = 30
+State.AbilityMinEnemies = 3
+State.AbilityRangeMul = 1
+local lastUse = {}
+
+local function abilityRemote()
+    local c = LocalPlayer.Character
+    local h = c and c:FindFirstChild("CharacterHandler")
+    local r = h and h:FindFirstChild("Remotes")
+    return r and r:FindFirstChild("UnitAction")
+end
+
+local function smartAbilityTick()
+    local ents = workspace:FindFirstChild("Entities")
+    local remote = abilityRemote()
+    if not (ents and remote) then return end
+    local units, enemies = {}, {}
+    for _, m in ipairs(ents:GetChildren()) do
+        if m:IsA("Model") then
+            local base = baseName(m)
+            local p = posOf(m)
+            if p then
+                if isMyUnit(m, base) then
+                    units[#units + 1] = { model = m, pos = p, range = unitRange(m, base) * State.AbilityRangeMul }
+                elseif not UNIT_SET[base] or BOSS_SET[base] then
+                    local hum = m:FindFirstChildOfClass("Humanoid")
+                    if not hum or hum.Health > 0 then
+                        enemies[#enemies + 1] = { pos = p, boss = isBoss(m, base) }
+                    end
+                end
+            end
+        end
+    end
+    for _, u in ipairs(units) do
+        local bosses, count = 0, 0
+        for _, e in ipairs(enemies) do
+            if (e.pos - u.pos).Magnitude <= u.range then
+                count = count + 1
+                if e.boss then bosses = bosses + 1 end
+            end
+        end
+        local mode = State.AbilityMode
+        local fire = (mode == "Bosses only" and bosses > 0)
+            or (mode == "Any enemy" and count > 0)
+            or (mode == "Boss or many enemies" and (bosses > 0 or count >= State.AbilityMinEnemies))
+        if fire and (os.clock() - (lastUse[u.model] or 0)) > 1 then
+            lastUse[u.model] = os.clock()
+            pcall(remote.FireServer, remote, "Active", u.model, 1)
+        end
+    end
+end
+
+AutoFarmTab:CreateDropdown({
+    Name = "Ability Mode",
+    Options = { "Bosses only", "Any enemy", "Boss or many enemies" },
+    CurrentOption = { "Bosses only" },
+    Flag = "AbilityModeDropdown",
+    Callback = function(opt) State.AbilityMode = opt[1] or "Bosses only" end,
+})
+
+AutoFarmTab:CreateSlider({
+    Name = "Many = enemies in range",
+    Range = { 2, 15 },
+    Increment = 1,
+    CurrentValue = 3,
+    Flag = "AbilityMinEnemiesSlider",
+    Callback = function(v) State.AbilityMinEnemies = v end,
+})
+
+AutoFarmTab:CreateSlider({
+    Name = "Range x",
+    Range = { 0.5, 2 },
+    Increment = 0.1,
+    CurrentValue = 1,
+    Flag = "AbilityRangeMulSlider",
+    Callback = function(v) State.AbilityRangeMul = v end,
+})
+
+AutoFarmTab:CreateToggle({
+    Name = "Smart Abilities",
+    CurrentValue = false,
+    Flag = "SmartAbilityToggle",
+    Run = false,
+    Callback = function(v)
+        -- the game's own Auto Abilities would fire anyway: turn it off while this is on
+        if Booted then fireRemote("ChangeSetting", "AutoUseAbilities", not v) end
+        -- runs everywhere: with no enemies around it simply does nothing
+        loop("SmartAbility", v, 0.4, smartAbilityTick)
+    end,
+})
+
+AutoFarmTab:CreateButton({
+    Name = "Ability Check (F9)",
+    Callback = function()
+        local ents = workspace:FindFirstChild("Entities")
+        if not ents then print("[Ability] no Entities (start a match)") return end
+        for _, m in ipairs(ents:GetChildren()) do
+            if m:IsA("Model") then
+                local base = baseName(m)
+                print(string.format("[Ability] %s | base %s | mine %s | boss %s | range %s", m.Name, base,
+                    tostring(isMyUnit(m, base)), tostring(isBoss(m, base)), tostring(UNIT_SET[base] and unitRange(m, base))))
+            end
+        end
     end,
 })
 
@@ -1745,7 +1946,7 @@ PortalTab:CreateInput({
     end,
 })
 
-PortalTab:CreateLabel("Custom Order works when Preset = Custom")
+PortalTab:CreateLabel("Custom = Preset Custom")
 
 do
     local rogue = Remotes:FindFirstChild("NWRogue")
@@ -1917,7 +2118,7 @@ task.spawn(function()
     end)
 end)
 
-PortalTab:CreateLabel("Portal Arcade works only INSIDE a portal")
+PortalTab:CreateLabel("Arcade: inside a portal only")
 local MiniInfo = PortalTab:CreateParagraph({ Title = "Minigames", Content = "-", Lines = 3 })
 local function miniShow()
     MiniInfo:Set({ Title = "Minigames", Content = string.format("Wins %d / %s | Bonus x%.2f\nLast: %s\nsent %d | got %d (%s)",
@@ -2082,7 +2283,7 @@ PortalTab:CreateButton({
 
 -- ---------- keep the script running after teleport ----------
 PortalTab:CreateSection("Teleport")
-PortalTab:CreateLabel("Re-runs by itself after every teleport")
+PortalTab:CreateLabel("Auto re-run after teleport")
 
 do
     local queued = false
@@ -3620,7 +3821,9 @@ CollectTab:CreateButton({
         end
     end,
 })
-CollectTab:CreateLabel("Fingers: Curse Lair | Chests: Halloween Island | Horseshoes: lobby + halls")
+CollectTab:CreateLabel("Fingers: Curse Lair")
+CollectTab:CreateLabel("Chests: HW Island")
+CollectTab:CreateLabel("Horseshoes: lobby, halls")
 
 
 -- ====================================================================
@@ -3790,7 +3993,7 @@ TeleportTab:CreateButton({
         fireRemote("StageEnd", "StartMatch", "Act1", "Normal", "Go", State.TpWorld)
     end,
 })
-TeleportTab:CreateLabel("Worlds are stages: this starts Act 1 of the world")
+TeleportTab:CreateLabel("Starts Act 1 of the world")
 
 -- refresh once the map has streamed in
 task.spawn(function()
