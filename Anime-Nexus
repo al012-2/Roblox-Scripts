@@ -1755,7 +1755,10 @@ P2Tab:CreateToggle({
     CurrentValue = false,
     Flag = "P2SmartToggle",
     Callback = function(v)
-        loop("P2Smart", v and P2LOBBY, 12, function()
+        loop("P2Smart", v and P2LOBBY, 12, function() State.P2SmartStep() end)
+    end,
+})
+State.P2SmartStep = function()
             if inQueue() or LocalPlayer:GetAttribute("NWSkEnds") then return end
             -- 1) the King (every hour): Staff of Ainz, Soul Lantern, lots of materials
             local w = skWindow()
@@ -1777,9 +1780,7 @@ P2Tab:CreateToggle({
             else
                 p2Do("NWHwPart2", "survival", State.P2Diff)
             end
-        end)
-    end,
-})
+end
 
 -- ---------- Overlord Summon ----------
 P2Tab:CreateSection("Overlord Summon")
@@ -3910,6 +3911,18 @@ local PORTAL_ITEMS = {
     ZafkielSecondHand = { tier = 4, mods = 2, text = "Portal IV + 2 Hex" },
 }
 
+-- Halloween Part 2 items (NWHwPart2 data): farmed by "Smart Part 2" (King > new floors > Night / Floor 10)
+local PART2_ITEMS = {
+    NazarickRing = "Nazarick: clear 10 floors",
+    StaffOfAinzOoalGown = "Sorcerer King",
+    SoulLantern = "King / Floor 10 / Night w100",
+    EctoplasmJar = "Floor 10 / King / Night w50",
+    GraveDust = "Nazarick floors / King",
+    CoffinNail = "Nazarick floors / King",
+    TombstoneShard = "Nazarick floors / King",
+    BoneCoin = "Night of the Undead",
+}
+
 -- Stages that exist in the game files but are not playable yet ("Coming Soon" in the Legend menu),
 -- plus stages that did not start when the script tried them (learned, saved in NAXX_badstages.json).
 local NOT_RELEASED = { LegendShibuya = true, LegendCurseLair = true }
@@ -3943,6 +3956,9 @@ local function bestSource(item)
         local p = PORTAL_ITEMS[item]
         return { portal = true, tier = p.tier, mods = p.mods, map = "Pumpkin Portal", act = "Tier " .. p.tier,
             chance = 1, text = p.text }
+    end
+    if PART2_ITEMS[item] then
+        return { part2 = true, map = "Part 2", act = "", chance = 1, text = PART2_ITEMS[item] }
     end
     if INFINITE_ITEMS[item] then
         return { map = State.StoryMap or "InnovationCity", mode = "Story", act = "Infinite", chance = 0,
@@ -4004,7 +4020,7 @@ merlynCheckRaw = function()
         local info = ItemInfo[it.key]
         local where = ""
         if not ok then
-            if src and src.portal then
+            if src and (src.portal or src.part2) then
                 where = " <- " .. src.text
             elseif src and src.infinite then
                 where = string.format(" <- Inf %s w%d+", src.map, src.wave)
@@ -4221,6 +4237,10 @@ QuestTab:CreateDropdown({
 
 -- start the stage that drops an item (same call the game uses: StageEnd "StartMatch", act, diff, "Go", map)
 local function startItemStage(src)
+    if src.part2 then
+        if State.P2SmartStep then pcall(State.P2SmartStep) end
+        return
+    end
     if src.portal then
         State.PortalTier = src.tier
         State.ForceTier = true
@@ -4282,13 +4302,13 @@ QuestTab:CreateToggle({
                 local inv = findInventory() or {}
                 local have = tonumber(inv[m.key]) or 0
                 local tr = checkLastTrip(m.key, have)
-                local diff = (m.src.portal or m.src.infinite) and "-" or diffFor(m.key)
+                local diff = (m.src.portal or m.src.infinite or m.src.part2) and "-" or diffFor(m.key)
                 writeJson(TRACK_FILE, { item = m.key, have = have, diff = diff, trips = tr.trips or 0 })
                 local src = {}
                 for k, v in pairs(m.src) do src[k] = v end
                 src.item, src.diff = m.key, (diff ~= "-" and diff or nil)
                 Rayfield:Notify({ Title = "Item Farm", Content = string.format("%s: %s %s (%s)", m.key, m.src.map, m.src.act, diff) })
-                if not src.portal and not src.infinite then
+                if not src.portal and not src.infinite and not src.part2 then
                     State.LastStart = { map = src.map, act = src.act, t = os.clock() }
                 end
                 startItemStage(src)
