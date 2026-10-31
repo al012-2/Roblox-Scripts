@@ -1874,12 +1874,15 @@ local CARD_PRESETS = {
     -- most damage; accepts risky downsides (unit HP drain stops at 25%)
     ["Max Damage"] = "BloodPact, Overclock, Berserk, GlassCrystal, Annihilation, Greed, GoldenAge, Adrenaline, Erosion, Tailwind, Bounty, QuickHands, Ascension, Weaken, PowerSurge, TimeWarp, Sharpened, Mud, Repair, Fortify, Frenzy",
     -- avoids cards that make enemies hit harder or hurt the crystal (good for hard portals)
-    ["Safe"] = "Overclock, Annihilation, BloodPact, Adrenaline, Ascension, Erosion, Greed, GoldenAge, Bounty, QuickHands, PowerSurge, Weaken, TimeWarp, Sharpened, Mud, Fortify, Repair, Tailwind, GlassCrystal, Berserk, Frenzy",
+    -- the game's own rule: cards that drain your units' HP go LAST (Annihilation, Overclock, Adrenaline, BloodPact)
+    ["Safe"] = "GoldenAge, Erosion, Ascension, Bounty, QuickHands, Weaken, PowerSurge, Greed, Sharpened, TimeWarp, Mud, Fortify, Repair, Tailwind, GlassCrystal, Berserk, Frenzy, Annihilation, Overclock, Adrenaline, BloodPact",
     -- Overclock / Annihilation also give extra Candy & Coins
     ["Candy Farm"] = "Overclock, Annihilation, BloodPact, Berserk, GlassCrystal, Greed, GoldenAge, Adrenaline, Erosion, Tailwind, Bounty, QuickHands, Ascension, Weaken, PowerSurge, TimeWarp, Sharpened, Mud, Repair, Fortify, Frenzy",
 }
 local DEFAULT_CARD_ORDER = CARD_PRESETS["Max Damage"]
 local RARITY_SCORE = { Legendary = 4, Mythic = 5, Secret = 6, Epic = 3, Rare = 2, Common = 1 }
+-- cards whose downside is bigger than their bonus: never picked by "Best Rarity" if anything else is offered
+local BAD_CARDS = { Frenzy = true, TimeWarp = true, Mud = true, Fortify = true, Repair = true, Sharpened = true }
 
 State.CardMode = "Priority List"
 State.CardOrder = {}
@@ -1906,12 +1909,19 @@ function choose(options, autoIndex)
             end
         end
     end
-    -- "Best Rarity", or no card from the list: highest rarity wins, the game's own pick breaks ties
-    local best, bestScore = autoIndex or 1, -1
+    -- "Best Rarity" (or nothing from the list): highest rarity, but bad cards last,
+    -- ties broken by the Preset order, then by the game's own pick
+    local rank = {}
+    for pos, id in ipairs(State.CardOrder) do rank[id] = pos end
+    local best, bestScore = autoIndex or 1, -math.huge
     for i, o in ipairs(options) do
-        local sc = RARITY_SCORE[type(o) == "table" and o.rarity or ""] or 0
-        if i == autoIndex then sc = sc + 0.5 end
-        if sc > bestScore then best, bestScore = i, sc end
+        if type(o) == "table" then
+            local sc = (RARITY_SCORE[o.rarity or ""] or 0) * 100
+            if BAD_CARDS[o.id] then sc = sc - 1000 end
+            sc = sc - (rank[o.id] or 50)
+            if i == autoIndex then sc = sc + 0.5 end
+            if sc > bestScore then best, bestScore = i, sc end
+        end
     end
     return best
 end
