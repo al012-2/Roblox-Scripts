@@ -200,6 +200,8 @@ local function getGroup(groupName)
 end
 
 local SHORT = {
+    ["Potions"] = "Pot",
+    ["Cards (inside portal)"] = "Cards",
     ["Tier Order (first = most wanted)"] = "Tier Order",
     ["Many = enemies in range"] = "Min Enemies",
     ["Area (type to search)"] = "Area",
@@ -217,7 +219,7 @@ local SHORT = {
     ["Auto Claim Portal"] = "Claim Portal",
     ["Auto Claim HTower"] = "Claim HTower",
     ["Smart Abilities"] = "Ability",
-    ["Minigames"] = "Arcade",
+    ["Minigames"] = "Game",
     ["Teleport"] = "TP",
     ["Ability Mode"] = "Mode",
     ["Use Tier Order"] = "Tier Order On",
@@ -1893,6 +1895,7 @@ local function parseOrder(text)
     local list = {}
     for id in tostring(text or ""):gmatch("[^,%s]+") do list[#list + 1] = id end
     State.CardOrder = list
+    if State.ShowOrder then pcall(State.ShowOrder) end
 end
 parseOrder(DEFAULT_CARD_ORDER)
 
@@ -1962,8 +1965,8 @@ end)
 
 PortalTab:CreateInput({
     Name = "Custom Priority (best first, comma separated)",
-    CurrentValue = DEFAULT_CARD_ORDER,
-    PlaceholderText = DEFAULT_CARD_ORDER,
+    CurrentValue = "",
+    PlaceholderText = "GoldenAge, Erosion, ...",
     Flag = "CardOrderInput",
     Callback = function(txt)
         State.CustomCardOrder = txt
@@ -1972,7 +1975,19 @@ PortalTab:CreateInput({
     end,
 })
 
-PortalTab:CreateLabel("Custom = Preset Custom")
+PortalTab:CreateLabel("Custom box is used when Preset = Custom")
+local OrderInfo = PortalTab:CreateParagraph({ Title = "Order in use", Content = "-", Lines = 7, Wrap = 38 })
+local function showOrder()
+    local t = {}
+    for i, id in ipairs(State.CardOrder) do t[#t + 1] = i .. "." .. id end
+    OrderInfo:Set({ Title = "Order in use", Content = table.concat(t, "  ") })
+end
+State.ShowOrder = showOrder
+task.spawn(function()
+    while not Booted do task.wait(0.5) end
+    task.wait(1)
+    showOrder()
+end)
 
 do
     local rogue = Remotes:FindFirstChild("NWRogue")
@@ -2308,7 +2323,6 @@ PortalTab:CreateButton({
 })
 
 -- ---------- keep the script running after teleport ----------
-PortalTab:CreateSection("Teleport")
 PortalTab:CreateLabel("Auto re-run after teleport")
 
 do
