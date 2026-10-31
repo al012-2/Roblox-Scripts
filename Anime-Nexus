@@ -10,6 +10,7 @@
       Battle    : skip wave, replay, vote, game speed, smart abilities
       Raid      : raids + raid shops
       Halloween : doors, ghosts, halloween quests, haunted tower, candy shop, portal rewards
+      Part 2    : Night of the Undead, Nazarick floors + siege, Sorcerer King, Overlord Summon, rewards
       Portal    : Pumpkin Portals (open + join, tier order), cards, Portal Arcade
       Modes     : Boss Rush, Challenge, Gem Rush, Invasion, Hollow Hunt, Rogue, SBR
       Roll      : Auto Roll
@@ -37,7 +38,7 @@ local CONFIG_FOLDER = "AnimeNexusRNG"
 local OBSIDIAN_REF  = "main"
 local FALLBACK_REF  = "main"
 
-local RUN_GROUPS = { ["Story"] = true, ["Raid"] = true, ["Modes"] = true, ["Roll"] = true, ["Tower"] = true, ["Battle"] = true }
+local RUN_GROUPS = { ["Story"] = true, ["Raid"] = true, ["Modes"] = true, ["Roll"] = true, ["Tower"] = true, ["Battle"] = true, ["Part 2"] = true }
 
 -- ===== Only one copy at a time: running the script again closes the old one first =====
 local GENV = (getgenv and getgenv()) or _G
@@ -169,6 +170,7 @@ local GroupOf = {
     ["Auto Farm"] = "Story",
     ["Kaiju Raid"] = "Raid", ["Raid Shop"] = "Raid",
     ["Halloween"] = "Halloween", ["Custom Boss"] = "Halloween", ["Candy Shop"] = "Halloween",
+    ["Halloween Part 2"] = "Part 2",
     ["Pumpkin Portal"] = "Portal",
     ["Secret Bosses"] = "Modes", ["Boss Modes"] = "Modes",
     ["Roll & Tower"] = "Roll",
@@ -183,11 +185,12 @@ local GroupOf = {
 }
 -- Some sections move to another sidebar tab than the rest of their tab
 local SectionGroup = {
-    ["Match Controls"] = "Match",
-    ["Haunted Tower"] = "HTower",
+    ["Match Controls"] = "Battle",
+    ["Smart Abilities"] = "Battle",
+    ["Haunted Tower"] = "Halloween",
 }
 local GroupIcons = {
-    ["Story"] = "book-open", ["Battle"] = "swords", ["Raid"] = "shield", ["Halloween"] = "ghost",
+    ["Story"] = "book-open", ["Battle"] = "swords", ["Part 2"] = "moon", ["Raid"] = "shield", ["Halloween"] = "ghost",
     ["Portal"] = "door-open", ["Modes"] = "skull", ["Roll"] = "dice-5", ["Tower"] = "castle",
     ["Items"] = "flask-conical", ["Quests"] = "scroll", ["Misc"] = "compass", ["Evolve"] = "sparkles",
     ["Collect"] = "search", ["Teleport"] = "map-pin", ["Tracker"] = "activity",
@@ -353,6 +356,11 @@ local SHORT = {
     ["Halloween Event"] = "Event",
     ["Halloween Portal"] = "Rewards",
     ["Haunted Tower"] = "HTower",
+    ["Night of the Undead"] = "Night",
+    ["Overlord Summon"] = "Summon",
+    ["Sorcerer King"] = "King",
+    ["Part 2 Rewards"] = "Rewards",
+    ["Part 2 Info"] = "Info",
     ["Infinity Tower & Castle"] = "Tower",
     ["Live Currency & Event Tracker"] = "Live",
     ["Match Controls"] = "Match",
@@ -1529,6 +1537,278 @@ HwTab:CreateButton({
     Callback = function()
         fireRemote("NWHwQuestBoard", "claimall")
         Rayfield:Notify({ Title = "Halloween", Content = "Sent Claim All request!" })
+    end,
+})
+end -- ===== section end =====
+
+-- ===== Halloween Part 2 (from NWHwPart2UI / NWSorcererKingAE decompile) =====
+--   NWHwPart2   : ("state") ("survival", "Easy"/"Medium"/"Hard") ("floor", 1..10) ("summon", n) ("board")
+--   NWHwP2Events: ("state") ("calclaim") ("cgclaim", tier)
+--   NWSorcererKing: ("join") / ("leave")   queue -> player attribute NWSkQ, in fight -> NWSkEnds
+--   NWNazSiege  : ("join", floor) / ("leave")   queue -> player attribute NWNsQ
+--   player attributes (JSON): NWHwP2 {coins, floors, pieces, pity, best ...}  NWHwP2Ev {cal, cg}
+do -- ===== section =====
+local P2Tab = Window:CreateTab("Halloween Part 2")
+local P2LOBBY = game.PlaceId == 85962582687820
+local P2D
+pcall(function() P2D = require(ReplicatedStorage.Modules.Shared.Data:WaitForChild("NWHwPart2", 10)) end)
+
+local function jattr(inst, key)
+    local a = inst:GetAttribute(key)
+    if a == nil then return nil end
+    local ok, r = pcall(HttpService.JSONDecode, HttpService, a)
+    return (ok and type(r) == "table") and r or nil
+end
+local function p2State() return jattr(LocalPlayer, "NWHwP2") or {} end
+local function p2Ev() return jattr(LocalPlayer, "NWHwP2Ev") or {} end
+local function says(r)
+    if type(r) ~= "table" then return "-- no answer" end
+    return r.ok and "OK" or ("-- " .. tostring(r.msg or "failed"))
+end
+local function flag(t, i)
+    return type(t) == "table" and (t[i] == true or t[tostring(i)] == true)
+end
+local function clockTxt(s)
+    s = math.max(0, math.floor(tonumber(s) or 0))
+    if s >= 3600 then return string.format("%dh %02dm", math.floor(s / 3600), math.floor((s % 3600) / 60)) end
+    return string.format("%dm %02ds", math.floor(s / 60), s % 60)
+end
+local function shortNum(n)
+    n = tonumber(n) or 0
+    if n >= 1e6 then return string.format("%.1fM", n / 1e6) end
+    if n >= 1e3 then return string.format("%.1fK", n / 1e3) end
+    return tostring(math.floor(n))
+end
+
+State.P2Diff, State.P2Floor, State.P2Last, State.P2Keep = "Medium", "Auto", "-", 0
+local function p2Do(remote, ...)
+    local r = invokeRemote(remote, ...)
+    State.P2Last = tostring((...)) .. ": " .. says(r)
+    return r
+end
+
+local FLOORS_N = (P2D and P2D.NAZ and P2D.NAZ.FLOORS and #P2D.NAZ.FLOORS) or 10
+local function bestFloor()
+    local s = p2State()
+    for i = FLOORS_N, 1, -1 do
+        if i == 1 or flag(s.floors, i - 1) then return i end
+    end
+    return 1
+end
+local function floorArg()
+    if State.P2Floor == "Auto" then return bestFloor() end
+    return tonumber(State.P2Floor) or 1
+end
+local function floorsCleared()
+    local s, n = p2State(), 0
+    for i = 1, FLOORS_N do if flag(s.floors, i) then n = n + 1 end end
+    return n
+end
+local function skWindow()
+    if not (P2D and P2D.WB and P2D.WB.Window) then return nil end
+    local ok, w = pcall(P2D.WB.Window, workspace:GetServerTimeNow(), ReplicatedStorage:GetAttribute("NWSkForceUntil"))
+    return ok and type(w) == "table" and w or nil
+end
+local function inQueue()
+    return jattr(LocalPlayer, "NWSkQ") ~= nil or jattr(LocalPlayer, "NWNsQ") ~= nil
+end
+
+-- one start at a time, so two Auto toggles never fight
+local lastP2Start = 0
+local function canStart()
+    return P2LOBBY and not inQueue() and os.clock() - lastP2Start > 45
+end
+
+-- ---------- info ----------
+P2Tab:CreateSection("Part 2 Info")
+local P2Info = P2Tab:CreateParagraph({ Title = "Part 2", Content = "-", Lines = 6 })
+local function p2Show()
+    local s, now = p2State(), workspace:GetServerTimeNow()
+    local lines = {}
+    lines[#lines + 1] = string.format("Bone Coins %s | Floors %d/%d | Ring %s/%s",
+        shortNum(s.coins), floorsCleared(), FLOORS_N, tostring(s.pieces or 0),
+        tostring(P2D and P2D.NAZ and P2D.NAZ.PIECES_FOR_EVO or 10))
+    local w = skWindow()
+    if w then
+        lines[#lines + 1] = w.open and ("King: OPEN, closes in " .. clockTxt((w.closesAt or now) - now))
+            or ("King: opens in " .. clockTxt((w.opensAt or now) - now))
+    end
+    local q = jattr(LocalPlayer, "NWSkQ") or jattr(LocalPlayer, "NWNsQ")
+    if q then lines[#lines + 1] = string.format("In queue %s/%s, starts in %s", tostring(q.n or 1), tostring(q.max or 4), clockTxt((tonumber(q.at) or now) - now)) end
+    local bm, dk = tonumber(ReplicatedStorage:GetAttribute("NWBloodMoon")), tonumber(ReplicatedStorage:GetAttribute("NWDkInv"))
+    lines[#lines + 1] = "Blood Moon: " .. (bm and ("ON " .. clockTxt(bm - now)) or "off")
+        .. " | Knights: " .. (dk and ("ON " .. clockTxt(dk - now)) or "off")
+    lines[#lines + 1] = "Hunt: " .. shortNum(ReplicatedStorage:GetAttribute("NWHwCG")) .. " | Pity " .. tostring(s.pity or 0)
+    lines[#lines + 1] = "Last: " .. tostring(State.P2Last)
+    P2Info:Set({ Title = "Part 2", Content = table.concat(lines, "\n") })
+end
+P2Tab:CreateButton({ Name = "Refresh", Callback = function() task.spawn(function() invokeRemote("NWHwPart2", "state") p2Show() end) end })
+task.spawn(function()
+    while State.Running do
+        pcall(p2Show)
+        task.wait(3)
+    end
+end)
+
+-- ---------- Night of the Undead (endless) ----------
+P2Tab:CreateSection("Night of the Undead")
+P2Tab:CreateDropdown({
+    Name = "Difficulty",
+    Options = { "Easy", "Medium", "Hard" },
+    CurrentOption = { "Medium" },
+    Flag = "P2DiffDropdown",
+    Callback = function(o) State.P2Diff = o[1] or "Medium" end,
+})
+P2Tab:CreateButton({
+    Name = "Start Night",
+    Callback = function() task.spawn(function() p2Do("NWHwPart2", "survival", State.P2Diff) p2Show() end) end,
+})
+P2Tab:CreateToggle({
+    Name = "Auto Night",
+    CurrentValue = false,
+    Flag = "P2AutoNightToggle",
+    Callback = function(v)
+        loop("P2AutoNight", v and P2LOBBY, 15, function()
+            if not canStart() then return end
+            lastP2Start = os.clock()
+            p2Do("NWHwPart2", "survival", State.P2Diff)
+        end)
+    end,
+})
+
+-- ---------- Great Tomb of Nazarick (10 floors) ----------
+P2Tab:CreateSection("Nazarick")
+local floorOpts = { "Auto" }
+for i = 1, FLOORS_N do floorOpts[#floorOpts + 1] = tostring(i) end
+P2Tab:CreateDropdown({
+    Name = "Floor (Auto = highest open)",
+    Options = floorOpts,
+    CurrentOption = { "Auto" },
+    Flag = "P2FloorDropdown",
+    Callback = function(o) State.P2Floor = o[1] or "Auto" end,
+})
+P2Tab:CreateButton({
+    Name = "Start Floor (solo)",
+    Callback = function() task.spawn(function() p2Do("NWHwPart2", "floor", floorArg()) p2Show() end) end,
+})
+P2Tab:CreateToggle({
+    Name = "Auto Floor",
+    CurrentValue = false,
+    Flag = "P2AutoFloorToggle",
+    Callback = function(v)
+        loop("P2AutoFloor", v and P2LOBBY, 15, function()
+            if not canStart() then return end
+            lastP2Start = os.clock()
+            p2Do("NWHwPart2", "floor", floorArg())
+        end)
+    end,
+})
+P2Tab:CreateButton({
+    Name = "Join Siege (group)",
+    Callback = function() task.spawn(function() p2Do("NWNazSiege", "join", floorArg()) p2Show() end) end,
+})
+P2Tab:CreateButton({
+    Name = "Leave Queue",
+    Callback = function()
+        task.spawn(function()
+            if jattr(LocalPlayer, "NWNsQ") then p2Do("NWNazSiege", "leave") end
+            if jattr(LocalPlayer, "NWSkQ") then p2Do("NWSorcererKing", "leave") end
+            p2Show()
+        end)
+    end,
+})
+
+-- ---------- The Sorcerer King (world boss, opens every hour) ----------
+P2Tab:CreateSection("Sorcerer King")
+P2Tab:CreateButton({
+    Name = "Join King Now",
+    Callback = function() task.spawn(function() p2Do("NWSorcererKing", "join") p2Show() end) end,
+})
+P2Tab:CreateToggle({
+    Name = "Auto Join King",
+    CurrentValue = false,
+    Flag = "P2AutoKingToggle",
+    Callback = function(v)
+        loop("P2AutoKing", v and P2LOBBY, 10, function()
+            local w = skWindow()
+            if not (w and w.open) then return end
+            if inQueue() or LocalPlayer:GetAttribute("NWSkEnds") then return end
+            lastP2Start = os.clock() -- the King wins over Auto Night / Auto Floor
+            p2Do("NWSorcererKing", "join")
+        end)
+    end,
+})
+
+-- ---------- Overlord Summon ----------
+P2Tab:CreateSection("Overlord Summon")
+local function maxPulls(coins)
+    if P2D and P2D.SUMMON and P2D.SUMMON.MultiN then
+        local ok, n = pcall(P2D.SUMMON.MultiN, coins)
+        if ok and tonumber(n) then return tonumber(n) end
+    end
+    local cost = (P2D and P2D.SUMMON and P2D.SUMMON.COST) or 50
+    return math.min(math.floor((tonumber(coins) or 0) / cost), 50)
+end
+local function summonNow(n)
+    if n and n > 0 then p2Do("NWHwPart2", "summon", n) end
+end
+P2Tab:CreateButton({ Name = "Summon x1", Callback = function() task.spawn(function() summonNow(1) p2Show() end) end })
+P2Tab:CreateButton({
+    Name = "Summon Max",
+    Callback = function() task.spawn(function() summonNow(maxPulls(p2State().coins)) p2Show() end) end,
+})
+P2Tab:CreateInput({
+    Name = "Keep Bone Coins",
+    CurrentValue = "0",
+    PlaceholderText = "0",
+    Flag = "P2KeepInput",
+    Callback = function(t) State.P2Keep = tonumber(t) or 0 end,
+})
+P2Tab:CreateToggle({
+    Name = "Auto Summon",
+    CurrentValue = false,
+    Flag = "P2AutoSummonToggle",
+    Run = false,
+    Callback = function(v)
+        loop("P2AutoSummon", v and P2LOBBY, 8, function()
+            local spare = (tonumber(p2State().coins) or 0) - (State.P2Keep or 0)
+            summonNow(maxPulls(spare))
+        end)
+    end,
+})
+
+-- ---------- free rewards ----------
+P2Tab:CreateSection("Part 2 Rewards")
+local function claimRewards()
+    local ev, now = p2Ev(), workspace:GetServerTimeNow()
+    -- Halloween Calendar: one day per real day
+    if P2D and P2D.EV and P2D.EV.CAL and P2D.EV.Day then
+        local cal = type(ev.cal) == "table" and ev.cal or {}
+        local okDay, today = pcall(P2D.EV.Day, now)
+        if okDay and (tonumber(cal.n) or 0) < #P2D.EV.CAL.DAYS and tonumber(cal.day) ~= today and now <= (P2D.EV.CAL.ENDS or math.huge) then
+            p2Do("NWHwP2Events", "calclaim")
+        end
+    end
+    -- Undead Hunt: server-wide goal tiers
+    if P2D and P2D.EV and P2D.EV.CG then
+        local total = tonumber(ReplicatedStorage:GetAttribute("NWHwCG")) or 0
+        local cg = type(ev.cg) == "table" and ev.cg or {}
+        for i, t in ipairs(P2D.EV.CG.TIERS) do
+            if t.goal <= total and not flag(cg, i) then
+                p2Do("NWHwP2Events", "cgclaim", i)
+                task.wait(0.4)
+            end
+        end
+    end
+end
+P2Tab:CreateButton({ Name = "Claim Now", Callback = function() task.spawn(function() claimRewards() p2Show() end) end })
+P2Tab:CreateToggle({
+    Name = "Auto Claim",
+    CurrentValue = false,
+    Flag = "P2AutoClaimToggle",
+    Run = false,
+    Callback = function(v)
+        loop("P2AutoClaim", v and P2LOBBY, 60, claimRewards)
     end,
 })
 end -- ===== section end =====
