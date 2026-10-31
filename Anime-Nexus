@@ -1003,11 +1003,13 @@ local Window = Rayfield:CreateWindow({
 -- ====================================================================
 -- 1. FARM GROUP ("Auto Farm" & "Kaiju Raid")
 -- ====================================================================
+local STORY_MAPS
+do -- ===== section =====
 local AutoFarmTab = Window:CreateTab("Auto Farm")
 AutoFarmTab:CreateSection("Story & Stages")
 
 -- verified with BossSpy: NWAction {type="StorySkip", op="Start", map=...} (from NWStoryAE)
-local STORY_MAPS = {
+STORY_MAPS = {
     "InnovationCity", "CursedHighSchool", "BizarreTown", "Priestella", "Leaf_Village", "Namek",
     "CapsuleCorp", "CapeCanaveral", "ChuninExams", "FinalValley", "Shibuya_City", "Shinjuku",
     "HollowWorld", "Hueco_Mundo", "GoteiBarracks", "EisenbernCastle", "Vahrwelt", "SlimeIsland",
@@ -1290,7 +1292,9 @@ AutoFarmTab:CreateButton({
         end
     end,
 })
+end -- ===== section end =====
 
+do -- ===== section =====
 local RaidTab = Window:CreateTab("Kaiju Raid")
 RaidTab:CreateSection("Raids & Portals")
 
@@ -1356,10 +1360,12 @@ RaidTab:CreateButton({
         end
     end,
 })
+end -- ===== section end =====
 
 -- ====================================================================
 -- 2. BOSSES GROUP ("Halloween", "Custom Boss", "Secret Bosses")
 -- ====================================================================
+do -- ===== section =====
 local HwTab = Window:CreateTab("Halloween")
 HwTab:CreateSection("Halloween Event")
 
@@ -1495,8 +1501,10 @@ HwTab:CreateButton({
         Rayfield:Notify({ Title = "Halloween", Content = "Sent Claim All request!" })
     end,
 })
+end -- ===== section end =====
 
 -- all verified with RemoteScan: NWAction {type=<mode>, op="Start"}
+do -- ===== section =====
 local SecretBossTab = Window:CreateTab("Secret Bosses")
 SecretBossTab:CreateSection("Invasion")
 SecretBossTab:CreateButton({
@@ -1557,8 +1565,10 @@ SecretBossTab:CreateToggle({
         loop("AutoSBRRace", v, 6, function() nwAction({ type = "SBRRace", op = "Start" }) end)
     end,
 })
+end -- ===== section end =====
 
 
+do -- ===== section =====
 local CustomBossTab = Window:CreateTab("Custom Boss")
 CustomBossTab:CreateSection("Halloween Portal")
 
@@ -1588,8 +1598,11 @@ CustomBossTab:CreateButton({
         if GG.P2_HwPortalTop then pcall(GG.P2_HwPortalTop) end
     end,
 })
+end -- ===== section end =====
 
 -- Boss modes verified with BossSpy (NWAction)
+local IN_LOBBY, IN_PORTAL
+do -- ===== section =====
 local BossModesTab = Window:CreateTab("Boss Modes")
 BossModesTab:CreateSection("Boss Rush")
 
@@ -1662,15 +1675,18 @@ BossModesTab:CreateToggle({
 -- ====================================================================
 local LOBBY_PLACE  = 85962582687820
 local PORTAL_PLACE = 135920189096514
-local IN_LOBBY  = game.PlaceId == LOBBY_PLACE
-local IN_PORTAL = game.PlaceId == PORTAL_PLACE
+IN_LOBBY  = game.PlaceId == LOBBY_PLACE
+IN_PORTAL = game.PlaceId == PORTAL_PLACE
 
 State.PortalTier = 3
 State.PortalMods = {}
 State.CardMode = "Game Auto Cards"
 State.LastCardEvent = "none yet"
 State.LastRoomList = nil
+end -- ===== section end =====
 
+local openAndJoinPortal, choose
+do -- ===== section =====
 local PortalTab = Window:CreateTab("Pumpkin Portal")
 
 -- ---------- lobby: open + join ----------
@@ -1783,7 +1799,7 @@ local function roomIdFrom(list)
     return best -- fallback: newest room
 end
 
-local function openAndJoinPortal()
+function openAndJoinPortal()
     if not IN_LOBBY then return false, "not in lobby" end
     if State.UseTierOrder and not State.ForceTier then
         local t, owned = pickTier()
@@ -1877,7 +1893,7 @@ local function parseOrder(text)
 end
 parseOrder(DEFAULT_CARD_ORDER)
 
-local function choose(options, autoIndex)
+function choose(options, autoIndex)
     local mode = State.CardMode
     if mode == "Always 1" then return 1 end
     if mode == "Always 2" then return 2 end
@@ -2303,10 +2319,12 @@ do
         end
     end)
 end
+end -- ===== section end =====
 
 -- ====================================================================
 -- 3. ROLL & TOWER GROUP ("Roll & Tower", "Infinity Tower")
 -- ====================================================================
+do -- ===== section =====
 local RollTab = Window:CreateTab("Roll & Tower")
 RollTab:CreateSection("RNG Roll & Units")
 
@@ -2422,7 +2440,9 @@ RollTab:CreateButton({
         end
     end,
 })
+end -- ===== section end =====
 
+do -- ===== section =====
 local InfTowerTab = Window:CreateTab("Infinity Tower")
 InfTowerTab:CreateSection("Infinity Tower & Castle")
 
@@ -2468,10 +2488,12 @@ InfTowerTab:CreateToggle({
         end)
     end,
 })
+end -- ===== section end =====
 
 -- ====================================================================
 -- 4. ITEMS GROUP ("Potions", "Crafting", "Raid Shop", "Candy Shop")
 -- ====================================================================
+do -- ===== section =====
 local PotionsTab = Window:CreateTab("Potions")
 PotionsTab:CreateSection("Use Items & Potions")
 
@@ -2504,7 +2526,9 @@ PotionsTab:CreateToggle({
         end)
     end,
 })
+end -- ===== section end =====
 
+do -- ===== section =====
 local CraftingTab = Window:CreateTab("Crafting")
 CraftingTab:CreateSection("Crafting & Chips")
 
@@ -2514,7 +2538,9 @@ CraftingTab:CreateButton({
         fireRemote("ConvertChips")
     end,
 })
+end -- ===== section end =====
 
+do -- ===== section =====
 local RaidShopTab = Window:CreateTab("Raid Shop")
 RaidShopTab:CreateSection("Raid & Event Shops")
 
@@ -2546,7 +2572,9 @@ RaidShopTab:CreateButton({
         end
     end,
 })
+end -- ===== section end =====
 
+do -- ===== section =====
 local CandyShopTab = Window:CreateTab("Candy Shop")
 CandyShopTab:CreateSection("Halloween & Night Shops")
 
@@ -2603,10 +2631,12 @@ CandyShopTab:CreateButton({
         end
     end,
 })
+end -- ===== section end =====
 
 -- ====================================================================
 -- 5. MISC GROUP ("Quests", "NPCs", "Server & Rejoin")
 -- ====================================================================
+do -- ===== section =====
 local QuestsTab = Window:CreateTab("Quests")
 QuestsTab:CreateSection("Auto Quests")
 
@@ -2673,7 +2703,9 @@ QuestsTab:CreateButton({
         end
     end,
 })
+end -- ===== section end =====
 
+do -- ===== section =====
 local NPCsTab = Window:CreateTab("NPCs")
 NPCsTab:CreateSection("Special NPC Questlines")
 
@@ -2786,7 +2818,9 @@ NPCsTab:CreateButton({
         Rayfield:Notify({ Title = "Evolution Quest", Content = "Started: " .. State.SelectedEvoQuest })
     end,
 })
+end -- ===== section end =====
 
+do -- ===== section =====
 local ServerTab = Window:CreateTab("Server & Rejoin")
 ServerTab:CreateSection("Server & Codes")
 
@@ -2848,8 +2882,10 @@ ServerTab:CreateButton({
         TeleportService:Teleport(game.PlaceId, LocalPlayer)
     end,
 })
+end -- ===== section end =====
 
 -- The game's own settings (verified with BossSpy: ChangeSetting "<Key>", bool)
+do -- ===== section =====
 local GameSettingsTab = Window:CreateTab("Game Settings")
 local GAME_SETTINGS = {
     { "Automation", {
@@ -2885,6 +2921,7 @@ for _, section in ipairs(GAME_SETTINGS) do
         })
     end
 end
+end -- ===== section end =====
 
 
 -- ====================================================================
@@ -2894,6 +2931,7 @@ end
 --   evolution quests  : ReplicatedStorage.Modules.GameData.EvolutionQuests (requirements only, progress is server side)
 --                       Questline:FireServer("Start", key)
 -- ====================================================================
+do -- ===== section =====
 local QuestTab = Window:CreateTab("Quest Helper")
 
 -- turn one of the existing farm toggles on/off by its Flag
@@ -3632,12 +3670,15 @@ task.spawn(function()
     showEvo()
     pcall(refreshQuest)
 end)
+end -- ===== section end =====
 
 
 -- ====================================================================
 -- COLLECTOR — finds hidden items in the map, walks (teleports) to them and picks them up
 --   works with ProximityPrompts, ClickDetectors and touch pickups whose names match
 -- ====================================================================
+local isMine
+do -- ===== section =====
 local CollectTab = Window:CreateTab("Collector")
 
 local COLLECT = {
@@ -3667,7 +3708,7 @@ local function nameChain(inst)
     return table.concat(parts, " ")
 end
 
-local function isMine(inst)
+function isMine(inst)
     local char = LocalPlayer.Character
     if char and inst:IsDescendantOf(char) then return true end
     for _, pl in ipairs(Players:GetPlayers()) do
@@ -3824,6 +3865,7 @@ CollectTab:CreateButton({
 CollectTab:CreateLabel("Fingers: Curse Lair")
 CollectTab:CreateLabel("Chests: HW Island")
 CollectTab:CreateLabel("Horseshoes: lobby, halls")
+end -- ===== section end =====
 
 
 -- ====================================================================
@@ -3831,6 +3873,7 @@ CollectTab:CreateLabel("Horseshoes: lobby, halls")
 --   NPCs  : models with a talk prompt (ObjectText = NPC name) + workspace.npcs
 --   Areas : NW_HwTravelAnchors, P2_Portals, spawn points, halls (NWWarp), Halloween Island
 -- ====================================================================
+do -- ===== section =====
 local TeleportTab = Window:CreateTab("Teleport")
 
 local function hrpNow()
@@ -4002,10 +4045,12 @@ task.spawn(function()
     pcall(function() NpcDD:Refresh(scanNpcs()) end)
     pcall(function() AreaDD:Refresh(scanAreas()) end)
 end)
+end -- ===== section end =====
 
 -- ====================================================================
 -- 6. TRACKER GROUP ("Tracker")
 -- ====================================================================
+do -- ===== section =====
 local TrackerTab = Window:CreateTab("Tracker")
 TrackerTab:CreateSection("Live Currency & Event Tracker")
 
@@ -4050,4 +4095,5 @@ end)
 
 -- Load configuration and build UI Settings tab at the very end
 Booted = true
+end -- ===== section end =====
 Rayfield:LoadConfiguration()
