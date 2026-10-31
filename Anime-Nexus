@@ -2109,8 +2109,41 @@ local function roomIdFrom(list)
     return best -- fallback: newest room
 end
 
+-- 3 portals of one tier fuse into 1 of the next: NWHwPortal("fuse", fromTier, 1)  (NWHwPortalAF)
+local FUSE_COST = 3
+pcall(function()
+    local m = ReplicatedStorage:FindFirstChild("NWHwPortals", true)
+    local d = m and m:IsA("ModuleScript") and require(m)
+    if type(d) == "table" and tonumber(d.FUSE_COST) then FUSE_COST = tonumber(d.FUSE_COST) end
+end)
+-- makes 1 portal of `tier` from lower tiers when you have none (only if it is possible)
+local function ensureTier(tier)
+    local owned = ownedPortals()
+    if (tonumber(owned[tier]) or 0) > 0 then return true end
+    local carry = 0
+    for k = 1, tier - 1 do carry = math.floor(((tonumber(owned[k]) or 0) + carry) / FUSE_COST) end
+    if carry < 1 then return false end
+    for _ = 1, 40 do
+        if (tonumber(owned[tier]) or 0) > 0 then return true end
+        local from
+        for k = tier - 1, 1, -1 do
+            if (tonumber(owned[k]) or 0) >= FUSE_COST then from = k break end
+        end
+        if not from then return false end
+        invokeRemote("NWHwPortal", "fuse", from, 1)
+        task.wait(0.6)
+        owned = ownedPortals()
+    end
+    return (tonumber(owned[tier]) or 0) > 0
+end
+State.EnsureTier = ensureTier
+
 function openAndJoinPortal()
     if not IN_LOBBY then return false, "not in lobby" end
+    if State.ForceTier and State.PortalTier and not ensureTier(State.PortalTier) then
+        State.ForceTier = nil
+        return false, "no Tier " .. tostring(State.PortalTier) .. " portal (and not enough to fuse)"
+    end
     if State.UseTierOrder and not State.ForceTier then
         local t, owned = pickTier()
         pcall(showPortals, owned)
