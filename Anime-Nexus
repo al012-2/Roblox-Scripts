@@ -980,6 +980,12 @@ end
 -- false until the UI is built: stops dropdown defaults from firing remotes at startup
 local Booted = false
 
+-- acts are NUMBERS for the server (results show Act = 4); "Act2" was read as nothing -> Act 1
+local function actArg(a)
+    if a == nil or a == "Infinite" then return a end
+    return tonumber(tostring(a):match("%d+")) or a
+end
+
 local function nwAction(payload)
     fireRemote("NWAction", payload)
 end
@@ -1069,7 +1075,7 @@ AutoFarmTab:CreateDropdown({
 })
 
 local function startStory()
-    fireRemote("StageEnd", "StartMatch", State.StoryAct, State.StoryDifficulty, "Go", State.StoryMap)
+    fireRemote("StageEnd", "StartMatch", actArg(State.StoryAct), State.StoryDifficulty, "Go", State.StoryMap)
 end
 
 AutoFarmTab:CreateButton({ Name = "Start Story Stage Once", Callback = startStory })
@@ -1357,9 +1363,9 @@ RaidTab:CreateDropdown({
 
 local function startRaid()
     -- the game sends PrepareRaid from the lobby and StartMatch on the raid server; sending both is harmless
-    fireRemote("StageEnd", "PrepareRaid", State.RaidAct, State.RaidDiff, nil, State.SelectedRaid)
+    fireRemote("StageEnd", "PrepareRaid", actArg(State.RaidAct), State.RaidDiff, nil, State.SelectedRaid)
     task.wait(0.5)
-    fireRemote("StageEnd", "StartMatch", State.RaidAct, State.RaidDiff, nil, State.SelectedRaid)
+    fireRemote("StageEnd", "StartMatch", actArg(State.RaidAct), State.RaidDiff, nil, State.SelectedRaid)
 end
 
 RaidTab:CreateButton({ Name = "Start Selected Raid Once", Callback = startRaid })
@@ -3435,9 +3441,35 @@ local PORTAL_ITEMS = {
     ZafkielSecondHand = { tier = 4, mods = 2, text = "Portal IV + 2 Hex" },
 }
 
+-- Stages that exist in the game files but are not playable yet ("Coming Soon" in the Legend menu),
+-- plus stages that did not start when the script tried them (learned, saved in NAXX_badstages.json).
+local NOT_RELEASED = { LegendShibuya = true, LegendCurseLair = true }
+local BAD_FILE = "NAXX_badstages.json"
+local BadStages = {}
+pcall(function()
+    if isfile and isfile(BAD_FILE) then
+        BadStages = game:GetService("HttpService"):JSONDecode(readfile(BAD_FILE)) or {}
+    end
+end)
+local function stageUsable(src)
+    return not NOT_RELEASED[src.map] and not BadStages[src.map .. "/" .. src.act]
+end
+State.MarkBadStage = function(map, act)
+    BadStages[map .. "/" .. act] = true
+    pcall(function() if writefile then writefile(BAD_FILE, game:GetService("HttpService"):JSONEncode(BadStages)) end end)
+end
+State.ClearBadStages = function()
+    BadStages = {}
+    pcall(function() if writefile then writefile(BAD_FILE, "{}") end end)
+end
+
 local function bestSource(item)
     local list = LootIndex[item]
-    if list and list[1] then return list[1] end
+    if list then
+        for _, src in ipairs(list) do
+            if stageUsable(src) then return src end
+        end
+    end
     if PORTAL_ITEMS[item] then
         local p = PORTAL_ITEMS[item]
         return { portal = true, tier = p.tier, mods = p.mods, map = "Pumpkin Portal", act = "Tier " .. p.tier,
@@ -3734,11 +3766,19 @@ local function startItemStage(src)
         -- same call the game uses for Infinite: StageEnd "StartMatch", "Infinite", "Normal", "Prepare", map
         fireRemote("StageEnd", "StartMatch", "Infinite", "Normal", "Prepare", src.map)
     else
-        fireRemote("StageEnd", "StartMatch", src.act, src.diff or diffFor(src.item or ""), "Go", src.map)
+        fireRemote("StageEnd", "StartMatch", actArg(src.act), src.diff or diffFor(src.item or ""), "Go", src.map)
     end
 end
 
 State.DiffFor = diffFor
+QuestTab:CreateButton({
+    Name = "Reset Stage List",
+    Callback = function()
+        State.ClearBadStages()
+        Rayfield:Notify({ Title = "Item Farm", Content = "stages that failed will be tried again" })
+    end,
+})
+
 QuestTab:CreateButton({
     Name = "Forget Learned Diff",
     Callback = function()
@@ -3760,6 +3800,14 @@ QuestTab:CreateToggle({
             invCache = nil
             local ready = merlynCheck()
             if ready then return end -- Auto Evolve does the rest
+            -- the last start did not move us out of the lobby: that stage is not playable for you
+            local ls = State.LastStart
+            if ls and os.clock() - ls.t > 40 and os.clock() - ls.t < 200 then
+                State.MarkBadStage(ls.map, ls.act)
+                Rayfield:Notify({ Title = "Item Farm", Content = ls.map .. " " .. ls.act .. " did not start, using another stage" })
+                State.LastStart = nil
+                merlynCheck()
+            end
             local m = State.MissingItem
             if m then
                 local inv = findInventory() or {}
@@ -3771,6 +3819,9 @@ QuestTab:CreateToggle({
                 for k, v in pairs(m.src) do src[k] = v end
                 src.item, src.diff = m.key, (diff ~= "-" and diff or nil)
                 Rayfield:Notify({ Title = "Item Farm", Content = string.format("%s: %s %s (%s)", m.key, m.src.map, m.src.act, diff) })
+                if not src.portal and not src.infinite then
+                    State.LastStart = { map = src.map, act = src.act, t = os.clock() }
+                end
                 startItemStage(src)
             end
         end)
@@ -4196,7 +4247,7 @@ TeleportTab:CreateDropdown({
 TeleportTab:CreateButton({
     Name = "Go to World (Act 1)",
     Callback = function()
-        fireRemote("StageEnd", "StartMatch", "Act1", "Normal", "Go", State.TpWorld)
+        fireRemote("StageEnd", "StartMatch", 1, "Normal", "Go", State.TpWorld)
     end,
 })
 TeleportTab:CreateLabel("Starts Act 1 of the world")
