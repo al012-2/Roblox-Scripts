@@ -361,6 +361,7 @@ local SHORT = {
     ["Sorcerer King"] = "King",
     ["Part 2 Rewards"] = "Rewards",
     ["Part 2 Info"] = "Info",
+    ["Smart Part 2"] = "Smart",
     ["Infinity Tower & Castle"] = "Tower",
     ["Live Currency & Event Tracker"] = "Live",
     ["Match Controls"] = "Match",
@@ -1735,6 +1736,47 @@ P2Tab:CreateToggle({
             if inQueue() or LocalPlayer:GetAttribute("NWSkEnds") then return end
             lastP2Start = os.clock() -- the King wins over Auto Night / Auto Floor
             p2Do("NWSorcererKing", "join")
+        end)
+    end,
+})
+
+-- ---------- one toggle for everything (Ainx evolve: ring, staff, dust, nails, shards, jars, lanterns, bone coins) ----------
+P2Tab:CreateSection("Smart Part 2")
+State.P2After = "Night"
+P2Tab:CreateDropdown({
+    Name = "When all floors done",
+    Options = { "Night", "Floor 10" },
+    CurrentOption = { "Night" },
+    Flag = "P2AfterDropdown",
+    Callback = function(o) State.P2After = o[1] or "Night" end,
+})
+P2Tab:CreateToggle({
+    Name = "Smart Part 2 Farm",
+    CurrentValue = false,
+    Flag = "P2SmartToggle",
+    Callback = function(v)
+        loop("P2Smart", v and P2LOBBY, 12, function()
+            if inQueue() or LocalPlayer:GetAttribute("NWSkEnds") then return end
+            -- 1) the King (every hour): Staff of Ainz, Soul Lantern, lots of materials
+            local w = skWindow()
+            if w and w.open then
+                lastP2Start = os.clock()
+                p2Do("NWSorcererKing", "join")
+                return
+            end
+            if not canStart() then return end
+            lastP2Start = os.clock()
+            -- 2) first clear of every floor: 10 ring pieces = Nazarick Ring + big first rewards
+            if floorsCleared() < FLOORS_N then
+                p2Do("NWHwPart2", "floor", bestFloor())
+                return
+            end
+            -- 3) then Bone Coins (Night) or jars (Floor 10 again)
+            if State.P2After == "Floor 10" then
+                p2Do("NWHwPart2", "floor", FLOORS_N)
+            else
+                p2Do("NWHwPart2", "survival", State.P2Diff)
+            end
         end)
     end,
 })
