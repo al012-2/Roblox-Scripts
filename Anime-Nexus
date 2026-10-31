@@ -449,12 +449,12 @@ function TabClass:CreateParagraph(opts)
         return nil
     end
     uiCounter = uiCounter + 1
-    local tmark = "\1title" .. uiCounter
+    local tmark = "~t" .. uiCounter .. "~"
     local title = target:AddLabel(tmark, true)
     local titleObj = textObj(title, tmark)
     local lines, objs = {}, {}
     for i = 1, maxLines do
-        local mark = "\1line" .. uiCounter .. "_" .. i
+        local mark = "~l" .. uiCounter .. "_" .. i .. "~"
         lines[i] = target:AddLabel(mark, true)
         objs[i] = textObj(lines[i], mark)
     end
@@ -499,6 +499,8 @@ function TabClass:CreateParagraph(opts)
         end
         for i = 1, maxLines do
             local text = list[i] or " "
+            text = text:gsub("<%-", "from"):gsub("[<>]", ""):gsub("[%c]", " "):gsub("[\128-\255]+", "")
+            if text == "" then text = " " end
             local colourTag = text:sub(1, 2)
             if text:sub(3, 5) == "   " and (colourTag == "OK" or colourTag == "--") and text:sub(1, 5) ~= text then
                 -- continuation: hide the tag but keep the colour
@@ -3506,8 +3508,9 @@ merlynCheckRaw = function()
             elseif src and src.infinite then
                 where = string.format(" <- Inf %s w%d+", src.map, src.wave)
             elseif src then
-                where = string.format(" <- %s %s %d%%%s", src.map:gsub("^Legend", "L."), src.act, math.floor(src.chance * 100 + 0.5),
-                    src.pity and (" p" .. tostring(src.pity)) or "")
+                local d = (State.DiffFor and State.DiffFor(it.key)) or ""
+                where = string.format(" <- %s %s %s %d%%%s", src.map:gsub("^Legend", "L."), src.act, d:sub(1, 2),
+                    math.floor(src.chance * 100 + 0.5), src.pity and (" p" .. tostring(src.pity)) or "")
             elseif info and (info.Obtain or info.obtain) then
                 where = "  <- " .. tostring(info.Obtain or info.obtain)
             else
@@ -3661,11 +3664,56 @@ QuestTab:CreateButton({
     end,
 })
 
-State.ItemFarmDiff = "Normal"
+-- Difficulty per item. "Auto": Normal first; if 2 trips bring nothing, that item is learned as Nightmare.
+-- What it learned is saved in NAXX_itemdiff.json, so next time it goes to the right one directly.
+State.ItemFarmDiff = "Auto"
+local DIFF_FILE = "NAXX_itemdiff.json"
+local Http = game:GetService("HttpService")
+local function readJson(path)
+    local ok, data = pcall(function() return isfile and isfile(path) and Http:JSONDecode(readfile(path)) end)
+    return (ok and type(data) == "table") and data or {}
+end
+local function writeJson(path, data)
+    pcall(function() if writefile then writefile(path, Http:JSONEncode(data)) end end)
+end
+local Learned = readJson(DIFF_FILE)          -- item -> "Normal" / "Nightmare"
+
+local function diffFor(item)
+    if State.ItemFarmDiff ~= "Auto" then return State.ItemFarmDiff end
+    if Learned[item] then return Learned[item] end
+    local info = ItemInfo[item]
+    local txt = info and tostring(info.Obtain or info.obtain or info.Des or info.desc or "") or ""
+    if txt:lower():find("nightmare", 1, true) then return "Nightmare" end
+    return "Normal"
+end
+
+-- called in the lobby before each trip: did the last trip bring the item?
+local TRACK_FILE = "NAXX_itemtrack.json"
+local function checkLastTrip(item, have)
+    local tr = readJson(TRACK_FILE)
+    if tr.item == item and tonumber(tr.have) then
+        if have > tonumber(tr.have) then
+            Learned[item] = tr.diff            -- it drops there: remember
+            tr.trips = 0
+        else
+            tr.trips = (tonumber(tr.trips) or 0) + 1
+            if tr.trips >= 2 and tr.diff == "Normal" and State.ItemFarmDiff == "Auto" then
+                Learned[item] = "Nightmare"     -- nothing on Normal twice: try Nightmare
+                tr.trips = 0
+                Rayfield:Notify({ Title = "Item Farm", Content = item .. ": nothing on Normal, switching to Nightmare" })
+            end
+        end
+        writeJson(DIFF_FILE, Learned)
+    else
+        tr.trips = 0
+    end
+    return tr
+end
+
 QuestTab:CreateDropdown({
     Name = "Item Farm Difficulty",
-    Options = { "Normal", "Nightmare" },
-    CurrentOption = { "Normal" },
+    Options = { "Auto", "Normal", "Nightmare" },
+    CurrentOption = { "Auto" },
     Flag = "ItemFarmDiffDropdown",
     Callback = function(opt) State.ItemFarmDiff = opt[1] or "Normal" end,
 })
@@ -3686,9 +3734,19 @@ local function startItemStage(src)
         -- same call the game uses for Infinite: StageEnd "StartMatch", "Infinite", "Normal", "Prepare", map
         fireRemote("StageEnd", "StartMatch", "Infinite", "Normal", "Prepare", src.map)
     else
-        fireRemote("StageEnd", "StartMatch", src.act, State.ItemFarmDiff, "Go", src.map)
+        fireRemote("StageEnd", "StartMatch", src.act, src.diff or diffFor(src.item or ""), "Go", src.map)
     end
 end
+
+State.DiffFor = diffFor
+QuestTab:CreateButton({
+    Name = "Forget Learned Diff",
+    Callback = function()
+        Learned = {}
+        writeJson(DIFF_FILE, Learned)
+        Rayfield:Notify({ Title = "Item Farm", Content = "learned difficulties cleared" })
+    end,
+})
 
 QuestTab:CreateToggle({
     Name = "Auto Farm Missing Items",
@@ -3704,8 +3762,16 @@ QuestTab:CreateToggle({
             if ready then return end -- Auto Evolve does the rest
             local m = State.MissingItem
             if m then
-                Rayfield:Notify({ Title = "Item Farm", Content = "Going to " .. m.src.map .. " " .. m.src.act .. " for " .. m.key })
-                startItemStage(m.src)
+                local inv = findInventory() or {}
+                local have = tonumber(inv[m.key]) or 0
+                local tr = checkLastTrip(m.key, have)
+                local diff = (m.src.portal or m.src.infinite) and "-" or diffFor(m.key)
+                writeJson(TRACK_FILE, { item = m.key, have = have, diff = diff, trips = tr.trips or 0 })
+                local src = {}
+                for k, v in pairs(m.src) do src[k] = v end
+                src.item, src.diff = m.key, (diff ~= "-" and diff or nil)
+                Rayfield:Notify({ Title = "Item Farm", Content = string.format("%s: %s %s (%s)", m.key, m.src.map, m.src.act, diff) })
+                startItemStage(src)
             end
         end)
     end,
