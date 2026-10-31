@@ -104,7 +104,7 @@ local uiCounter = 0
 local runToggles = {}
 local unloadHandlers = {}
 
-local ignoreIdx = { "MenuKeybind", "SpySettingChange", "AutoStartOnLoad" }
+local ignoreIdx = { "MenuKeybind", "SpySettingChange", "AutoStartOnLoad", "AutoSaveConfig", "AutoSaveEvery" }
 
 local function nextIdx(flag)
     if flag and flag ~= "" then return flag end
@@ -746,13 +746,117 @@ function Rayfield:LoadConfiguration()
     SaveManager:IgnoreThemeSettings()
     SaveManager:SetIgnoreIndexes(ignoreIdx)
     ThemeManager:SetFolder(CONFIG_FOLDER)
-    SaveManager:SetFolder(CONFIG_FOLDER .. "/" .. tostring(game.PlaceId))
+
+    -- ONE folder for every place. Before, the folder had the PlaceId in it, so configs made in the lobby
+    -- "disappeared" inside the portal (another PlaceId) and the other way round.
+    local function migrateOldConfigs()
+        if not (listfiles and isfolder and readfile and writefile and makefolder) then return end
+        local newDir = CONFIG_FOLDER .. "/settings"
+        pcall(function()
+            if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+            if not isfolder(newDir) then makefolder(newDir) end
+        end)
+        for _, pid in ipairs({ "85962582687820", "135920189096514", tostring(game.PlaceId) }) do
+            local oldDir = CONFIG_FOLDER .. "/" .. pid .. "/settings"
+            if isfolder(oldDir) then
+                local ok, files = pcall(listfiles, oldDir)
+                for _, f in ipairs(ok and files or {}) do
+                    local name = f:match("([^/\\]+)$")
+                    if name then
+                        local target = newDir .. "/" .. name
+                        local isAuto = name == "autoload.txt"
+                        if not isfile(target) or (isAuto and pid == "85962582687820") then
+                            pcall(function() writefile(target, readfile(f)) end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    migrateOldConfigs()
+    SaveManager:SetFolder(CONFIG_FOLDER)
     SaveManager:BuildConfigSection(settingsTab)
     ThemeManager:ApplyToTab(settingsTab)
 
     Rayfield.Loading = true
     pcall(function() SaveManager:LoadAutoloadConfig() end)
     Rayfield.Loading = false
+
+    -- ===== Auto Save: saves the config by itself when something changed =====
+    local function autoloadName()
+        local ok, name = pcall(function()
+            if SaveManager.GetAutoloadConfig then return SaveManager:GetAutoloadConfig() end
+        end)
+        if ok and type(name) == "string" and name ~= "" and name ~= "none" then return name end
+        for _, path in ipairs({ CONFIG_FOLDER .. "/settings/autoload.txt", CONFIG_FOLDER .. "/autoload.txt" }) do
+            local ok2, txt = pcall(function() return isfile and isfile(path) and readfile(path) end)
+            if ok2 and type(txt) == "string" and txt ~= "" then return (txt:gsub("%s+$", "")) end
+        end
+        return nil
+    end
+
+    local ignoreSet = {}
+    for _, k in ipairs(ignoreIdx) do ignoreSet[k] = true end
+    local function snapshot()
+        local keys, parts = {}, {}
+        for k in pairs(LToggles) do if not ignoreSet[k] then keys[#keys + 1] = "T" .. k end end
+        for k in pairs(LOptions) do if not ignoreSet[k] then keys[#keys + 1] = "O" .. k end end
+        table.sort(keys)
+        for _, key in ipairs(keys) do
+            local obj = key:sub(1, 1) == "T" and LToggles[key:sub(2)] or LOptions[key:sub(2)]
+            local v = obj and obj.Value
+            if type(v) == "table" then
+                local t = {}
+                for a, b in pairs(v) do t[#t + 1] = tostring(a) .. "=" .. tostring(b) end
+                table.sort(t)
+                v = "{" .. table.concat(t, ",") .. "}"
+            end
+            parts[#parts + 1] = key .. ":" .. tostring(v)
+        end
+        return table.concat(parts, "|")
+    end
+
+    local auto = settingsTab:AddLeftGroupbox("Auto Save", "save")
+    auto:AddToggle("AutoSaveConfig", { Text = "Auto Save Config", Default = true })
+    auto:AddSlider("AutoSaveEvery", { Text = "Every", Default = 10, Min = 5, Max = 60, Rounding = 0, Suffix = " s" })
+    local saveLabel = auto:AddLabel("saves into your autoload config", true)
+
+    -- remember the Auto Save switch between sessions (it is not part of the config itself)
+    local autoPref = CONFIG_FOLDER .. "/autosave.txt"
+    pcall(function()
+        if isfile and isfile(autoPref) then LToggles.AutoSaveConfig:SetValue(readfile(autoPref) ~= "0") end
+    end)
+    LToggles.AutoSaveConfig:OnChanged(function()
+        pcall(function() if writefile then writefile(autoPref, LToggles.AutoSaveConfig.Value and "1" or "0") end end)
+    end)
+
+    task.spawn(function()
+        local last = snapshot()
+        local stopped = false
+        table.insert(unloadHandlers, function() stopped = true end)
+        while not stopped and not Library.Unloaded do
+            task.wait(tonumber(LOptions.AutoSaveEvery and LOptions.AutoSaveEvery.Value) or 10)
+            if LToggles.AutoSaveConfig and LToggles.AutoSaveConfig.Value then
+                local now = snapshot()
+                if now ~= last then
+                    local name = autoloadName()
+                    if not name then
+                        -- no autoload yet: make one called "autosave" and load it next time
+                        name = "autosave"
+                        pcall(function()
+                            if SaveManager.SaveAutoloadConfig then SaveManager:SaveAutoloadConfig(name)
+                            elseif writefile then writefile(CONFIG_FOLDER .. "/settings/autoload.txt", name) end
+                        end)
+                    end
+                    local ok = pcall(function() return SaveManager:Save(name) end)
+                    if ok then
+                        last = now
+                        pcall(function() saveLabel:SetText("saved into '" .. name .. "' at " .. os.date("%H:%M:%S")) end)
+                    end
+                end
+            end
+        end
+    end)
 
     if not LToggles.AutoStartOnLoad.Value then
         for idx in pairs(runToggles) do
@@ -1381,6 +1485,71 @@ PortalTab:CreateDropdown({
     Callback = function(opt) State.PortalTier = tonumber(opt[1]) or 3 end,
 })
 
+-- Tier order: use the first tier in the list that you still own (e.g. "3,1,2,6,5")
+-- owned portals come from NWHwPortal:InvokeServer("state").state.Owned = {tier1, ..., tier6}
+State.UseTierOrder = false
+State.TierOrder = { 3, 1, 2, 6, 5, 4 }
+
+local function parseTierOrder(txt)
+    local list, seen = {}, {}
+    for n in tostring(txt or ""):gmatch("%d") do
+        local t = tonumber(n)
+        if t and t >= 1 and t <= 6 and not seen[t] then seen[t] = true; list[#list + 1] = t end
+    end
+    if #list > 0 then State.TierOrder = list end
+end
+
+local function ownedPortals()
+    local res = invokeRemote("NWHwPortal", "state")
+    local st = type(res) == "table" and (res.state or res) or nil
+    local owned = type(st) == "table" and st.Owned
+    if type(owned) == "table" then return owned end
+    -- fallback: item counts HwPortal1..HwPortal6
+    local inv = (type(findInventory) == "function" and findInventory()) or {}
+    local out = {}
+    for t = 1, 6 do out[t] = tonumber(inv["HwPortal" .. t]) or 0 end
+    return out
+end
+
+local function pickTier()
+    local owned = ownedPortals()
+    for _, t in ipairs(State.TierOrder) do
+        if (tonumber(owned[t]) or 0) > 0 then return t, owned end
+    end
+    return nil, owned
+end
+
+local TierInfo = PortalTab:CreateParagraph({ Title = "My portals", Content = "press Check Portals", Lines = 2 })
+local function showPortals(owned)
+    owned = owned or ownedPortals()
+    local parts = {}
+    for t = 1, 6 do parts[#parts + 1] = string.format("%s:%d", ({ "I", "II", "III", "IV", "V", "VI" })[t], tonumber(owned[t]) or 0) end
+    local order = {}
+    for _, t in ipairs(State.TierOrder) do order[#order + 1] = tostring(t) end
+    TierInfo:Set({ Title = "My portals", Content = table.concat(parts, "  ") .. "\nOrder: " .. table.concat(order, " > ") })
+end
+
+PortalTab:CreateToggle({
+    Name = "Use Tier Order",
+    CurrentValue = false,
+    Flag = "UseTierOrderToggle",
+    Run = false,
+    Callback = function(v) State.UseTierOrder = v end,
+})
+
+PortalTab:CreateInput({
+    Name = "Tier Order (first = most wanted)",
+    CurrentValue = "3,1,2,6,5,4",
+    PlaceholderText = "3,1,2,6,5",
+    Flag = "TierOrderInput",
+    Callback = function(txt)
+        parseTierOrder(txt)
+        if Booted then task.spawn(showPortals) end
+    end,
+})
+
+PortalTab:CreateButton({ Name = "Check Portals", Callback = function() task.spawn(showPortals) end })
+
 PortalTab:CreateDropdown({
     Name = "Modifiers",
     Options = { "RestlessDead", "DreadFog", "BloodMoon", "WraithRage", "CrackedCrystal", "WitchCurse", "GraveLords" },
@@ -1415,6 +1584,13 @@ end
 
 local function openAndJoinPortal()
     if not IN_LOBBY then return false, "not in lobby" end
+    if State.UseTierOrder and not State.ForceTier then
+        local t, owned = pickTier()
+        pcall(showPortals, owned)
+        if not t then return false, "no portals left from your order" end
+        State.PortalTier = t
+    end
+    State.ForceTier = nil
     local res = invokeRemote("NWHwPortalRoom", "create", State.PortalTier, State.PortalMods)
     if type(res) == "table" and res.ok == false then return false, tostring(res.msg or "create failed") end
     task.wait(1)
@@ -3170,6 +3346,7 @@ QuestTab:CreateDropdown({
 local function startItemStage(src)
     if src.portal then
         State.PortalTier = src.tier
+        State.ForceTier = true
         if src.mods > 0 and #State.PortalMods < src.mods then
             State.PortalMods = { "RestlessDead", "DreadFog" }
         end
