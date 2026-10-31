@@ -3292,6 +3292,120 @@ ServerTab:CreateButton({
 })
 end -- ===== section end =====
 
+-- Streamer Mode: hides your name, title and look ON YOUR SCREEN only (for sharing / videos). Turn off = all back.
+do -- ===== section =====
+local StreamTab = Window:CreateTab("Server & Rejoin")
+StreamTab:CreateSection("Streamer Mode")
+local SM = { on = false, fake = "Player", saved = {}, conns = {}, texts = {}, hooked = {} }
+local myNames = { LocalPlayer.Name, LocalPlayer.DisplayName, tostring(LocalPlayer.UserId) }
+
+local function keep(obj, prop, val)
+    local k = SM.saved[obj]
+    if not k then k = {}; SM.saved[obj] = k end
+    if k[prop] == nil then
+        local ok, old = pcall(function() return obj[prop] end)
+        if ok then k[prop] = old end
+    end
+    pcall(function() obj[prop] = val end)
+end
+local function clean(t)
+    for _, n in ipairs(myNames) do
+        if n ~= "" then t = t:gsub(n:gsub("%p", "%%%0"), SM.fake) end
+    end
+    return t
+end
+local function fixText(o)
+    if not (o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox")) then return end
+    local function apply()
+        if not SM.on then return end
+        local t = o.Text
+        if t == "" then return end
+        local c = clean(t)
+        if c ~= t then
+            SM.texts[o] = t
+            o.Text = c
+        end
+    end
+    apply()
+    if not SM.hooked[o] then
+        SM.hooked[o] = true
+        SM.conns[#SM.conns + 1] = o:GetPropertyChangedSignal("Text"):Connect(apply)
+    end
+end
+local function hidePart(d)
+    if d:IsA("BillboardGui") then keep(d, "Enabled", false)
+    elseif d:IsA("Accessory") then
+        for _, p in ipairs(d:GetDescendants()) do
+            if p:IsA("BasePart") then keep(p, "Transparency", 1) end
+        end
+    elseif d:IsA("Shirt") then keep(d, "ShirtTemplate", "")
+    elseif d:IsA("Pants") then keep(d, "PantsTemplate", "")
+    elseif d:IsA("ShirtGraphic") then keep(d, "Graphic", "")
+    elseif d:IsA("Decal") and d.Name == "face" then keep(d, "Transparency", 1)
+    elseif d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" and d.Transparency < 1 then
+        keep(d, "Color", Color3.fromRGB(120, 120, 120))
+    end
+end
+local function hideChar(c)
+    if not (SM.on and c) then return end
+    local h = c:FindFirstChildOfClass("Humanoid")
+    if h then keep(h, "DisplayDistanceType", Enum.HumanoidDisplayDistanceType.None) end
+    for _, d in ipairs(c:GetDescendants()) do hidePart(d) end
+    SM.conns[#SM.conns + 1] = c.DescendantAdded:Connect(function(d)
+        task.defer(function() if SM.on then hidePart(d) end end)
+    end)
+end
+
+local function streamOn()
+    SM.on = true
+    task.spawn(function()
+        hideChar(LocalPlayer.Character)
+        SM.conns[#SM.conns + 1] = LocalPlayer.CharacterAdded:Connect(function(c) task.wait(1) hideChar(c) end)
+        local pg = LocalPlayer:WaitForChild("PlayerGui")
+        for _, o in ipairs(pg:GetDescendants()) do fixText(o) end
+        SM.conns[#SM.conns + 1] = pg.DescendantAdded:Connect(function(o) task.defer(fixText, o) end)
+        -- boards in the world (hall of fame, leaderboards)
+        for _, o in ipairs(workspace:GetDescendants()) do
+            if o:IsA("TextLabel") then fixText(o) end
+        end
+        pcall(function() game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false) end)
+    end)
+end
+local function streamOff()
+    SM.on = false
+    for _, c in ipairs(SM.conns) do pcall(function() c:Disconnect() end) end
+    SM.conns, SM.hooked = {}, {}
+    for obj, props in pairs(SM.saved) do
+        for prop, val in pairs(props) do pcall(function() obj[prop] = val end) end
+    end
+    SM.saved = {}
+    for o, t in pairs(SM.texts) do pcall(function() if o.Parent then o.Text = t end end) end
+    SM.texts = {}
+    pcall(function() game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, true) end)
+end
+
+StreamTab:CreateInput({
+    Name = "Fake Name",
+    CurrentValue = "Player",
+    PlaceholderText = "Player",
+    Flag = "StreamFakeName",
+    Callback = function(t)
+        SM.fake = (t and t ~= "") and t or "Player"
+        if SM.on then streamOff() streamOn() end
+    end,
+})
+StreamTab:CreateToggle({
+    Name = "Streamer Mode",
+    CurrentValue = false,
+    Flag = "StreamerModeToggle",
+    Run = false,
+    Callback = function(v)
+        if v then streamOn() else streamOff() end
+    end,
+})
+StreamTab:CreateLabel("Only your screen changes. Others still see you.")
+end -- ===== section end =====
+
 -- The game's own settings (verified with BossSpy: ChangeSetting "<Key>", bool)
 do -- ===== section =====
 local GameSettingsTab = Window:CreateTab("Game Settings")
