@@ -41,22 +41,50 @@ TabClass.__index = TabClass
 -- Related tabs are merged into one top-level tab. Each original tab becomes a "tabbox" (left / right column)
 -- and each of its sections becomes a sub-tab inside it, so you click a section instead of scrolling.
 local WIN_H = 820
-local GroupOf = {
-    ["Auto Farm"] = "Farm", ["Kaiju Raid"] = "Farm",
-    ["Custom Boss"] = "Bosses", ["Secret Bosses"] = "Bosses", ["Halloween"] = "Bosses",
-    ["Roll & Tower"] = "Roll & Tower", ["Infinity Tower"] = "Roll & Tower",
-    ["Prestige Tower"] = "Roll & Tower", ["Endless Raid"] = "Roll & Tower",
-    ["Potions"] = "Items", ["Crafting"] = "Items", ["Raid Shop"] = "Items", ["Candy Shop"] = "Items",
-    ["NPCs"] = "Misc", ["Quests"] = "Misc", ["Server & Rejoin"] = "Misc",
+-- No more merged pages with crowded sub-tab rows: every tab is its own sidebar page
+-- (sections become boxes on the page), and the sidebar is split into categories like modern hubs.
+local GroupOf = {}
+-- [tab name] = { shown name, lucide icon, description under the title, sidebar order }
+local GroupInfo = {
+    -- Farm (100)
+    ["Auto Farm"]        = { "Auto Farm",      "swords",        "Farm bosses in every world", 101 },
+    ["Kaiju Raid"]       = { "Kaiju Raid",     "shield",        "Join and farm the Kaiju Raid", 102 },
+    ["Custom Boss"]      = { "Custom Boss",    "skull",         "Pick exactly which bosses to fight", 103 },
+    ["Secret Bosses"]    = { "Secret Bosses",  "eye",           "Hunt the hidden bosses", 104 },
+    -- Event (200)
+    ["Halloween"]        = { "Halloween",      "ghost",         "Event bosses, statues, doors, candies, packs", 201 },
+    ["Candy & Upgrades"] = { "Upgrades",       "trending-up",   "Spend candies on event upgrades", 202 },
+    ["Candy Shop"]       = { "Candy Shop",     "candy",         "Auto buy event boosts", 203 },
+    -- Progress (300)
+    ["Roll & Tower"]     = { "Roll",           "dice-5",        "Rolls, pity and offline rolls", 301 },
+    ["Potions"]          = { "Potions",        "flask-conical", "Keep your potions running", 302 },
+    ["Infinity Tower"]   = { "Infinity Tower", "castle",        "Run and end the tower", 303 },
+    ["Prestige Tower"]   = { "Prestige Tower", "crown",         "Auto Prestige Tower runs", 304 },
+    ["Endless Raid"]     = { "Endless",        "infinity",      "Auto Endless Raid", 305 },
+    ["Awakening"]        = { "Awakening",      "sparkles",      "Awaken your rarest cards", 306 },
+    -- Shops (400)
+    ["Raid Shop"]        = { "Raid Shop",      "shopping-bag",  "Kaiju Raid potions", 401 },
+    ["Shadow Market"]    = { "Shadow Market",  "moon",          "Shadows Garden potions", 402 },
+    ["Masked Man"]       = { "Masked Man",     "venetian-mask", "Buy rare dealer offers", 403 },
+    ["Crafting"]         = { "Crafting",       "hammer",        "Craft potions", 404 },
+    ["Scrap Shop"]       = { "Scrap Shop",     "store",         "Scrap stock and potion fuser", 405 },
+    ["Recycler"]         = { "Recycler",       "recycle",       "Game auto-recycle settings", 406 },
+    -- Extras (500)
+    ["Quests"]           = { "Quests",         "scroll-text",   "Quests, index and Prestige Road", 501 },
+    ["NPCs"]             = { "NPCs",           "users",         "Talk to NPCs", 502 },
+    ["Teleports"]        = { "Teleports",      "map-pin",       "Go anywhere in one click", 503 },
+    ["Server & Rejoin"]  = { "Server",         "server",        "Private server and auto rejoin", 504 },
+    ["Tracker"]          = { "Tracker",        "activity",      "Live stats while you farm", 505 },
+    ["UI Settings"]      = { "Settings",       "settings",      "Theme, size, transparency, configs", 506 },
 }
-local GroupIcons = {
-    ["Farm"] = "swords",
-    ["Bosses"] = "skull",
-    ["Roll & Tower"] = "dice-5",
-    ["Items"] = "flask-conical",
-    ["Misc"] = "compass",
-    ["Tracker"] = "activity",
+GroupOf.__categories = {
+    { order = 100, name = "Farm" },
+    { order = 200, name = "Event" },
+    { order = 300, name = "Progress" },
+    { order = 400, name = "Shops" },
+    { order = 500, name = "Extras" },
 }
+
 local Groups = {}
 
 -- short sub-tab names (the buttons are narrow, long names overlap)
@@ -64,7 +92,7 @@ local ShortNames = {
     ["battle settings"] = "Battle", ["difficulty"] = "Diff", ["movement"] = "Move", ["smart farm"] = "Worlds",
     ["raid control"] = "Control", ["raid bosses & difficulty"] = "Bosses",
     ["control"] = "Control", ["quick setup"] = "Quick", ["secret bosses"] = "Secret", ["bosses"] = "Bosses",
-    ["reaper statues"] = "Statues", ["candy doors"] = "Doors",
+    ["reaper statues"] = "Statues", ["halloween quests"] = "Quests", ["prestige road"] = "Road", ["candy doors"] = "Doors", ["candy pickups"] = "Candy", ["halloween upgrades"] = "Upgrades", ["dealer"] = "Dealer", ["scrap shop"] = "Shop", ["potion fuser"] = "Fuser", ["auto-recycle"] = "Auto", ["card awakening"] = "Awaken", ["card packs"] = "Packs",
     ["end the tower at a floor"] = "At floor", ["end the tower on weather"] = "Weather", ["manual"] = "Manual", ["auto run"] = "Auto",
     ["potion selection"] = "Select", ["auto drink"] = "Drink", ["weather burst"] = "Burst", ["before ending the infinity tower"] = "Pre-end",
     ["potions to buy"] = "Potions", ["potions to craft"] = "Potions", ["buy"] = "Buy", ["craft"] = "Craft", ["debug"] = "Debug",
@@ -206,6 +234,7 @@ end
 
 -- Stretch every sub-tab page with a blank spacer so the boxes reach the bottom of the (tall) window.
 local function fillGroups()
+    if Library.IsMobile then return end -- phones: no spacers, pages stay short and scroll
     local contentH = WIN_H - 120
     for _, grp in pairs(Groups) do
         local perSide = { 0, 0 }
@@ -225,10 +254,70 @@ local function fillGroups()
     end
 end
 
+local IS_MOBILE = Library.IsMobile == true
+
+GroupOf.__headers = {}
+function GroupOf.__addHeaders(tabsFrame)
+    local sidebarHeaders = GroupOf.__headers
+    if not tabsFrame or tabsFrame:FindFirstChild("TitanHeader100") then return end
+    for _, c in ipairs(GroupOf.__categories) do
+        local lbl = Instance.new("TextLabel")
+        lbl.Name = "TitanHeader" .. c.order
+        lbl.LayoutOrder = c.order
+        lbl.BackgroundTransparency = 1
+        lbl.Size = UDim2.new(1, 0, 0, 24)
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.Text = c.name
+        lbl.TextSize = 12
+        lbl.TextColor3 = Color3.fromRGB(125, 128, 145)
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextYAlignment = Enum.TextYAlignment.Bottom
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 12)
+        pad.PaddingBottom = UDim.new(0, 3)
+        pad.Parent = lbl
+        lbl.Parent = tabsFrame
+        table.insert(sidebarHeaders, lbl)
+    end
+    -- icons-only sidebar (phone / compacted): hide the category names
+    local function refresh()
+        local wide = tabsFrame.AbsoluteSize.X > 110
+        for _, l in ipairs(sidebarHeaders) do
+            l.Visible = wide
+        end
+    end
+    tabsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(refresh)
+    refresh()
+end
+
+local function addPage(name)
+    local info = GroupInfo[name] or {}
+    local shown, icon, desc, order = info[1] or name, info[2] or "layers", info[3], info[4]
+    local ok, tab = pcall(function()
+        return LWindow:AddTab({ Name = shown, Icon = icon, Description = desc, Order = order })
+    end)
+    if not (ok and tab) then
+        ok, tab = pcall(function() return LWindow:AddTab(shown, icon) end)
+        if not (ok and tab) then tab = LWindow:AddTab(shown, "layers") end
+    end
+    pcall(function() GroupOf.__addHeaders(tab.Button and tab.Button.Parent) end)
+    return tab
+end
+
 function Rayfield:CreateWindow(cfg)
+    local vp = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1280, 720)
+    local winW
+    if IS_MOBILE then
+        -- phones: fill most of the (landscape) screen, icons-only sidebar
+        winW = math.floor(math.min(680, vp.X - 24))
+        WIN_H = math.floor(math.min(400, vp.Y - 24))
+    else
+        winW = math.floor(math.min(780, vp.X - 80))
+        WIN_H = math.floor(math.min(540, vp.Y - 80))
+    end
     LWindow = Library:CreateWindow({
         Title = cfg.Name,
-        Footer = "Titan RNG Hub",
+        Footer = "Titan RNG Hub  •  Card Battles: Prestige",
         Center = true,
         AutoShow = true,
         Resizable = true,
@@ -236,7 +325,17 @@ function Rayfield:CreateWindow(cfg)
         NotifySide = "Right",
         TabPadding = 8,
         MenuFadeTime = 0.2,
-        Size = UDim2.fromOffset(880, WIN_H), -- wide enough for the sub-tab buttons, still tall
+        Size = UDim2.fromOffset(winW, WIN_H),
+        Font = Enum.Font.Gotham,
+        CornerRadius = 10,
+        ShowMobileButtons = true,
+        MobileButtonsSide = "Left",
+        SidebarCompacted = IS_MOBILE,
+        EnableCompacting = true,
+        Animations = { ToggleWindow = true, TabSwitch = true, Groupbox = true, Dropdown = true, KeyPicker = false },
+        TabTransitionTime = 0.18,
+        TabSwipeFrom = "bottom",
+        TabButtonsStyle = { Gap = 4, Padding = 6, CornerRadius = 8, Indicator = true, IndicatorWidth = 3, IndicatorHeight = 18 },
     })
     local win = {}
     function win:CreateTab(name)
@@ -246,7 +345,7 @@ function Rayfield:CreateWindow(cfg)
         if g then
             local grp = Groups[g]
             if not grp then
-                grp = { tab = LWindow:AddTab(g, GroupIcons[g] or "folder"), n = 0 }
+                grp = { tab = addPage(g), n = 0 }
                 Groups[g] = grp
             end
             grp.n += 1
@@ -256,7 +355,7 @@ function Rayfield:CreateWindow(cfg)
             table.insert(grp.objs, { obj = obj, side = (grp.n % 2 == 1) and 1 or 2 })
             return obj
         end
-        return setmetatable({ _tab = LWindow:AddTab(name, GroupIcons[name] or "layers"), _name = name, _n = 0 }, TabClass)
+        return setmetatable({ _tab = addPage(name), _name = name, _n = 0 }, TabClass)
     end
     return win
 end
@@ -276,7 +375,7 @@ function Rayfield:Destroy()
 end
 
 function Rayfield:LoadConfiguration()
-    local settings = LWindow:AddTab("UI Settings", "settings")
+    local settings = addPage("UI Settings")
     if Rayfield.AfterSettings then
         local ok, err = pcall(Rayfield.AfterSettings)
         if not ok then warn("[Server tab] " .. tostring(err)) end
@@ -331,9 +430,9 @@ function Rayfield:LoadConfiguration()
             end
         end
     end
-    menu:AddSlider("UiTransparency", {
+    menu:AddSlider("UiTransparency2", {
         Text = "Transparency",
-        Default = 0,
+        Default = 20,
         Min = 0,
         Max = 85,
         Rounding = 0,
@@ -342,11 +441,26 @@ function Rayfield:LoadConfiguration()
             pcall(applyTransparency, (tonumber(v) or 0) / 100)
         end,
     })
+    -- pages build some frames lazily: apply the saved transparency again once everything exists
+    task.delay(3, function()
+        local o = LOptions.UiTransparency2
+        if o then pcall(applyTransparency, (tonumber(o.Value) or 0) / 100) end
+    end)
 
     menu:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
     Library.ToggleKeybind = LOptions.MenuKeybind
 
     ThemeManager:SetLibrary(Library)
+    pcall(function()
+        ThemeManager:SetDefaultTheme({
+            BackgroundColor = Color3.fromRGB(14, 15, 21),
+            MainColor = Color3.fromRGB(23, 25, 34),
+            AccentColor = Color3.fromRGB(139, 108, 255),
+            OutlineColor = Color3.fromRGB(38, 41, 56),
+            FontColor = Color3.fromRGB(236, 238, 246),
+            FontFace = "Gotham",
+        })
+    end)
     SaveManager:SetLibrary(Library)
     SaveManager:IgnoreThemeSettings()
     SaveManager:SetIgnoreIndexes(ignoreIdx)
@@ -421,11 +535,11 @@ end
 -- default look: dark violet with a bright accent (ThemeManager in UI Settings can still change it)
 pcall(function()
     local scheme = Library.Scheme or Library
-    scheme.AccentColor = Color3.fromRGB(150, 95, 255)
-    scheme.MainColor = Color3.fromRGB(26, 23, 38)
-    scheme.BackgroundColor = Color3.fromRGB(17, 15, 26)
-    scheme.OutlineColor = Color3.fromRGB(62, 54, 92)
-    scheme.FontColor = Color3.fromRGB(240, 236, 255)
+    scheme.AccentColor = Color3.fromRGB(139, 108, 255)
+    scheme.MainColor = Color3.fromRGB(23, 25, 34)
+    scheme.BackgroundColor = Color3.fromRGB(14, 15, 21)
+    scheme.OutlineColor = Color3.fromRGB(38, 41, 56)
+    scheme.FontColor = Color3.fromRGB(236, 238, 246)
     scheme.Red = Color3.fromRGB(255, 90, 110)
 end)
 
@@ -2522,6 +2636,41 @@ RollTab:CreateButton({ Name = "Equip Best Cards", Callback = function() if equip
 RollTab:CreateButton({ Name = "Claim Daily Reward", Callback = function() if claimDailyRemote then claimDailyRemote:FireServer() end end })
 
 -- ==================== NPCs tab ====================
+-- ==================== Teleports (direct remote; falls back to the game's Teleport menu button) ====================
+do
+    local TpTab = Window:CreateTab("Teleports", 4483362458)
+    TpTab:CreateSection("Places")
+
+    local Places = {
+        -- args = teleportToArea:FireServer(args[1], args[2]) captured with Cobalt
+        { label = "Victory Road", key = "victoryroad", args = { "victory", "hall" } },
+        { label = "The Junkyard", key = "junkyard", args = { "victory", "junkyard" } },
+        { label = "Kaiju Raid", key = "kaiju", tab = "raidsTab", args = { "raid", "kaiju" } },
+        { label = "Shadows Garden", key = "shadowsgarden", tab = "raidsTab", args = { "raid", "shadow" } }, -- raid id from the dump (shop id "shadow")
+    }
+
+    for _, p in ipairs(Places) do
+        TpTab:CreateButton({
+            Name = "Teleport: " .. p.label,
+            Callback = function()
+                task.spawn(function()
+                    local ok = false
+                    if p.args and teleportAreaRemote then
+                        ok = pcall(function() teleportAreaRemote:FireServer(p.args[1], p.args[2]) end)
+                    end
+                    if not ok then ok = pressTeleportMenuButton(p.key, p.tab) end
+                    Rayfield:Notify({
+                        Title = "Teleport",
+                        Content = ok and ("Going to " .. p.label)
+                            or (p.label .. ": button not found (locked, or open the Teleport menu once first)"),
+                        Duration = 4,
+                    })
+                end)
+            end,
+        })
+    end
+end
+
 local NpcTab = Window:CreateTab("NPCs", 4483362458)
 
 local function findNpc(npcName)
@@ -3027,7 +3176,7 @@ do
 
     local prayerNext = setmetatable({}, { __mode = "k" })
     local doorNext = setmetatable({}, { __mode = "k" })
-    local DoPrayer, DoDoors = false, false
+    local DoPrayer, DoDoors, DoCandy = false, false, false
 
     -- one pass over the reaper statues; returns true if something was pressed
     local function prayerPass(alive)
@@ -3103,11 +3252,46 @@ do
         return didAny
     end
 
+    -- ===== Candy pickups (from the BundleDump: candyClient) =====
+    -- The game builds workspace.CandyClient.Candy<i> parts; a candy is "up" while its art is Enabled,
+    -- and the game's own client collects it when your character is within 6 studs. So we just go there.
+    local function candyPass(alive)
+        local folder = workspace:FindFirstChild("CandyClient")
+        if not folder then return false end
+        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        local list = {}
+        for _, c in ipairs(folder:GetChildren()) do
+            local art = c:FindFirstChild("art")
+            if c:IsA("BasePart") and art and art.Enabled then
+                table.insert(list, c)
+            end
+        end
+        if root then
+            table.sort(list, function(a, b)
+                return (a.Position - root.Position).Magnitude < (b.Position - root.Position).Magnitude
+            end)
+        end
+        local didAny = false
+        for i, c in ipairs(list) do
+            if i > 12 or not alive() then break end
+            local art = c:FindFirstChild("art")
+            if c.Parent and art and art.Enabled then
+                if reachTarget(c.Position, c, alive) then
+                    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    if hrp then pcall(function() hrp.CFrame = CFrame.new(c.Position + Vector3.new(0, 2, 0)) end) end
+                    didAny = true
+                    task.wait(0.35)
+                end
+            end
+        end
+        return didAny
+    end
+
     -- Prayer and Candy Doors share ONE loop, so both toggles can be on together
     -- (they use the same character, so they run one after the other).
     local extrasRunning = false
     local function updateExtras()
-        if not (DoPrayer or DoDoors) then
+        if not (DoPrayer or DoDoors or DoCandy) then
             if extrasRunning then
                 extrasRunning = false
                 stopMode("hwextras")
@@ -3117,7 +3301,7 @@ do
         if extrasRunning then return end
         extrasRunning = true
         startMode("hwextras", function(alive)
-            while alive() and (DoPrayer or DoDoors) do
+            while alive() and (DoPrayer or DoDoors or DoCandy) do
                 if not nearWorldBosses("halloween") then
                     forceTeleportToWorld("halloween")
                     task.wait(1.0)
@@ -3125,6 +3309,7 @@ do
                 local didAny = false
                 if DoPrayer and prayerPass(alive) then didAny = true end
                 if DoDoors and alive() and doorsPass(alive) then didAny = true end
+                if DoCandy and alive() and candyPass(alive) then didAny = true end
                 task.wait(didAny and 1 or 4)
             end
             extrasRunning = false
@@ -3154,8 +3339,917 @@ do
             updateExtras()
         end,
     })
+
+    HwTab:CreateSection("Candy Pickups")
+
+    HwTab:CreateToggle({
+        Name = "Auto collect candies on the map",
+        CurrentValue = false,
+        Flag = "HalloweenAutoCandy",
+        Callback = function(Value)
+            DoCandy = Value
+            updateExtras()
+        end,
+    })
+
+    HwTab:CreateParagraph({
+        Title = "Info",
+        Content = "Goes to every candy that is up. Uses the same movement as Auto Farm > Movement. Works together with Prayer and Doors.",
+    })
+
+    -- ===== Halloween Card Packs (auto open) =====
+    -- captured with Cobalt:  useItem:FireServer("Instant Roll x100", 1)  /  useItem:FireServer("Instant Roll x10", 1)
+    local PackItems = { "Instant Roll x10000", "Instant Roll x1000", "Instant Roll x100", "Instant Roll x10" }
+    local PackSelected = { ["Instant Roll x100"] = true }
+    local PackAmount = 1
+    local PackDelay = 1.5
+    local PackAuto = false
+    local packToken = 0
+
+    table.insert(activeConnections, { Disconnect = function() packToken += 1 end })
+
+    local function packNotify(text, dur)
+        pcall(function() Rayfield:Notify({ Title = "Card Packs", Content = text, Duration = dur or 4 }) end)
+    end
+
+    local function openPack(name)
+        if not useItemRemote then return false end
+        return (pcall(function() useItemRemote:FireServer(name, PackAmount) end))
+    end
+
+    -- opens every selected pack once, returns how many were sent
+    local function openSelected()
+        local n = 0
+        for _, name in ipairs(PackItems) do
+            if PackSelected[name] and openPack(name) then
+                n += 1
+                task.wait(0.3)
+            end
+        end
+        return n
+    end
+
+    local function startAutoPacks()
+        packToken += 1
+        local my = packToken
+        task.spawn(function()
+            while Rayfield.Loading and packToken == my do task.wait(0.3) end
+            while PackAuto and packToken == my do
+                if not useItemRemote then
+                    task.wait(1)
+                else
+                    openSelected()
+                    task.wait(math.max(PackDelay, 0.3))
+                end
+            end
+        end)
+    end
+
+    HwTab:CreateSection("Card Packs")
+
+    HwTab:CreateDropdown({
+        Name = "Packs to open",
+        Options = PackItems,
+        CurrentOption = { "Instant Roll x100" },
+        MultipleOptions = true,
+        Flag = "HalloweenPacksPick",
+        Callback = function(list)
+            PackSelected = {}
+            for _, n in ipairs(list) do PackSelected[n] = true end
+        end,
+    })
+
+    HwTab:CreateToggle({
+        Name = "Auto Open Halloween Packs",
+        CurrentValue = false,
+        Flag = "HalloweenAutoPacks",
+        Callback = function(Value)
+            PackAuto = Value
+            if Value then
+                if next(PackSelected) == nil then
+                    packNotify("Pick at least one pack first", 4)
+                end
+                startAutoPacks()
+            else
+                packToken += 1
+            end
+        end,
+    })
+
+    HwTab:CreateInput({
+        Name = "Open every (seconds)",
+        Default = "1.5",
+        Flag = "HalloweenPackDelay",
+        Callback = function(v)
+            local n = tonumber(v)
+            if n then PackDelay = n end
+        end,
+    })
+
+    HwTab:CreateInput({
+        Name = "Amount per open",
+        Default = "1",
+        Flag = "HalloweenPackAmount",
+        Callback = function(v)
+            local n = tonumber(v)
+            if n and n >= 1 then PackAmount = math.floor(n) end
+        end,
+    })
+
+    HwTab:CreateButton({
+        Name = "Open selected once (test)",
+        Callback = function()
+            if not useItemRemote then
+                packNotify("useItem remote not ready", 3)
+                return
+            end
+            if next(PackSelected) == nil then
+                packNotify("Pick at least one pack first", 3)
+                return
+            end
+            task.spawn(function()
+                packNotify("Sent " .. openSelected() .. " pack open(s)", 3)
+            end)
+        end,
+    })
+
+    -- ===== Halloween Quests (from the BundleDump: halloweenClient) =====
+    -- halloweenRequest:InvokeServer("quests") -> { quests = { {id, progress, goal, claimed}, ... } }
+    -- halloweenRequest:InvokeServer("claimQuest", id) -> { ok = true/false, message = ... }
+    -- only answers while LocalPlayer:GetAttribute("InHalloween") == true
+    local hwQuestToken = 0
+    table.insert(activeConnections, { Disconnect = function() hwQuestToken += 1 end })
+
+    local function claimHalloweenQuests()
+        local remote = Rep:FindFirstChild("halloweenRequest")
+        if not remote or player:GetAttribute("InHalloween") ~= true then return 0, "not in the Halloween event" end
+        local ok, data = pcall(remote.InvokeServer, remote, "quests")
+        if not ok or type(data) ~= "table" or type(data.quests) ~= "table" then return 0, "no quest data" end
+        local n = 0
+        for _, q in pairs(data.quests) do
+            if type(q) == "table" and not q.claimed and q.id ~= nil
+                and tonumber(q.progress) and tonumber(q.goal) and q.progress >= q.goal then
+                local okc, res = pcall(remote.InvokeServer, remote, "claimQuest", q.id)
+                if okc and type(res) == "table" and res.ok then n += 1 end
+                task.wait(0.5)
+            end
+        end
+        return n
+    end
+
+    HwTab:CreateSection("Halloween Quests")
+
+    HwTab:CreateToggle({
+        Name = "Auto claim Halloween quests",
+        CurrentValue = false,
+        Flag = "HalloweenAutoQuests",
+        Callback = function(Value)
+            hwQuestToken += 1
+            if not Value then return end
+            local my = hwQuestToken
+            task.spawn(function()
+                while Rayfield.Loading and hwQuestToken == my do task.wait(0.3) end
+                while hwQuestToken == my do
+                    local n = claimHalloweenQuests()
+                    if n > 0 then
+                        Rayfield:Notify({ Title = "Halloween Quests", Content = "Claimed " .. n .. " quest(s)", Duration = 3 })
+                    end
+                    task.wait(15)
+                end
+            end)
+        end,
+    })
+
+    HwTab:CreateButton({
+        Name = "Claim Halloween quests now",
+        Callback = function()
+            task.spawn(function()
+                local n, why = claimHalloweenQuests()
+                Rayfield:Notify({ Title = "Halloween Quests", Content = why and ("Can't: " .. why) or ("Claimed " .. n .. " quest(s)"), Duration = 4 })
+            end)
+        end,
+    })
 end)()
 end
+
+-- ==================== Prestige Road (from the BundleDump: prestigeRoadClient) ====================
+-- prestigeRoad:FireServer("claimAll") = the game's "Claim All" button on the milestone board
+do
+    local roadToken = 0
+    table.insert(activeConnections, { Disconnect = function() roadToken += 1 end })
+
+    local function claimRoad()
+        local r = Rep:FindFirstChild("prestigeRoad")
+        if not r then return false end
+        return (pcall(function() r:FireServer("claimAll") end))
+    end
+
+    QuestTab:CreateSection("Prestige Road")
+
+    QuestTab:CreateToggle({
+        Name = "Auto claim Prestige Road milestones",
+        CurrentValue = false,
+        Flag = "PrestigeRoadAutoClaim",
+        Callback = function(Value)
+            roadToken += 1
+            if not Value then return end
+            local my = roadToken
+            task.spawn(function()
+                while Rayfield.Loading and roadToken == my do task.wait(0.3) end
+                while roadToken == my do
+                    claimRoad()
+                    task.wait(60)
+                end
+            end)
+        end,
+    })
+
+    QuestTab:CreateButton({
+        Name = "Claim Prestige Road now",
+        Callback = function()
+            Rayfield:Notify({ Title = "Prestige Road", Content = claimRoad() and "Claim All sent" or "prestigeRoad remote not found", Duration = 3 })
+        end,
+    })
+end
+
+-- own function scope: the main chunk is close to Lua's 200-locals limit
+do (function()
+-- ======================================================================================
+-- Features found in the BundleDump (each one copies what the game's own client sends)
+-- ======================================================================================
+
+-- small shared helpers for this part
+local function xNotify(title, text, dur)
+    pcall(function() Rayfield:Notify({ Title = title, Content = tostring(text), Duration = dur or 4 }) end)
+end
+
+-- runs fn(alive) in a loop every `every` seconds while the toggle is on
+local function makeLoop(every, fn)
+    local token = 0
+    table.insert(activeConnections, { Disconnect = function() token += 1 end })
+    return function(on)
+        token += 1
+        if not on then return end
+        local my = token
+        local function alive() return token == my end
+        task.spawn(function()
+            while Rayfield.Loading and alive() do task.wait(0.3) end
+            while alive() do
+                local ok, err = pcall(fn, alive)
+                if not ok then warn("[Titan Hub] loop error: " .. tostring(err)) end
+                local t = 0
+                while alive() and t < every do task.wait(1) t += 1 end
+            end
+        end)
+    end
+end
+
+local function inHalloween() return player:GetAttribute("InHalloween") == true end
+
+-- ==================== Halloween Upgrades (halloweenUpgradesClient) ====================
+-- halloweenUpgrade:InvokeServer("buy", id) -> ok, message      ids: luck / speed / candy (max 20 each)
+-- level = attribute HwUpgrade_<id>, candies = attribute Candies, price = base * growth ^ level (rounded)
+do
+    local Upgrades = {
+        { id = "luck",  name = "Luck",         base = 2000, growth = 1.4, max = 20 },
+        { id = "speed", name = "Battle Speed", base = 1000, growth = 1.4, max = 20 },
+        { id = "candy", name = "Candy Gain",   base = 3000, growth = 1.4, max = 20 },
+    }
+    local Names, ById = {}, {}
+    for _, u in ipairs(Upgrades) do table.insert(Names, u.name); ById[u.name] = u end
+    local Picked = { ["Luck"] = true, ["Battle Speed"] = true, ["Candy Gain"] = true }
+
+    local function priceOf(u, level)
+        local v = u.base * u.growth ^ level
+        local step = 10 ^ math.max(0, math.floor(math.log10(v)) - 1)
+        return math.floor(v / step + 0.5) * step
+    end
+
+    -- buys the cheapest picked upgrade we can afford, again and again
+    local function buyUpgrades(alive)
+        local remote = Rep:FindFirstChild("halloweenUpgrade")
+        if not remote or not inHalloween() then return 0 end
+        local bought = 0
+        for _ = 1, 60 do
+            if alive and not alive() then break end
+            local best, bestPrice
+            for _, name in ipairs(Names) do
+                local u = ById[name]
+                local lvl = player:GetAttribute("HwUpgrade_" .. u.id) or 0
+                if Picked[name] and lvl < u.max then
+                    local p = priceOf(u, lvl)
+                    if not bestPrice or p < bestPrice then best, bestPrice = u, p end
+                end
+            end
+            if not best or (player:GetAttribute("Candies") or 0) < bestPrice then break end
+            local ok, res, msg = pcall(remote.InvokeServer, remote, "buy", best.id)
+            if not (ok and res) then
+                if msg then warn("[Halloween Upgrades] " .. tostring(msg)) end
+                break
+            end
+            bought += 1
+            task.wait(0.6)
+        end
+        return bought
+    end
+
+    local UpTab = Window:CreateTab("Candy & Upgrades", 4483362458)
+    UpTab:CreateSection("Halloween Upgrades")
+
+    UpTab:CreateDropdown({
+        Name = "Upgrades to buy",
+        Options = Names,
+        CurrentOption = Names,
+        MultipleOptions = true,
+        Flag = "HwUpgradesPick",
+        Callback = function(list)
+            Picked = {}
+            for _, n in ipairs(list) do Picked[n] = true end
+        end,
+    })
+
+    local loop = makeLoop(30, function(alive)
+        local n = buyUpgrades(alive)
+        if n > 0 then xNotify("Halloween Upgrades", "Bought " .. n .. " upgrade level(s)", 3) end
+    end)
+    UpTab:CreateToggle({
+        Name = "Auto buy Halloween upgrades (with candies)",
+        CurrentValue = false,
+        Flag = "HwUpgradesAuto",
+        Callback = loop,
+    })
+
+    UpTab:CreateButton({
+        Name = "Buy upgrades now",
+        Callback = function()
+            task.spawn(function()
+                if not inHalloween() then return xNotify("Halloween Upgrades", "Go into the Halloween event first") end
+                xNotify("Halloween Upgrades", "Bought " .. buyUpgrades() .. " level(s)", 3)
+            end)
+        end,
+    })
+
+    UpTab:CreateParagraph({
+        Title = "Info",
+        Content = "Always buys the cheapest picked upgrade first, until candies run out or all are level 20. Only works inside the event.",
+    })
+end
+
+-- ==================== Shadow Market (npcHandlerClient: openRaidShop("shadow")) ====================
+-- same remote as the Kaiju shop: raidShopRequest:InvokeServer("buy", "shadow", "potions:<Name>")
+do
+    local ShopTab = Window:CreateTab("Shadow Market", 4483362458)
+    local ShopId = "shadow"
+    local BuyNames = {
+        "Luck Potion I", "Luck Potion II", "Luck Potion III", "Luck Potion IV",
+        "Speed Potion I", "Speed Potion II", "Speed Potion III", "Speed Potion IV",
+        "Battle Potion I", "Battle Potion II", "Battle Potion III", "Battle Potion IV",
+        "Boss Potion", "Raid Potion",
+    }
+    local Selected = {}
+    local MaxBuys = 5
+    local CYCLE = 4 * 3600 + 60
+    local RETRY_AFTER_FAIL = 900
+
+    getgenv().TitanShadowShop = getgenv().TitanShadowShop or { bought = {}, nextTry = {}, cycleStart = os.time() }
+    local State = getgenv().TitanShadowShop
+
+    local function refused(res)
+        if res == false or res == nil then return res == false end
+        if type(res) == "table" and (res.success == false or res.ok == false or res.error ~= nil) then return true end
+        if type(res) == "string" then
+            local s = res:lower()
+            for _, kw in ipairs({ "not enough", "out of stock", "sold out", "insufficient", "fail", "error", "cannot", "invalid", "locked" }) do
+                if s:find(kw, 1, true) then return true end
+            end
+        end
+        return false
+    end
+
+    local function buyOne(name)
+        local remote = Rep:FindFirstChild("raidShopRequest")
+        if not remote then return false end
+        local ok, res = pcall(function() return remote:InvokeServer("buy", ShopId, "potions:" .. name) end)
+        if not ok or refused(res) then return false end
+        return true
+    end
+
+    local function buyCycle(alive)
+        if os.time() - State.cycleStart >= CYCLE then
+            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+        end
+        local total = 0
+        for _, name in ipairs(BuyNames) do
+            if Selected[name] then
+                while (not alive or alive()) and (State.bought[name] or 0) < MaxBuys and (State.nextTry[name] or 0) <= os.time() do
+                    if buyOne(name) then
+                        State.bought[name] = (State.bought[name] or 0) + 1
+                        total += 1
+                        task.wait(0.7)
+                    else
+                        State.nextTry[name] = os.time() + RETRY_AFTER_FAIL
+                        break
+                    end
+                end
+            end
+        end
+        return total
+    end
+
+    ShopTab:CreateSection("Potions to buy")
+    ShopTab:CreateDropdown({
+        Name = "Buy these from the Shadow Market",
+        Options = BuyNames,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "ShadowShopPick",
+        Callback = function(list)
+            Selected = {}
+            for _, n in ipairs(list) do Selected[n] = true end
+        end,
+    })
+    ShopTab:CreateInput({
+        Name = "Max buys per potion per restock",
+        Default = "5",
+        Flag = "ShadowShopMax",
+        Callback = function(v)
+            local n = tonumber(v)
+            if n and n >= 1 then MaxBuys = math.floor(n) end
+        end,
+    })
+
+    ShopTab:CreateSection("Buy")
+    ShopTab:CreateToggle({
+        Name = "Auto buy (Shadow Market)",
+        CurrentValue = false,
+        Flag = "ShadowShopAuto",
+        Callback = makeLoop(120, function(alive)
+            if next(Selected) == nil then return end
+            local n = buyCycle(alive)
+            if n > 0 then xNotify("Shadow Market", "Bought " .. n .. " potion(s)", 4) end
+        end),
+    })
+    ShopTab:CreateButton({
+        Name = "Buy selected now",
+        Callback = function()
+            if next(Selected) == nil then return xNotify("Shadow Market", "Pick at least one potion first", 3) end
+            task.spawn(function() xNotify("Shadow Market", "Bought " .. buyCycle() .. " potion(s)", 4) end)
+        end,
+    })
+    ShopTab:CreateButton({
+        Name = "Reset counters",
+        Callback = function()
+            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+            xNotify("Shadow Market", "Counters reset", 3)
+        end,
+    })
+    ShopTab:CreateButton({
+        Name = "Print shop data (F9)",
+        Callback = function()
+            local remote = Rep:FindFirstChild("raidShopRequest")
+            if not remote then return end
+            task.spawn(function()
+                local ok, res = pcall(function() return remote:InvokeServer("get", ShopId) end)
+                local okj, js = pcall(function() return game:GetService("HttpService"):JSONEncode(res) end)
+                print("[Shadow Market] get:", ok, okj and js or tostring(res))
+                xNotify("Shadow Market", "Shop data printed in the F9 console", 4)
+            end)
+        end,
+    })
+    ShopTab:CreateParagraph({
+        Title = "Info",
+        Content = "Needs Shadows Garden unlocked. Spends Shadow Seals. Potions the market doesn't sell are skipped for 15 minutes.",
+    })
+end
+
+-- ==================== The Masked Man / dealer (dealerClient) ====================
+-- dealerRequest:InvokeServer("get")         -> ok, message, state { offers = { {slot, name, rarity, price, bought} }, scrap }
+-- dealerRequest:InvokeServer("buy", slot)   -> ok, message, state
+do
+    local Rarities = { "Common", "Rare", "Epic", "Legendary", "Mythic" }
+    local Want = { Legendary = true, Mythic = true }
+    local KeepScrap = 0
+
+    local function dealerPass()
+        local remote = Rep:FindFirstChild("dealerRequest")
+        if not remote then return 0, "dealerRequest not found" end
+        local ok, okGet, msg, state = pcall(remote.InvokeServer, remote, "get", nil)
+        if not ok or not okGet or type(state) ~= "table" or type(state.offers) ~= "table" then
+            return 0, msg or "the dealer is not here right now"
+        end
+        local scrap = tonumber(state.scrap) or math.huge
+        local n = 0
+        for _, offer in ipairs(state.offers) do
+            if type(offer) == "table" and not offer.bought and Want[offer.rarity] and offer.slot ~= nil then
+                local price = tonumber(offer.price) or 0
+                if scrap - price >= KeepScrap then
+                    local okB, okBuy, bmsg, newState = pcall(remote.InvokeServer, remote, "buy", offer.slot)
+                    if okB and okBuy then
+                        n += 1
+                        scrap -= price
+                        if type(newState) == "table" and tonumber(newState.scrap) then scrap = tonumber(newState.scrap) end
+                        xNotify("Masked Man", "Bought " .. tostring(offer.name) .. " (" .. tostring(offer.rarity) .. ")", 4)
+                    elseif bmsg then
+                        warn("[Masked Man] " .. tostring(bmsg))
+                    end
+                    task.wait(0.8)
+                end
+            end
+        end
+        return n
+    end
+
+    local DealerTab = Window:CreateTab("Masked Man", 4483362458)
+    DealerTab:CreateSection("Dealer")
+    DealerTab:CreateDropdown({
+        Name = "Buy offers of these rarities",
+        Options = Rarities,
+        CurrentOption = { "Legendary", "Mythic" },
+        MultipleOptions = true,
+        Flag = "DealerRarities",
+        Callback = function(list)
+            Want = {}
+            for _, r in ipairs(list) do Want[r] = true end
+        end,
+    })
+    DealerTab:CreateInput({
+        Name = "Always keep at least this much Scrap",
+        Default = "0",
+        Flag = "DealerKeepScrap",
+        Callback = function(v) KeepScrap = tonumber(v) or 0 end,
+    })
+    DealerTab:CreateToggle({
+        Name = "Auto buy from the Masked Man",
+        CurrentValue = false,
+        Flag = "DealerAuto",
+        Callback = makeLoop(90, function() dealerPass() end),
+    })
+    DealerTab:CreateButton({
+        Name = "Check offers now",
+        Callback = function()
+            task.spawn(function()
+                local n, why = dealerPass()
+                xNotify("Masked Man", why and ("Can't: " .. tostring(why)) or ("Bought " .. n .. " offer(s)"), 4)
+            end)
+        end,
+    })
+    DealerTab:CreateParagraph({
+        Title = "Info",
+        Content = "Pays with Scrap. If it says he's not here, he only shows up at certain times or you have to stand near him (the game uses a 16 stud range).",
+    })
+end
+
+-- ==================== Scrap Shop (scrapShopClient) ====================
+-- scrapShopRequest:InvokeServer("get", true)        -> ok, message, state { rows = { {id, price, count, extra, owned} }, scrap, level }
+-- scrapShopRequest:InvokeServer("buy", id, price)   -> ok, message, state
+do
+    local Items = {
+        { id = "reroll",     name = "Weather Reroll" },
+        { id = "dust",       name = "Spirit Dust" },
+        { id = "ore",        name = "Enchanted Ore" },
+        { id = "boss",       name = "Boss Potion" },
+        { id = "raidPotion", name = "Raid Potion" },
+        { id = "fortune",    name = "Fortune Draught" },
+        { id = "divine",     name = "Divine Fragment" },
+        { id = "abyssal",    name = "Abyssal Fragment" },
+        { id = "orb",        name = "Orb Fragment" },
+        { id = "blueShard",  name = "Blue Raid Shard" },
+        { id = "skillPoint", name = "Skill Point" },
+        { id = "tonic",      name = "Pack XP Tonic" },
+        { id = "counterSwap", name = "Counter Swap" },
+    }
+    local Names, IdOf = {}, {}
+    for _, it in ipairs(Items) do table.insert(Names, it.name); IdOf[it.name] = it.id end
+    local Picked = {}
+
+    local function getState(remote)
+        local ok, a, b, c = pcall(remote.InvokeServer, remote, "get", true)
+        if ok and a and type(c) == "table" then return c end
+        return nil, b
+    end
+
+    local function findRow(state, id)
+        for _, list in ipairs({ state.rows or {}, state.deals or {} }) do
+            for _, r in pairs(list) do
+                if type(r) == "table" and r.id == id then return r end
+            end
+        end
+    end
+
+    local function scrapBuyPass(alive)
+        local remote = Rep:FindFirstChild("scrapShopRequest")
+        if not remote then return 0, "scrapShopRequest not found" end
+        local state, why = getState(remote)
+        if not state then return 0, why or "no shop data" end
+        local n = 0
+        for _, name in ipairs(Names) do
+            if Picked[name] then
+                for _ = 1, 30 do
+                    if alive and not alive() then return n end
+                    local row = findRow(state, IdOf[name])
+                    -- only normal stock: never the "extra" (2x, 4x ... price) purchases
+                    if not row or row.extra or row.soon or not tonumber(row.count) or row.count <= 0 or not row.price then break end
+                    if tonumber(state.scrap) and state.scrap < row.price then break end
+                    local ok, okBuy, msg, newState = pcall(remote.InvokeServer, remote, "buy", row.id, row.price)
+                    if not (ok and okBuy) then
+                        if msg then warn("[Scrap Shop] " .. tostring(msg)) end
+                        break
+                    end
+                    n += 1
+                    if type(newState) == "table" then state = newState end
+                    task.wait(0.6)
+                end
+            end
+        end
+        return n
+    end
+
+    local ScrapTab = Window:CreateTab("Scrap Shop", 4483362458)
+    ScrapTab:CreateSection("Scrap Shop")
+    ScrapTab:CreateDropdown({
+        Name = "Buy these with Scrap",
+        Options = Names,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "ScrapShopPick",
+        Callback = function(list)
+            Picked = {}
+            for _, n in ipairs(list) do Picked[n] = true end
+        end,
+    })
+    ScrapTab:CreateToggle({
+        Name = "Auto buy Scrap Shop stock",
+        CurrentValue = false,
+        Flag = "ScrapShopAuto",
+        Callback = makeLoop(300, function(alive)
+            if next(Picked) == nil then return end
+            local n = scrapBuyPass(alive)
+            if n > 0 then xNotify("Scrap Shop", "Bought " .. n .. " bundle(s)", 4) end
+        end),
+    })
+    ScrapTab:CreateButton({
+        Name = "Buy selected now",
+        Callback = function()
+            if next(Picked) == nil then return xNotify("Scrap Shop", "Pick at least one item first", 3) end
+            task.spawn(function()
+                local n, why = scrapBuyPass()
+                xNotify("Scrap Shop", (n == 0 and why) and ("Can't: " .. tostring(why)) or ("Bought " .. n .. " bundle(s)"), 4)
+            end)
+        end,
+    })
+    ScrapTab:CreateParagraph({
+        Title = "Info",
+        Content = "Buys today's normal stock only. It never buys the extra sold-out stock (that costs 2x, 4x, 8x...). Items above your shop level are skipped.",
+    })
+
+    -- ===== Potion Fuser (fuserClient): fuse every 5 potions into 1 of the next tier =====
+    -- scrapShopRequest:InvokeServer("fuseMany", { [recipeId] = count }, nil)
+    -- state.fuses = { {id, from, to, fee} },  state.fuseHeld[id or from] = how many of `from` you have
+    local Tiers = { "I", "II", "III", "IV", "V", "VI" }
+    local FuseLabels, FuseIdOf = {}, {}
+    for _, kind in ipairs({ "Luck", "Speed", "Battle" }) do
+        for i = 2, 6 do
+            local label = kind .. " " .. Tiers[i - 1] .. " -> " .. Tiers[i]
+            table.insert(FuseLabels, label)
+            FuseIdOf[label] = kind .. i
+        end
+        local label = "Eternal " .. kind .. " IV -> V"
+        table.insert(FuseLabels, label)
+        FuseIdOf[label] = kind .. "E5"
+    end
+    local FusePicked = {}
+    local KeepPotions = 0
+
+    local function fusePass()
+        local remote = Rep:FindFirstChild("scrapShopRequest")
+        if not remote then return 0, "scrapShopRequest not found" end
+        local state, why = getState(remote)
+        if not state then return 0, why or "no shop data" end
+        if type(state.fuses) ~= "table" then return 0, "Potion Fuser is locked (Scrap Shop level 3)" end
+        local held = type(state.fuseHeld) == "table" and state.fuseHeld or {}
+        local plan, count, fee = {}, 0, 0
+        for _, r in pairs(state.fuses) do
+            if type(r) == "table" and r.id then
+                local wanted = false
+                for label, id in pairs(FuseIdOf) do
+                    if id == r.id and FusePicked[label] then wanted = true end
+                end
+                local have = tonumber(held[r.id] or held[r.from]) or 0
+                local n = math.min(math.floor(math.max(have - KeepPotions, 0) / 5), 1000)
+                if wanted and n > 0 then
+                    plan[r.id] = n
+                    count += n
+                    fee += n * (tonumber(r.fee) or 0)
+                end
+            end
+        end
+        if count == 0 then return 0, "nothing to fuse" end
+        if tonumber(state.scrap) and state.scrap < fee then return 0, "not enough Scrap (" .. fee .. " needed)" end
+        local ok, okF, msg = pcall(remote.InvokeServer, remote, "fuseMany", plan, nil)
+        if ok and okF then return count end
+        return 0, msg or "refused"
+    end
+
+    ScrapTab:CreateSection("Potion Fuser")
+    ScrapTab:CreateDropdown({
+        Name = "Fuse these (5 -> 1 of next tier)",
+        Options = FuseLabels,
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "FuserPick",
+        Callback = function(list)
+            FusePicked = {}
+            for _, n in ipairs(list) do FusePicked[n] = true end
+        end,
+    })
+    ScrapTab:CreateInput({
+        Name = "Keep at least this many of each potion",
+        Default = "0",
+        Flag = "FuserKeep",
+        Callback = function(v) KeepPotions = math.max(0, math.floor(tonumber(v) or 0)) end,
+    })
+    ScrapTab:CreateToggle({
+        Name = "Auto fuse potions",
+        CurrentValue = false,
+        Flag = "FuserAuto",
+        Callback = makeLoop(300, function()
+            if next(FusePicked) == nil then return end
+            local n = fusePass()
+            if n > 0 then xNotify("Potion Fuser", "Fused " .. n .. " potion(s)", 4) end
+        end),
+    })
+    ScrapTab:CreateButton({
+        Name = "Fuse now",
+        Callback = function()
+            if next(FusePicked) == nil then return xNotify("Potion Fuser", "Pick at least one recipe first", 3) end
+            task.spawn(function()
+                local n, why = fusePass()
+                xNotify("Potion Fuser", n > 0 and ("Fused " .. n .. " potion(s)") or ("Can't: " .. tostring(why)), 4)
+            end)
+        end,
+    })
+end
+
+-- ==================== Recycler auto mode (recyclerClient) ====================
+-- recyclerRequest:InvokeServer("info")          -> ok, message, info { auto = {owned, on, index}, scrap }
+-- recyclerRequest:InvokeServer("auto", index)   -> turns the game's Auto-Recycle ON at that rarity (1..10)
+-- recyclerRequest:InvokeServer("auto", -index)  -> turns it OFF
+do
+    local Thresholds = { "1 in 1K", "1 in 10K", "1 in 100K", "1 in 1M", "1 in 10M", "1 in 100M", "1 in 1B", "1 in 10B", "1 in 1T", "1 in 1Qa" }
+    local WantIndex = 4
+
+    local function info(remote)
+        local ok, a, b, c = pcall(remote.InvokeServer, remote, "info")
+        if ok and a and type(c) == "table" then return c end
+        return nil, b
+    end
+
+    local function setRecycler(on)
+        local remote = Rep:FindFirstChild("recyclerRequest")
+        if not remote then return false, "recyclerRequest not found" end
+        local inf, why = info(remote)
+        if not inf then return false, why or "no recycler data" end
+        local auto = inf.auto
+        if type(auto) ~= "table" or not auto.owned then
+            return false, "Buy Auto-Recycle in the Scrap Shop first (Level 2)"
+        end
+        local arg
+        if on then
+            if auto.on and auto.index == WantIndex then return true, "already on" end
+            arg = WantIndex
+        else
+            if not auto.on then return true, "already off" end
+            arg = -(auto.index or WantIndex)
+        end
+        local ok, okA, msg = pcall(remote.InvokeServer, remote, "auto", arg)
+        if ok and okA then return true end
+        return false, msg or "refused"
+    end
+
+    local RecTab = Window:CreateTab("Recycler", 4483362458)
+    RecTab:CreateSection("Auto-Recycle")
+    RecTab:CreateDropdown({
+        Name = "Recycle new cards up to this rarity",
+        Options = Thresholds,
+        CurrentOption = { "1 in 1M" },
+        MultipleOptions = false,
+        Flag = "RecyclerThreshold",
+        Callback = function(list)
+            local idx = table.find(Thresholds, list[1])
+            if idx then WantIndex = idx end
+        end,
+    })
+    RecTab:CreateButton({
+        Name = "Turn game Auto-Recycle ON",
+        Callback = function()
+            task.spawn(function()
+                local ok, why = setRecycler(true)
+                xNotify("Recycler", ok and ("ON: " .. Thresholds[WantIndex] .. (why and (" (" .. why .. ")") or "")) or ("Can't: " .. tostring(why)), 4)
+            end)
+        end,
+    })
+    RecTab:CreateButton({
+        Name = "Turn game Auto-Recycle OFF",
+        Callback = function()
+            task.spawn(function()
+                local ok, why = setRecycler(false)
+                xNotify("Recycler", ok and "OFF" or ("Can't: " .. tostring(why)), 4)
+            end)
+        end,
+    })
+    RecTab:CreateParagraph({
+        Title = "Info",
+        Content = "This controls the game's own Auto-Recycle. It turns new rolled copies up to that rarity into Scrap and always keeps your last 4 copies and your team cards.",
+    })
+end
+
+-- ==================== Card Awakening (awakeningClient) ====================
+-- awakeningAction:InvokeServer("info", cardKey)  -> ok, info { awakened, have, cost, costItem }  (or false, message)
+-- awakeningAction:InvokeServer("start", cardKey) -> starts the trial battle (costs Heroic Embers, 6h rest per card)
+-- only cards rarer than 1 in 10M can be awakened
+do
+    local MIN_WEIGHT = 10000000
+    local tried = {} -- key -> os.time() of the last try (so we don't spam the same card)
+
+    local function inventory()
+        local ok, inv = pcall(function()
+            local mod = player.PlayerScripts:FindFirstChild("InventoryManagerClient")
+            return mod and require(mod).getInventory()
+        end)
+        return ok and type(inv) == "table" and inv or {}
+    end
+
+    local function awakenedSet()
+        local set = {}
+        pcall(function()
+            local list = game:GetService("HttpService"):JSONDecode(player:GetAttribute("AwakenedKeys") or "[]")
+            for _, k in pairs(list) do set[k] = true end
+        end)
+        return set
+    end
+
+    local function inBattle()
+        local ok, gui = pcall(function() return player.PlayerGui:FindFirstChild("BattleUI") end)
+        return ok and gui and gui.Enabled
+    end
+
+    -- starts at most ONE trial per call (a trial is a battle)
+    local function awakenPass()
+        local remote = Rep:FindFirstChild("awakeningAction")
+        if not remote then return false, "awakeningAction not found" end
+        if player:GetAttribute("Feature_awakening") ~= true then return false, "Awakening is not unlocked yet" end
+        if inBattle() then return false, "in a battle right now" end
+        local done = awakenedSet()
+        local list = {}
+        for key, card in pairs(inventory()) do
+            local w = type(card) == "table" and tonumber(card.Weight) or 0
+            if w >= MIN_WEIGHT and not done[key] and os.time() - (tried[key] or 0) > 1800 then
+                table.insert(list, { key = key, w = w })
+            end
+        end
+        table.sort(list, function(a, b) return a.w > b.w end) -- rarest first
+        for i, c in ipairs(list) do
+            if i > 25 then break end
+            tried[c.key] = os.time()
+            -- returns ok, info (or ok=false, message)
+            local ok, okI, inf = pcall(remote.InvokeServer, remote, "info", c.key)
+            if ok and okI and type(inf) == "table" and not inf.awakened
+                and (tonumber(inf.have) or 0) >= (tonumber(inf.cost) or math.huge) then
+                local okS, okStart, smsg = pcall(remote.InvokeServer, remote, "start", c.key)
+                if okS and okStart then return true, tostring(c.key) end
+                if smsg then warn("[Awakening] " .. tostring(c.key) .. ": " .. tostring(smsg)) end
+            end
+            task.wait(0.4)
+        end
+        return false, "no card ready (embers / resting)"
+    end
+
+    local AwTab = Window:CreateTab("Awakening", 4483362458)
+    AwTab:CreateSection("Card Awakening")
+    AwTab:CreateToggle({
+        Name = "Auto start awakening trials",
+        CurrentValue = false,
+        Flag = "AwakeningAuto",
+        Callback = makeLoop(120, function()
+            local ok, what = awakenPass()
+            if ok then xNotify("Awakening", "Started trial: " .. what, 5) end
+        end),
+    })
+    AwTab:CreateButton({
+        Name = "Start one trial now",
+        Callback = function()
+            task.spawn(function()
+                local ok, what = awakenPass()
+                xNotify("Awakening", ok and ("Started trial: " .. what) or ("Can't: " .. tostring(what)), 5)
+            end)
+        end,
+    })
+    AwTab:CreateParagraph({
+        Title = "Info",
+        Content = "Checks your rarest cards (rarer than 1 in 10M) and starts a trial when you have enough Heroic Embers (5 / 10 / 15). A trial is a battle, so it can pause farming for a moment. Each card rests 6 hours after a try.",
+    })
+end
+end)() end
 
 -- ==================== Auto Roll state helpers (used by Pity Roll) ====================
 -- reads the dot inside PlayerGui.Main.Bottom.rollButtons.AutoRollFrame (grey = off, green = on)
