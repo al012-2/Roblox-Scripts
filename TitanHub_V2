@@ -53,7 +53,7 @@ local GroupInfo = {
     ["Secret Bosses"]    = { "Secret Bosses",  "eye",           "Hunt the hidden bosses", 104 },
     -- Event (200)
     ["Halloween"]        = { "Halloween",      "ghost",         "Event bosses, statues, doors, candies, packs", 201 },
-    ["Candy & Upgrades"] = { "Upgrades",       "trending-up",   "Spend candies on event upgrades", 202 },
+    ["Candy & Upgrades"] = { "Event Extras",   "trending-up",   "Upgrades, Spooky Tower, secret areas", 202 },
     ["Candy Shop"]       = { "Candy Shop",     "candy",         "Auto buy event boosts", 203 },
     -- Progress (300)
     ["Roll & Tower"]     = { "Roll",           "dice-5",        "Rolls, pity and offline rolls", 301 },
@@ -70,7 +70,7 @@ local GroupInfo = {
     ["Scrap Shop"]       = { "Scrap Shop",     "store",         "Scrap stock and potion fuser", 405 },
     ["Recycler"]         = { "Recycler",       "recycle",       "Game auto-recycle settings", 406 },
     -- Extras (500)
-    ["Quests"]           = { "Quests",         "scroll-text",   "Quests, index and Prestige Road", 501 },
+    ["Quests"]           = { "Quests",         "scroll-text",   "Quests, Prestige Road, codes, daily and group chest", 501 },
     ["NPCs"]             = { "NPCs",           "users",         "Talk to NPCs", 502 },
     ["Teleports"]        = { "Teleports",      "map-pin",       "Go anywhere in one click", 503 },
     ["Server & Rejoin"]  = { "Server",         "server",        "Private server and auto rejoin", 504 },
@@ -92,7 +92,7 @@ local ShortNames = {
     ["battle settings"] = "Battle", ["difficulty"] = "Diff", ["movement"] = "Move", ["smart farm"] = "Worlds",
     ["raid control"] = "Control", ["raid bosses & difficulty"] = "Bosses",
     ["control"] = "Control", ["quick setup"] = "Quick", ["secret bosses"] = "Secret", ["bosses"] = "Bosses",
-    ["reaper statues"] = "Statues", ["halloween quests"] = "Quests", ["prestige road"] = "Road", ["candy doors"] = "Doors", ["candy pickups"] = "Candy", ["halloween upgrades"] = "Upgrades", ["dealer"] = "Dealer", ["scrap shop"] = "Shop", ["potion fuser"] = "Fuser", ["auto-recycle"] = "Auto", ["card awakening"] = "Awaken", ["card packs"] = "Packs",
+    ["reaper statues"] = "Statues", ["halloween quests"] = "Quests", ["prestige road"] = "Road", ["candy doors"] = "Doors", ["candy pickups"] = "Candy", ["halloween upgrades"] = "Upgrades", ["dealer"] = "Dealer", ["scrap shop"] = "Shop", ["potion fuser"] = "Fuser", ["auto-recycle"] = "Auto", ["card awakening"] = "Awaken", ["spooky tower"] = "Tower", ["secret areas"] = "Secret", ["codes"] = "Codes", ["daily & group chest"] = "Daily", ["card packs"] = "Packs",
     ["end the tower at a floor"] = "At floor", ["end the tower on weather"] = "Weather", ["manual"] = "Manual", ["auto run"] = "Auto",
     ["potion selection"] = "Select", ["auto drink"] = "Drink", ["weather burst"] = "Burst", ["before ending the infinity tower"] = "Pre-end",
     ["potions to buy"] = "Potions", ["potions to craft"] = "Potions", ["buy"] = "Buy", ["craft"] = "Craft", ["debug"] = "Debug",
@@ -358,6 +358,37 @@ function Rayfield:CreateWindow(cfg)
         return setmetatable({ _tab = addPage(name), _name = name, _n = 0 }, TabClass)
     end
     return win
+end
+
+-- Shop entry lookup (npcHandlerClient): raidShopRequest:InvokeServer("get", shopId) returns
+-- { entries = { {id, name, section, stock, maxStock, unlimited, locked, owned}, ... }, balances, restockIn }
+-- The real buy key is entry.id, so we look it up by name instead of guessing "potions:<name>".
+-- (kept on the Rayfield table: the main chunk is at Lua's 200-locals limit)
+Rayfield.ShopCache = {}
+function Rayfield.ShopEntry(remote, shopId, name)
+    local c = Rayfield.ShopCache[shopId]
+    if not c or os.clock() - c.at > 20 then
+        local ok, res = pcall(function() return remote:InvokeServer("get", shopId) end)
+        c = { at = os.clock(), entries = (ok and type(res) == "table" and type(res.entries) == "table") and res.entries or nil }
+        Rayfield.ShopCache[shopId] = c
+    end
+    if not c.entries then return nil end
+    for _, e in ipairs(c.entries) do
+        if type(e) == "table" and e.name == name then return e end
+    end
+    return false -- shop answered, but doesn't sell this
+end
+-- returns key or nil + reason; falls back to the old "<tab>:<name>" key when the shop data can't be read
+function Rayfield.ShopKey(remote, shopId, name, fallback)
+    local e = Rayfield.ShopEntry(remote, shopId, name)
+    if e == false then return nil, "not sold here" end
+    if e then
+        if e.locked and not e.owned then return nil, "locked" end
+        if not e.unlimited and tonumber(e.stock) and e.stock <= 0 then return nil, "out of stock" end
+        Rayfield.ShopCache[shopId].at = 0 -- stock changes after a buy: re-read next time
+        return e.id
+    end
+    return fallback
 end
 
 function Rayfield:Notify(cfg)
@@ -2633,7 +2664,7 @@ RollTab:CreateSection("Roll & Tower")
 RollTab:CreateButton({ Name = "Toggle Auto Roll", Callback = function() if autoRollRemote then autoRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Toggle Quick Roll", Callback = function() if quickRollRemote then quickRollRemote:FireServer() end end })
 RollTab:CreateButton({ Name = "Equip Best Cards", Callback = function() if equipBestRemote then equipBestRemote:FireServer() end end })
-RollTab:CreateButton({ Name = "Claim Daily Reward", Callback = function() if claimDailyRemote then claimDailyRemote:FireServer() end end })
+RollTab:CreateButton({ Name = "Claim Daily Reward", Callback = function() if claimDailyRemote then claimDailyRemote:FireServer("login") end end })
 
 -- ==================== NPCs tab ====================
 -- ==================== Teleports (direct remote; falls back to the game's Teleport menu button) ====================
@@ -2655,8 +2686,17 @@ do
             Callback = function()
                 task.spawn(function()
                     local ok = false
+                    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    local from = hrp and hrp.Position
                     if p.args and teleportAreaRemote then
-                        ok = pcall(function() teleportAreaRemote:FireServer(p.args[1], p.args[2]) end)
+                        pcall(function() teleportAreaRemote:FireServer(p.args[1], p.args[2]) end)
+                        local t0 = os.clock()
+                        repeat
+                            task.wait(0.3)
+                            local h = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                            ok = from ~= nil and h ~= nil and (h.Position - from).Magnitude > 60
+                        until ok or os.clock() - t0 > 4
+                        if not from then ok = true end -- no character to compare with: trust the remote
                     end
                     if not ok then ok = pressTeleportMenuButton(p.key, p.tab) end
                     Rayfield:Notify({
@@ -3359,7 +3399,7 @@ do
 
     -- ===== Halloween Card Packs (auto open) =====
     -- captured with Cobalt:  useItem:FireServer("Instant Roll x100", 1)  /  useItem:FireServer("Instant Roll x10", 1)
-    local PackItems = { "Instant Roll x10000", "Instant Roll x1000", "Instant Roll x100", "Instant Roll x10" }
+    local PackItems = { "Instant Roll x10,000", "Instant Roll x1,000", "Instant Roll x100", "Instant Roll x10" } -- exact names from halloweenInfo.PACKS
     local PackSelected = { ["Instant Roll x100"] = true }
     local PackAmount = 1
     local PackDelay = 1.5
@@ -3693,6 +3733,93 @@ do
         Title = "Info",
         Content = "Always buys the cheapest picked upgrade first, until candies run out or all are level 20. Only works inside the event.",
     })
+
+    -- ===== Spooky Tower (halloweenClient: the tower's "Climb" button = runInfTower:FireServer() inside the event) =====
+    local function inBattleNow()
+        local ok, gui = pcall(function() return player.PlayerGui:FindFirstChild("BattleUI") end)
+        return ok and gui and gui.Enabled
+    end
+
+    UpTab:CreateSection("Spooky Tower")
+    UpTab:CreateToggle({
+        Name = "Auto climb Spooky Tower",
+        CurrentValue = false,
+        Flag = "SpookyTowerAuto",
+        Callback = makeLoop(8, function()
+            if not inHalloween() or inBattleNow() then return end
+            local r = Rep:FindFirstChild("runInfTower")
+            if r then pcall(function() r:FireServer() end) end
+        end),
+    })
+    UpTab:CreateButton({
+        Name = "Climb now",
+        Callback = function()
+            if not inHalloween() then return xNotify("Spooky Tower", "Go into the Halloween event first") end
+            local r = Rep:FindFirstChild("runInfTower")
+            if r then r:FireServer() end
+        end,
+    })
+    UpTab:CreateParagraph({
+        Title = "Info",
+        Content = "Starts a new climb whenever you're in the event and not in a battle. Don't run it together with Auto Halloween Bosses (both start battles).",
+    })
+
+    -- ===== Secret areas (workspace.HalloweenEvent["07_Secret_Areas"], e.g. SecretStoneRoom = Faceless Prophet) =====
+    local function secretAreas()
+        local hw = workspace:FindFirstChild("HalloweenEvent")
+        local f = hw and hw:FindFirstChild("07_Secret_Areas")
+        local list = {}
+        if f then
+            for _, c in ipairs(f:GetChildren()) do
+                if c:IsA("Model") or c:IsA("BasePart") or c:IsA("Folder") then table.insert(list, c) end
+            end
+            table.sort(list, function(a, b) return a.Name < b.Name end)
+        end
+        return list
+    end
+
+    local function centerOf(area)
+        -- prefer a floor-ish part, else the bounding box center
+        local ok, cf = pcall(function()
+            if area:IsA("BasePart") then return area.CFrame end
+            if area:IsA("Model") then return area:GetBoundingBox() end
+            local best
+            for _, d in ipairs(area:GetDescendants()) do
+                if d:IsA("BasePart") and (not best or d.Size.Magnitude > best.Size.Magnitude) then best = d end
+            end
+            return best and best.CFrame
+        end)
+        return ok and cf or nil
+    end
+
+    local secretIndex = 0
+    UpTab:CreateSection("Secret Areas")
+    UpTab:CreateButton({
+        Name = "Teleport: Secret Stone Room (Faceless Prophet)",
+        Callback = function()
+            local hw = workspace:FindFirstChild("HalloweenEvent")
+            local room = hw and hw:FindFirstChild("07_Secret_Areas") and hw["07_Secret_Areas"]:FindFirstChild("SecretStoneRoom")
+            local cf = room and centerOf(room)
+            local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            if not (cf and hrp) then return xNotify("Secret Areas", "Room not loaded - teleport to the Halloween event first") end
+            hrp.CFrame = CFrame.new(cf.Position + Vector3.new(0, 4, 0))
+        end,
+    })
+    UpTab:CreateButton({
+        Name = "Teleport to next secret area",
+        Callback = function()
+            local list = secretAreas()
+            local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            if #list == 0 or not hrp then return xNotify("Secret Areas", "Nothing loaded - teleport to the Halloween event first") end
+            secretIndex = secretIndex % #list + 1
+            local area = list[secretIndex]
+            local cf = centerOf(area)
+            if cf then
+                hrp.CFrame = CFrame.new(cf.Position + Vector3.new(0, 4, 0))
+                xNotify("Secret Areas", secretIndex .. "/" .. #list .. ": " .. area.Name, 3)
+            end
+        end,
+    })
 end
 
 -- ==================== Shadow Market (npcHandlerClient: openRaidShop("shadow")) ====================
@@ -3729,7 +3856,9 @@ do
     local function buyOne(name)
         local remote = Rep:FindFirstChild("raidShopRequest")
         if not remote then return false end
-        local ok, res = pcall(function() return remote:InvokeServer("buy", ShopId, "potions:" .. name) end)
+        local key = Rayfield.ShopKey(remote, ShopId, name, "potions:" .. name)
+        if not key then return false end
+        local ok, res = pcall(function() return remote:InvokeServer("buy", ShopId, key) end)
         if not ok or refused(res) then return false end
         return true
     end
@@ -4213,7 +4342,7 @@ do
             tried[c.key] = os.time()
             -- returns ok, info (or ok=false, message)
             local ok, okI, inf = pcall(remote.InvokeServer, remote, "info", c.key)
-            if ok and okI and type(inf) == "table" and not inf.awakened
+            if ok and okI and type(inf) == "table" and inf.eligible ~= false and not inf.awakened
                 and (tonumber(inf.have) or 0) >= (tonumber(inf.cost) or math.huge) then
                 local okS, okStart, smsg = pcall(remote.InvokeServer, remote, "start", c.key)
                 if okS and okStart then return true, tostring(c.key) end
@@ -4247,6 +4376,89 @@ do
     AwTab:CreateParagraph({
         Title = "Info",
         Content = "Checks your rarest cards (rarer than 1 in 10M) and starts a trial when you have enough Heroic Embers (5 / 10 / 15). A trial is a battle, so it can pause farming for a moment. Each card rests 6 hours after a try.",
+    })
+end
+
+-- ==================== Codes, daily login, group chest ====================
+-- codes:  settingChange:FireServer("redeemCode", code)           (handleUIClient: the code box)
+-- daily:  claimDaily:FireServer("login")                         (dailyFrame claim button)
+-- group:  claimDaily:FireServer("gift", true)                    (dailyJoinGroup) + the "dailyGiftPad" ring in the lobby
+do
+    -- known codes (newest first); invalid / used ones are just refused by the game
+    --   UPDATE3.0, UPDATE2.5, 1MVISITS, UPDATE2 (100k rolls) / UPDATE1.5, 500PLAYERS (50k rolls) / UPDATE1 (10 Luck, Speed, Battle potions)
+    local Codes = { "UPDATE3.0", "UPDATE2.5", "1MVISITS", "UPDATE2", "UPDATE1.5", "UPDATE1", "500PLAYERS" }
+
+    local function redeem(code)
+        local r = Rep:FindFirstChild("settingChange")
+        if not r or code == "" then return false end
+        return (pcall(function() r:FireServer("redeemCode", code) end))
+    end
+
+    QuestTab:CreateSection("Codes")
+    QuestTab:CreateButton({
+        Name = "Redeem all known codes",
+        Callback = function()
+            task.spawn(function()
+                for _, c in ipairs(Codes) do
+                    redeem(c)
+                    task.wait(1.2)
+                end
+                xNotify("Codes", "Tried " .. #Codes .. " codes: " .. table.concat(Codes, ", "), 6)
+            end)
+        end,
+    })
+    QuestTab:CreateInput({
+        Name = "Redeem a code",
+        Default = "",
+        Placeholder = "type a new code + Enter",
+        Callback = function(v)
+            v = tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if v ~= "" and redeem(v) then xNotify("Codes", "Sent: " .. v, 3) end
+        end,
+    })
+
+    local function claimLogin()
+        local r = Rep:FindFirstChild("claimDaily")
+        if r then pcall(function() r:FireServer("login") end) end
+    end
+
+    local function claimGroupChest()
+        local r = Rep:FindFirstChild("claimDaily")
+        if r then pcall(function() r:FireServer("gift", true) end) end
+        -- also step on the glowing ring if it's loaded (the game gives the chest when you stand on it)
+        local pad = game:GetService("CollectionService"):GetTagged("dailyGiftPad")[1]
+        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if pad and pad:IsA("BasePart") and hrp then
+            local back = hrp.CFrame
+            pcall(function()
+                hrp.CFrame = pad.CFrame + Vector3.new(0, 3, 0)
+                if firetouchinterest then
+                    firetouchinterest(hrp, pad, 0)
+                    task.wait(0.1)
+                    firetouchinterest(hrp, pad, 1)
+                end
+            end)
+            task.wait(1.5)
+            pcall(function() hrp.CFrame = back end)
+        end
+    end
+
+    QuestTab:CreateSection("Daily & Group Chest")
+    QuestTab:CreateToggle({
+        Name = "Auto claim daily login + group chest",
+        CurrentValue = false,
+        Flag = "AutoDailyGroup",
+        Callback = makeLoop(600, function()
+            claimLogin()
+            task.wait(1)
+            claimGroupChest()
+        end),
+    })
+    QuestTab:CreateButton({ Name = "Claim daily login now", Callback = function() claimLogin() end })
+    QuestTab:CreateButton({ Name = "Claim group chest now", Callback = function() task.spawn(claimGroupChest) end })
+    QuestTab:CreateParagraph({
+        Title = "Info",
+        Content = "The group chest only works if you're in the game's Roblox group. It's ready once a day.",
     })
 end
 end)() end
@@ -5517,7 +5729,9 @@ do (function()
 
     local function buyOne(name)
         if not shopRemote then return false, "remote not ready" end
-        local ok, res = pcall(function() return shopRemote:InvokeServer("buy", ShopId, "potions:" .. name) end)
+        local key, why = Rayfield.ShopKey(shopRemote, ShopId, name, "potions:" .. name)
+        if not key then return false, why end
+        local ok, res = pcall(function() return shopRemote:InvokeServer("buy", ShopId, key) end)
         if not ok then return false, tostring(res) end
         warn("[Raid Shop] " .. name .. " -> " .. show(res))
         if refused(res) then return false, res end
@@ -5689,7 +5903,14 @@ do (function()
         "Witch's Brew",
         "Pumpkin Battle Potion",
         "Blood Moon Reroll",
+        "Instant Roll x10",      -- 35 candies   (shop tab "items")
+        "Instant Roll x100",     -- 270 candies
+        "Instant Roll x1,000",   -- 2,200 candies
+        "Instant Roll x10,000",  -- 16,000 candies
     }
+    local function candyKey(name)
+        return (name:find("^Instant Roll") and "items:" or "potions:") .. name
+    end
     local Selected = {}
     local MaxBuys = 10                 -- Candy Shop potions have 10/10 stock (Blood Moon Reroll has 100/100)
     local CYCLE = 24 * 3600 + 60       -- Candy Shop restocks every 24 hours
@@ -5729,8 +5950,10 @@ do (function()
 
     local function buyOne(name)
         if not shopRemote then return false, "remote not ready" end
+        local key, why = Rayfield.ShopKey(shopRemote, ShopId, name, candyKey(name))
+        if not key then return false, why end
         local ok, res = pcall(function()
-            return shopRemote:InvokeServer("buy", ShopId, "potions:" .. name, nil)
+            return shopRemote:InvokeServer("buy", ShopId, key, nil)
         end)
         if not ok then return false, tostring(res) end
         warn("[Candy Shop] " .. name .. " -> " .. show(res))
