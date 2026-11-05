@@ -1,0 +1,1529 @@
+--[[
+    👑 GTC Solver V15.3 👑  —  Anime Card Clash • Guess the Card
+
+    يقرأ guessFeed مباشرة، ويطابق الصورة المغبشة مع صور البطاقات الأصلية.
+
+    V15.3: قائمة الصور الرسمية من دوال اللعبة (getCardAsset + getSkinsForCard) — نفس اللي يختار منه السيرفر
+
+    الجديد في V15:
+    - مقارنة بكسلات (Correlation) 24×32 فوق بصمة المربعات
+    - معايرة التغبيش تلقائياً من صورة الكشف
+    - يحمّل كل السكنات مسبقاً، ويحفظ بصمة البطاقة من صورة الكشف لو ما تحمّلت
+
+    من V14:
+    - دقة: بصمتين (خشنة + ناعمة) والصورة الأصلية تتغبش قبل المقارنة بنفس حجم صورة اللعبة
+    - دقة: يقارن السكنات لما يكون فيه فرصة سكن
+    - دقة: يربط اسم البطاقة بصورتها من revealAsset بعد كل جولة (يصلّح الأسماء الناقصة لحاله)
+    - دقة: يسجل الأسماء اللي ما لها صورة في GTC_missing.json
+    - ثبات: الجواب بالريموت (يشتغل حتى والنافذة مسكّرة)
+    - ثبات: إذا السيرفر علّم الجولة (flagged) يوقف ويعلمك
+    - ثبات: يفتح نافذة اللعبة لحاله (اختياري) عشان Play again
+    - نقاط: وقت جواب ذكي (أسرع لما يكون متأكد) وعشوائي
+    - إحصائيات: نسبة الصح، نقاط/ساعة، أفضل جولة (تنحفظ)
+    - راحة: RightShift يخفي/يظهر الواجهة
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local UserInputService = game:GetService("UserInputService")
+local AssetService = game:GetService("AssetService")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ==========================================
+-- إعدادات
+-- ==========================================
+local CONFIG = {
+    AUTO_SOLVE = true,
+    AUTO_REPLAY = true,
+    AUTO_OPEN = false,          -- يفتح نافذة اللعبة لحاله إذا تسكّرت (عشان Play again)
+    UNBLUR = true,              -- صورة واضحة فوق المغبشة
+    HIGHLIGHT = true,           -- يعلّم الخيار الصح
+    STOP_ON_FLAG = true,        -- يوقف Auto Solve إذا السيرفر علّم الجولة
+
+    ANSWER_MODE = "net",        -- "net" = ريموت | "click" = يضغط الزر
+
+    -- وقت الجواب (ثواني من بداية الجولة) — عشوائي بين الأقل والأكثر
+    SURE_MIN = 1.8, SURE_MAX = 4.0,       -- لما يكون متأكد
+    UNSURE_MIN = 3.0, UNSURE_MAX = 6.5,   -- لما مو متأكد
+    SAFETY_MARGIN = 1.5,                  -- يجاوب قبل نهاية الوقت بكذا على الأقل
+    AVG_SAFETY = 1.6,                     -- يخلي متوسط وقت أجوبتك أعلى من حد الأنتي تشيت بكذا مرة
+
+    BLUR_RADIUS = 4,            -- تغبيش الصورة الأصلية قبل المقارنة (يتعدّل لحاله من المعايرة)
+    AUTO_CALIBRATE = true,      -- يحسب درجة تغبيش اللعبة من صورة الكشف
+    PIXEL_SIZE = { 24, 32 },    -- دقة مقارنة البكسلات (Correlation)
+    CORR_SURE = 0.90,           -- تشابه أعلى من كذا = متأكد
+    CORR_MARGIN = 0.06,         -- الفرق بين الأول والثاني عشان يعتبره متأكد
+    SURE_DIST = 15,             -- مسافة أقل من كذا = متأكد
+    ELIM_DIST = 30,             -- مسافة أكبر من كذا = غالباً الصح خيار ما عندي صورته
+    MAX_SKINS = 4,              -- كم سكن يقارن لكل بطاقة لما فيه فرصة سكن
+    MAX_SKINS_RETRY = 8,        -- لما يكون مو متأكد، يجرب لين كذا نسخة لكل خيار
+
+    PREFETCH = true,            -- يحمّل بصمات كل البطاقات بالخلفية
+    TOGGLE_KEY = Enum.KeyCode.RightShift,
+    DEBUG = true,
+
+    FILES = {
+        learned = "GTC_learned.json",
+        assetFp = "GTC_assetfp_v3.json",
+        names = "GTC_names.json",
+        missing = "GTC_missing.json",
+        stats = "GTC_stats.json",
+    },
+}
+
+local function dprint(...) if CONFIG.DEBUG then print("[GTC]", ...) end end
+
+-- ==========================================
+-- ملفات
+-- ==========================================
+local function loadJson(file)
+    if not (isfile and readfile) then return nil end
+    local ok, data = pcall(function()
+        if not isfile(file) then return nil end
+        return HttpService:JSONDecode(readfile(file))
+    end)
+    return ok and type(data) == "table" and data or nil
+end
+
+local function saveJson(file, data)
+    if not writefile then return end
+    pcall(function() writefile(file, HttpService:JSONEncode(data)) end)
+end
+
+print("⏳ جاري تشغيل GTC V15.3...")
+
+-- ==========================================
+-- 1. موديولات اللعبة
+-- ==========================================
+local function safeRequire(mod, timeout)
+    if not mod or not mod:IsA("ModuleScript") then return nil end
+    local result, finished
+    task.spawn(function()
+        local ok, data = pcall(require, mod)
+        if ok then result = data else warn("[GTC] require فشل: " .. mod:GetFullName() .. " | " .. tostring(data)) end
+        finished = true
+    end)
+    local t = os.clock()
+    while not finished and os.clock() - t < (timeout or 3) do task.wait() end
+    return result
+end
+
+local function findPath(root, ...)
+    local cur = root
+    for _, name in ipairs({ ... }) do cur = cur and cur:FindFirstChild(name) end
+    return cur
+end
+
+local feedModule = safeRequire(findPath(ReplicatedStorage, "shared", "react", "views", "GuessTheCard", "feed"))
+local guessFeed = feedModule and feedModule.guessFeed
+if not guessFeed then warn("❌ ما قدرت أقرأ guessFeed") return end
+
+local clientNetwork = safeRequire(findPath(ReplicatedStorage, "shared", "clientNetwork"))
+local netEvent = clientNetwork and clientNetwork.networkEvents and clientNetwork.networkEvents.guessTheCardAction
+
+-- إعدادات اللعبة نفسها (الوقت، السكنات، الأنتي تشيت)
+local gtcCfgModule = safeRequire(findPath(ReplicatedStorage, "shared", "game", "guessTheCard", "config"))
+local GAME = gtcCfgModule and gtcCfgModule.GUESS_CONFIG
+local ANTI = { minAvg = 0.3, maxAnswersPerSecond = nil }
+if type(GAME) == "table" and type(GAME.antiCheat) == "table" then
+    ANTI.minAvg = tonumber(GAME.antiCheat.minimumAverageSeconds) or ANTI.minAvg
+    ANTI.maxAnswersPerSecond = tonumber(GAME.antiCheat.maxAnswersPerSecond)
+    ANTI.reviewAfterRounds = tonumber(GAME.antiCheat.reviewAfterRounds)
+    print(string.format("🛡️ أنتي تشيت: أقل متوسط %.2fs | مراجعة بعد جولة %s",
+        ANTI.minAvg, tostring(ANTI.reviewAfterRounds)))
+else
+    warn("⚠️ ما قدرت أقرأ إعدادات اللعبة، بستخدم أرقام آمنة")
+    ANTI.minAvg = 4 -- احتياط
+end
+
+local remote
+for _, item in ipairs(ReplicatedStorage:GetDescendants()) do
+    if item.Name == "guessTheCardAction" and item:IsA("RemoteEvent") then remote = item break end
+end
+
+-- ==========================================
+-- نسخة وحدة بس + بوابة الأجوبة
+-- أي نسخة قديمة (حتى اللي ما فيها نظام الإيقاف) أجوبتها تنحذف
+-- ==========================================
+local env = (getgenv and getgenv()) or _G
+local myToken = HttpService:GenerateGUID(false)
+env.__GTC_TOKEN = myToken
+env.__GTC_AUTO = true
+
+if netEvent and type(netEvent.fire) == "function" then
+    if not env.__GTC_ORIG_FIRE then env.__GTC_ORIG_FIRE = netEvent.fire end
+    local orig = env.__GTC_ORIG_FIRE
+    local dropped = 0
+    local ok = pcall(function()
+        netEvent.fire = function(self, payload, ...)
+            if type(payload) == "table" and payload.kind == "answer" then
+                if payload.__gtc == env.__GTC_TOKEN then
+                    local clean = table.clone(payload)
+                    clean.__gtc = nil
+                    return orig(self, clean, ...)
+                elseif env.__GTC_AUTO then
+                    -- جواب من نسخة قديمة (أو ضغطة يدوية والـ Auto شغال) → ينحذف
+                    dropped += 1
+                    if dropped <= 3 then print("🧹 حذفت جواب من نسخة قديمة") end
+                    return
+                end
+            end
+            return orig(self, payload, ...)
+        end
+    end)
+    if not ok then warn("⚠️ ما قدرت أركّب بوابة الأجوبة، سوّ Rejoin لو فيه نسخ قديمة") end
+end
+
+local function send(payload)
+    if payload.kind == "answer" then
+        payload = table.clone(payload)
+        payload.__gtc = myToken
+    end
+    if netEvent then
+        local ok, err = pcall(function() netEvent:fire(payload) end)
+        if ok then return true end
+        warn("[GTC] networkEvents فشل: " .. tostring(err))
+    end
+    if remote then
+        local p = table.clone(payload)
+        p.__gtc = nil
+        remote:FireServer(p)
+        return true
+    end
+    warn("❌ ما فيه طريقة أرسل فيها")
+    return false
+end
+
+local function getFeed()
+    local ok, s = pcall(guessFeed)
+    return ok and type(s) == "table" and s or nil
+end
+
+-- ==========================================
+-- 2. الأسماء والصور
+-- ==========================================
+-- clean: حروف وأرقام بس، صغيرة (عشان "Hero of Ten (Big Chill)" تطابق)
+local function clean(s) return (tostring(s):lower():gsub("[^%w]", "")) end
+
+local function prettify(key)
+    return (key:gsub("_", " "):gsub("(%a)(%w*)", function(a, b) return a:upper() .. b end))
+end
+
+local nameToIds = {} -- [clean(name)] = { primaryId, skin, skin, ... }
+
+local function addId(name, id, front)
+    local key = clean(name)
+    local list = nameToIds[key]
+    if not list then list = {} nameToIds[key] = list end
+    for _, x in ipairs(list) do if x == id then return false end end
+    if front then table.insert(list, 1, id) else table.insert(list, id) end
+    return true
+end
+
+do
+    local cardsCfg = safeRequire(findPath(ReplicatedStorage, "configs", "cards")) or {}
+    local count = 0
+
+    -- الطريقة الرسمية: نفس دوال اللعبة
+    --   الأساسية = getCardAsset({card})
+    --   السكنات  = getCardAsset({card, skin}) لكل سكن من getSkinsForCard(card)
+    local cardsMod = safeRequire(findPath(ReplicatedStorage, "shared", "game", "cards"))
+    local skinsMod = safeRequire(findPath(ReplicatedStorage, "shared", "game", "cardSkins"))
+    local getCardAsset = type(cardsMod) == "table" and cardsMod.getCardAsset
+    local getSkinsForCard = type(skinsMod) == "table" and skinsMod.getSkinsForCard
+
+    if getCardAsset and getSkinsForCard then
+        local cards, skinsTotal = 0, 0
+        for key, info in pairs(cardsCfg) do
+            if type(info) == "table" and info.name then
+                local okB, base = pcall(getCardAsset, { card = key })
+                local baseId = okB and type(base) == "string" and base:match("%d+")
+                if baseId then
+                    cards += 1
+                    if addId(info.name, baseId, true) then count += 1 end
+                    local okS, skins = pcall(getSkinsForCard, key)
+                    if okS and type(skins) == "table" then
+                        for _, skin in ipairs(skins) do
+                            if skin ~= "default" then
+                                local okA, a = pcall(getCardAsset, { card = key, skin = skin })
+                                local id = okA and type(a) == "string" and a:match("%d+")
+                                if id and id ~= baseId and addId(info.name, id, false) then
+                                    count += 1
+                                    skinsTotal += 1
+                                end
+                            end
+                        end
+                    end
+                    -- اسم بديل من المفتاح
+                    local alt = prettify(tostring(key))
+                    if clean(alt) ~= clean(info.name) then addId(alt, baseId, true) end
+                end
+            end
+        end
+        print(string.format("✅ القائمة الرسمية: %d بطاقة | %d سكن", cards, skinsTotal))
+    end
+
+    -- احتياط: الطريقة القديمة (لو دوال اللعبة ما اشتغلت)
+    if count < 100 then
+        warn("⚠️ ما قدرت أستخدم دوال اللعبة، برجع للطريقة القديمة")
+        local assets = safeRequire(ReplicatedFirst:FindFirstChild("assets"))
+        local cardImages = type(assets) == "table" and type(assets.images) == "table" and assets.images.card
+        if type(cardImages) == "table" then
+            for _, group in pairs(cardImages) do
+                if type(group) == "table" then
+                    for key, variants in pairs(group) do
+                        local info = cardsCfg[key]
+                        local name = (type(info) == "table" and (info.name or info.Name)) or prettify(tostring(key))
+                        local primary = type(variants) == "table" and type(variants.default) == "table" and variants.default.default
+                        if type(primary) == "string" and primary:match("%d+") then
+                            if addId(name, primary:match("%d+"), true) then count += 1 end
+                        end
+                        local function walk(v)
+                            if type(v) == "string" then
+                                local id = v:match("%d+")
+                                if id and addId(name, id, false) then count += 1 end
+                            elseif type(v) == "table" then
+                                for _, x in pairs(v) do walk(x) end
+                            end
+                        end
+                        walk(variants)
+                    end
+                end
+            end
+        else
+            warn("⚠️ ما قدرت أقرأ صور البطاقات")
+        end
+    end
+
+    -- أسماء تعلمناها من revealAsset
+    local saved = loadJson(CONFIG.FILES.names) or {}
+    for key, id in pairs(saved) do
+        local list = nameToIds[key]
+        if not list then nameToIds[key] = { id } else
+            local has = false
+            for _, x in ipairs(list) do if x == id then has = true end end
+            if not has then table.insert(list, id) end
+        end
+    end
+    print("✅ صور البطاقات: " .. count)
+end
+
+local savedNames = loadJson(CONFIG.FILES.names) or {}
+local missing = loadJson(CONFIG.FILES.missing) or {}
+
+local function noteMissing(name)
+    if not missing[name] then
+        missing[name] = true
+        saveJson(CONFIG.FILES.missing, missing)
+        dprint("❓ ما عندي صورة لـ: " .. name)
+    end
+end
+
+-- ==========================================
+-- 3. معالجة الصور والبصمات
+-- ==========================================
+local W, H = 120, 160 -- حجم صورة اللعبة (يتحدث من الجولة)
+
+-- buffer -> مصفوفة RGB
+local function bufToArr(buf, w, h, bpp)
+    local arr = table.create(w * h * 3)
+    local n = 0
+    for p = 0, w * h - 1 do
+        local i = p * bpp
+        arr[n + 1] = buffer.readu8(buf, i)
+        arr[n + 2] = buffer.readu8(buf, i + 1)
+        arr[n + 3] = buffer.readu8(buf, i + 2)
+        n += 3
+    end
+    return arr
+end
+
+-- تصغير بالمتوسط (Area) من sw×sh إلى tw×th
+local function downsample(buf, sw, sh, bpp, tw, th)
+    local sum = table.create(tw * th * 3, 0)
+    local cnt = table.create(tw * th, 0)
+    for sy = 0, sh - 1 do
+        local ty = math.floor(sy * th / sh)
+        local rowT = ty * tw
+        local rowS = sy * sw
+        for sx = 0, sw - 1 do
+            local t = rowT + math.floor(sx * tw / sw)
+            local i = (rowS + sx) * bpp
+            local k = t * 3
+            sum[k + 1] += buffer.readu8(buf, i)
+            sum[k + 2] += buffer.readu8(buf, i + 1)
+            sum[k + 3] += buffer.readu8(buf, i + 2)
+            cnt[t + 1] += 1
+        end
+        if sy % 64 == 63 then task.wait() end
+    end
+    for t = 0, tw * th - 1 do
+        local c = cnt[t + 1]
+        if c > 0 then
+            local k = t * 3
+            sum[k + 1] /= c
+            sum[k + 2] /= c
+            sum[k + 3] /= c
+        end
+    end
+    return sum
+end
+
+-- تغبيش Box (أفقي ثم عمودي)
+local function boxBlur(arr, w, h, r)
+    if r <= 0 then return arr end
+    local tmp = table.create(w * h * 3, 0)
+    local out = table.create(w * h * 3, 0)
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            local R, G, B, n = 0, 0, 0, 0
+            for dx = -r, r do
+                local xx = math.clamp(x + dx, 0, w - 1)
+                local k = (y * w + xx) * 3
+                R += arr[k + 1] G += arr[k + 2] B += arr[k + 3] n += 1
+            end
+            local k = (y * w + x) * 3
+            tmp[k + 1], tmp[k + 2], tmp[k + 3] = R / n, G / n, B / n
+        end
+    end
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            local R, G, B, n = 0, 0, 0, 0
+            for dy = -r, r do
+                local yy = math.clamp(y + dy, 0, h - 1)
+                local k = (yy * w + x) * 3
+                R += tmp[k + 1] G += tmp[k + 2] B += tmp[k + 3] n += 1
+            end
+            local k = (y * w + x) * 3
+            out[k + 1], out[k + 2], out[k + 3] = R / n, G / n, B / n
+        end
+    end
+    return out
+end
+
+-- متوسط كل مربع في شبكة gx×gy
+local function grid(arr, w, h, gx, gy)
+    local sum = table.create(gx * gy * 3, 0)
+    local cnt = table.create(gx * gy, 0)
+    for y = 0, h - 1 do
+        local cy = math.floor(y * gy / h)
+        for x = 0, w - 1 do
+            local c = cy * gx + math.floor(x * gx / w)
+            local k = (y * w + x) * 3
+            local o = c * 3
+            sum[o + 1] += arr[k + 1]
+            sum[o + 2] += arr[k + 2]
+            sum[o + 3] += arr[k + 3]
+            cnt[c + 1] += 1
+        end
+    end
+    for c = 0, gx * gy - 1 do
+        local n = math.max(cnt[c + 1], 1)
+        local o = c * 3
+        sum[o + 1] /= n
+        sum[o + 2] /= n
+        sum[o + 3] /= n
+    end
+    return sum
+end
+
+local function makeFp(arr, w, h)
+    return { c = grid(arr, w, h, 6, 8), f = grid(arr, w, h, 12, 16) }
+end
+
+-- مصفوفة بكسلات صغيرة للمقارنة الدقيقة
+local PX, PY = CONFIG.PIXEL_SIZE[1], CONFIG.PIXEL_SIZE[2]
+
+local function toHex(arr)
+    local t = table.create(#arr)
+    for i = 1, #arr do t[i] = string.format("%02x", math.clamp(math.floor(arr[i] + 0.5), 0, 255)) end
+    return table.concat(t)
+end
+
+local function fromHex(hex)
+    local n = #hex // 2
+    local arr = table.create(n)
+    for i = 1, n do arr[i] = tonumber(hex:sub(i * 2 - 1, i * 2), 16) end
+    return arr
+end
+
+-- Pearson correlation لكل قناة لون، والمتوسط (1 = نفس الصورة)
+local function corr(a, b)
+    if not a or not b or #a ~= #b then return nil end
+    local total = 0
+    for ch = 1, 3 do
+        local sa, sb, n = 0, 0, 0
+        for i = ch, #a, 3 do sa += a[i] sb += b[i] n += 1 end
+        local ma, mb = sa / n, sb / n
+        local num, da, db = 0, 0, 0
+        for i = ch, #a, 3 do
+            local x, y = a[i] - ma, b[i] - mb
+            num += x * y
+            da += x * x
+            db += y * y
+        end
+        if da < 1e-6 or db < 1e-6 then total += 0 else total += num / math.sqrt(da * db) end
+    end
+    return total / 3
+end
+
+local function rms(a, b)
+    if not a or not b or #a ~= #b then return nil end
+    local d = 0
+    for i = 1, #a do
+        local x = a[i] - b[i]
+        d += x * x
+    end
+    return math.sqrt(d / #a)
+end
+
+-- البصمات القديمة (V13) مصفوفة أرقام = خشنة بس
+local function normFp(fp)
+    if type(fp) ~= "table" then return nil end
+    if type(fp[1]) == "number" then return { c = fp } end
+    return fp
+end
+
+local function distance(a, b)
+    a, b = normFp(a), normFp(b)
+    if not a or not b then return math.huge end
+    local dc = rms(a.c, b.c)
+    if not dc then return math.huge end
+    local df = rms(a.f, b.f)
+    if df then return (dc + df) / 2 end
+    return dc
+end
+
+-- ==========================================
+-- 4. بصمات الصور الأصلية (EditableImage + كاش)
+-- ==========================================
+local statsEarly = loadJson(CONFIG.FILES.stats) or {}
+if type(statsEarly.blurRadius) == "number" then CONFIG.BLUR_RADIUS = statsEarly.blurRadius end
+
+local assetFp = loadJson(CONFIG.FILES.assetFp) or {}
+if assetFp.__radius ~= CONFIG.BLUR_RADIUS then
+    if next(assetFp) ~= nil then print("♻️ درجة التغبيش تغيّرت، بعيد حساب البصمات") end
+    assetFp = { __radius = CONFIG.BLUR_RADIUS }
+end
+local pixelCache = {} -- [id] = مصفوفة (مفكوكة من hex)
+local failed = {}
+local editableWorks = true
+local failStreak = 0
+local dirty = 0
+
+local function saveAssetFp(force)
+    dirty += 1
+    if force or dirty >= 10 then
+        dirty = 0
+        saveJson(CONFIG.FILES.assetFp, assetFp)
+    end
+end
+
+local function getPixels(id)
+    local e = assetFp[id]
+    if type(e) ~= "table" or not e.p then return nil end
+    local arr = pixelCache[id]
+    if not arr then arr = fromHex(e.p) pixelCache[id] = arr end
+    return arr
+end
+
+local inflight = {}
+local function getAssetFp(id)
+    if assetFp[id] then return assetFp[id] end
+    if failed[id] or not editableWorks then return nil end
+    if inflight[id] then
+        while inflight[id] do task.wait() end
+        return assetFp[id]
+    end
+    inflight[id] = true
+    local ok, result = pcall(function()
+        local img
+        pcall(function() img = AssetService:CreateEditableImageAsync(Content.fromUri("rbxassetid://" .. id)) end)
+        if not img then img = AssetService:CreateEditableImageAsync("rbxassetid://" .. id) end
+        local size = img.Size
+        local buf = img:ReadPixelsBuffer(Vector2.zero, size)
+        img:Destroy()
+        local arr = downsample(buf, size.X, size.Y, 4, W, H)
+        arr = boxBlur(arr, W, H, CONFIG.BLUR_RADIUS)
+        local fp = makeFp(arr, W, H)
+        fp.p = toHex(grid(arr, W, H, PX, PY))
+        return fp
+    end)
+    inflight[id] = nil
+    if ok and result then
+        failStreak = 0
+        assetFp[id] = result
+        saveAssetFp()
+        return result
+    end
+    failed[id] = true
+    failStreak += 1
+    if failStreak == 1 then warn("⚠️ فشل تحميل صورة " .. id .. ": " .. tostring(result)) end
+    if failStreak >= 6 and editableWorks then
+        warn("⚠️ EditableImage ما يشتغل، بعتمد على التعلم بس")
+        editableWorks = false
+    end
+    return nil
+end
+
+-- ==========================================
+-- 5. التعلم
+-- ==========================================
+local learned = loadJson(CONFIG.FILES.learned) or {}
+do
+    local n = 0
+    for _ in pairs(learned) do n += 1 end
+    print("📚 بطاقات متعلمة: " .. n)
+end
+
+local function learn(name, fp)
+    fp = { c = fp.c, f = fp.f } -- بدون px عشان الملف ما يكبر
+    local key = clean(name)
+    local list = learned[key] or {}
+    learned[key] = list
+    for _, old in ipairs(list) do
+        if distance(old, fp) < 2 then return end
+    end
+    table.insert(list, fp)
+    while #list > 3 do table.remove(list, 1) end
+    saveJson(CONFIG.FILES.learned, learned)
+end
+
+-- ==========================================
+-- 6. اختيار الجواب
+-- ==========================================
+local function chooseOption(options, fp, budget, skinChance)
+    skinChance = skinChance or 0
+    -- أ) التعلم
+    local lIdx, lDist = nil, math.huge
+    for i, name in ipairs(options) do
+        for _, lfp in ipairs(learned[clean(name)] or {}) do
+            local d = distance(lfp, fp)
+            if d < lDist then lIdx, lDist = i, d end
+        end
+    end
+    if lIdx and lDist < CONFIG.SURE_DIST then return lIdx, lDist, "learned", true end
+
+    -- ب) الصور الأصلية (بالتوازي): بصمة المربعات + تشابه البكسلات
+    local best, bestCorr, hasData, tried = {}, {}, {}, {}
+    local pending = 0
+    local t = os.clock()
+
+    local function pass(fromJ, toJ)
+        for i, name in ipairs(options) do
+            local ids = nameToIds[clean(name)]
+            if not ids or #ids == 0 then
+                noteMissing(name)
+            else
+                for j = fromJ, math.min(#ids, toJ) do
+                    local id = ids[j]
+                    if not tried[id] then
+                        tried[id] = true
+                        pending += 1
+                        task.spawn(function()
+                            local afp = getAssetFp(id)
+                            if afp then
+                                hasData[i] = true
+                                local d = distance(afp, fp)
+                                if d < (best[i] or math.huge) then best[i] = d end
+                                local c = corr(getPixels(id), fp.px)
+                                if c and c > (bestCorr[i] or -2) then bestCorr[i] = c end
+                            end
+                            pending -= 1
+                        end)
+                    end
+                end
+            end
+        end
+        while pending > 0 and os.clock() - t < budget do task.wait() end
+    end
+
+    local function evaluate()
+        local aIdx, aDist = nil, math.huge
+        local cIdx, c1, c2 = nil, -2, -2
+        for i = 1, #options do
+            if best[i] and best[i] < aDist then aIdx, aDist = i, best[i] end
+            local c = bestCorr[i]
+            if c then
+                if c > c1 then c2 = c1 cIdx, c1 = i, c
+                elseif c > c2 then c2 = c end
+            end
+        end
+        local corrSure = cIdx ~= nil and c1 >= CONFIG.CORR_SURE and (c1 - c2) >= CONFIG.CORR_MARGIN
+        return aIdx, aDist, cIdx, c1, c2, corrSure
+    end
+
+    -- اللعبة: لو random < skinChance والبطاقة لها سكنات → سكن، غير كذا → الأساسية
+    if skinChance >= 0.99 then
+        pass(2, CONFIG.MAX_SKINS_RETRY) -- غالباً سكن
+        pass(1, 1)                      -- الأساسية (لو البطاقة ما لها سكنات)
+    elseif skinChance > 0 then
+        pass(1, CONFIG.MAX_SKINS)
+    else
+        pass(1, 1)
+    end
+    local aIdx, aDist, cIdx, c1, c2, corrSure = evaluate()
+
+    -- مو متأكد؟ جرّب كل نسخ/سكنات الخيارات
+    if not corrSure and aDist > CONFIG.SURE_DIST and os.clock() - t < budget then
+        local before = aDist
+        pass(2, CONFIG.MAX_SKINS_RETRY)
+        aIdx, aDist, cIdx, c1, c2, corrSure = evaluate()
+        if aDist < before - 5 then dprint(string.format("🎭 لقيته بنسخة ثانية (%.1f ← %.1f)", aDist, before)) end
+    end
+
+    if cIdx then
+        dprint(string.format("📊 تشابه البكسلات: أول %.3f | ثاني %.3f", c1, c2))
+    end
+
+    -- ج) القرار
+    if corrSure then
+        return cIdx, (1 - c1) * 100, string.format("pixel %.0f%%", c1 * 100), true
+    end
+    if aIdx and aDist < CONFIG.SURE_DIST and (not cIdx or cIdx == aIdx) then
+        return aIdx, aDist, "asset", true
+    end
+
+    -- د) استبعاد: كل اللي عندي بعيد، والصح غالباً خيار ما عندي صورته
+    local nothingMatches = (cIdx ~= nil and c1 < 0.6 and lDist > CONFIG.SURE_DIST)
+        or (aDist > CONFIG.ELIM_DIST and lDist > CONFIG.ELIM_DIST and c1 < 0.6)
+    if nothingMatches then
+        local unknown = {}
+        for i, name in ipairs(options) do
+            if not hasData[i] and not (learned[clean(name)] and #learned[clean(name)] > 0) then
+                table.insert(unknown, i)
+            end
+        end
+        if #unknown > 0 then
+            dprint("🧩 استبعاد")
+            return unknown[math.random(1, #unknown)], math.min(aDist, lDist), "elimination", false
+        end
+    end
+
+    -- هـ) دمج الطريقتين: مسافة المربعات + (1 - التشابه)
+    local bIdx, bScore = nil, math.huge
+    for i = 1, #options do
+        local g = best[i] or (i == lIdx and lDist) or 100
+        local c = bestCorr[i] or 0
+        local score = g + (1 - c) * 60
+        if i == lIdx then score = math.min(score, lDist + 10) end
+        if score < bScore then bIdx, bScore = i, score end
+    end
+    if bIdx and bScore < 200 then
+        return bIdx, bScore / 2, "combined", false
+    end
+    if lIdx then return lIdx, lDist, "learned", false end
+    return math.random(1, #options), math.huge, "guess", false
+end
+
+-- ==========================================
+-- 7. إحصائيات
+-- ==========================================
+local stats = loadJson(CONFIG.FILES.stats) or {}
+stats.totalRounds = stats.totalRounds or 0
+stats.totalCorrect = stats.totalCorrect or 0
+stats.totalRuns = stats.totalRuns or 0
+stats.totalPoints = stats.totalPoints or 0
+stats.bestRun = stats.bestRun or 0
+
+local session = { rounds = 0, correct = 0, points = 0, runs = 0, start = os.clock() }
+
+local function saveStats() saveJson(CONFIG.FILES.stats, stats) end
+
+-- ==========================================
+-- 8. الواجهة (ستايل Guess the Card)
+-- ==========================================
+for _, n in ipairs({ "GTC_UI", "GTC_Overlay" }) do
+    local o = playerGui:FindFirstChild(n)
+    if o then o:Destroy() end
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "GTC_UI"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 50
+gui.Parent = playerGui
+
+local C = {
+    bg = Color3.fromRGB(38, 24, 8),
+    panel = Color3.fromRGB(62, 40, 14),
+    orange = Color3.fromRGB(255, 152, 0),
+    off = Color3.fromRGB(196, 196, 200),
+    text = Color3.fromRGB(255, 255, 255),
+    dim = Color3.fromRGB(230, 205, 165),
+    green = Color3.fromRGB(46, 204, 113),
+    red = Color3.fromRGB(230, 70, 60),
+    warn = Color3.fromRGB(255, 170, 0),
+}
+local FONT = Enum.Font.FredokaOne
+
+local function corner(p, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 8)
+    c.Parent = p
+end
+
+local function outline(t)
+    t.TextStrokeColor3 = Color3.fromRGB(40, 25, 5)
+    t.TextStrokeTransparency = 0.15
+end
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(270, 36)
+main.Position = UDim2.new(0, 20, 0.5, -200)
+main.BackgroundColor3 = C.bg
+main.BorderSizePixel = 0
+main.AutomaticSize = Enum.AutomaticSize.Y
+main.Parent = gui
+corner(main, 16)
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = C.orange
+mainStroke.Thickness = 3
+mainStroke.Parent = main
+
+local top = Instance.new("Frame")
+top.Size = UDim2.new(1, 0, 0, 38)
+top.BackgroundTransparency = 1
+top.Parent = main
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -84, 1, 0)
+title.Position = UDim2.fromOffset(14, 0)
+title.BackgroundTransparency = 1
+title.Text = "Guess the Card"
+title.Font = FONT
+title.TextSize = 18
+title.TextColor3 = C.orange
+title.TextXAlignment = Enum.TextXAlignment.Left
+outline(title)
+title.Parent = top
+
+local function topBtn(txt, x)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(28, 24)
+    b.Position = UDim2.new(1, x, 0, 7)
+    b.BackgroundColor3 = C.off
+    b.Text = txt
+    b.Font = FONT
+    b.TextSize = 16
+    b.TextColor3 = C.text
+    outline(b)
+    b.Parent = top
+    corner(b, 12)
+    return b
+end
+
+local minBtn = topBtn("–", -68)
+local closeBtn = topBtn("×", -36)
+
+local body = Instance.new("Frame")
+body.Size = UDim2.new(1, -24, 0, 0)
+body.Position = UDim2.fromOffset(12, 40)
+body.AutomaticSize = Enum.AutomaticSize.Y
+body.BackgroundTransparency = 1
+body.Parent = main
+
+local pad = Instance.new("UIPadding")
+pad.PaddingBottom = UDim.new(0, 12)
+pad.Parent = body
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 5)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = body
+
+local order = 0
+local function nextOrder() order += 1 return order end
+
+local function infoRow(label)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 24)
+    f.BackgroundColor3 = C.panel
+    f.LayoutOrder = nextOrder()
+    f.Parent = body
+    corner(f, 12)
+    local fs = Instance.new("UIStroke")
+    fs.Color = C.orange
+    fs.Transparency = 0.5
+    fs.Thickness = 1.5
+    fs.Parent = f
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(0.42, 0, 1, 0)
+    l.Position = UDim2.fromOffset(10, 0)
+    l.BackgroundTransparency = 1
+    l.Text = label
+    l.Font = FONT
+    l.TextSize = 13
+    l.TextColor3 = C.dim
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    outline(l)
+    l.Parent = f
+    local v = Instance.new("TextLabel")
+    v.Size = UDim2.new(0.58, -14, 1, 0)
+    v.Position = UDim2.new(0.42, 0, 0, 0)
+    v.BackgroundTransparency = 1
+    v.Text = "-"
+    v.Font = FONT
+    v.TextSize = 13
+    v.TextColor3 = C.text
+    v.TextXAlignment = Enum.TextXAlignment.Right
+    v.TextTruncate = Enum.TextTruncate.AtEnd
+    outline(v)
+    v.Parent = f
+    return v
+end
+
+local vPhase = infoRow("Phase")
+local vPick = infoRow("Pick")
+local vMethod = infoRow("Method")
+local vAcc = infoRow("Correct")
+local vPph = infoRow("Points / h")
+local vBest = infoRow("Best run")
+local vDb = infoRow("Card prints")
+local vStage = infoRow("Stage")
+
+local function button(txt, on)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 0, 28)
+    b.BackgroundColor3 = on and C.orange or C.off
+    b.Text = txt
+    b.Font = FONT
+    b.TextSize = 15
+    b.TextColor3 = C.text
+    outline(b)
+    b.LayoutOrder = nextOrder()
+    b.Parent = body
+    corner(b, 14)
+    local grad = Instance.new("UIGradient")
+    grad.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(215, 215, 215))
+    grad.Rotation = 90
+    grad.Parent = b
+    return b
+end
+
+local function toggle(label, key)
+    local b = button(label .. ": " .. (CONFIG[key] and "ON" or "OFF"), CONFIG[key])
+    b.MouseButton1Click:Connect(function()
+        CONFIG[key] = not CONFIG[key]
+        b.Text = label .. ": " .. (CONFIG[key] and "ON" or "OFF")
+        b.BackgroundColor3 = CONFIG[key] and C.orange or C.off
+    end)
+    return b
+end
+
+local autoBtn = toggle("Auto Solve", "AUTO_SOLVE")
+toggle("Auto Replay", "AUTO_REPLAY")
+toggle("Auto Open", "AUTO_OPEN")
+toggle("Unblur", "UNBLUR")
+toggle("Highlight", "HIGHLIGHT")
+local giveUpBtn = button("Give Up", false)
+
+giveUpBtn.MouseButton1Click:Connect(function() send({ kind = "giveUp" }) end)
+
+local function setAutoSolve(v)
+    CONFIG.AUTO_SOLVE = v
+    autoBtn.Text = "Auto Solve: " .. (v and "ON" or "OFF")
+    autoBtn.BackgroundColor3 = v and C.orange or C.off
+end
+
+minBtn.MouseButton1Click:Connect(function()
+    body.Visible = not body.Visible
+end)
+
+local connections = {}
+local alive = true
+
+-- نسخة وحدة بس: أي نسخة قديمة (فيها النظام هذا) توقف لحالها
+local function isAlive()
+    if alive and env.__GTC_TOKEN ~= myToken then
+        alive = false
+        for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+        print("🛑 نسخة قديمة من GTC وقفت")
+    end
+    return alive
+end
+
+-- سحب
+local dragging, dragStart, startPos
+top.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local d = input.Position - dragStart
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+end))
+
+-- RightShift يخفي/يظهر
+table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
+    if not processed and input.KeyCode == CONFIG.TOGGLE_KEY then
+        main.Visible = not main.Visible
+    end
+end))
+
+local function countDb()
+    local n = 0
+    for _ in pairs(assetFp) do n += 1 end
+    return n
+end
+
+local currentLives = nil
+local function refreshUI(phase)
+    vPhase.Text = (phase or "-") .. (currentLives and ("  ♥" .. currentLives) or "")
+    vPhase.TextColor3 = phase == "round" and C.green or C.dim
+    local acc = session.rounds > 0 and math.floor(session.correct / session.rounds * 100) or 0
+    vAcc.Text = string.format("%d / %d  (%d%%)", session.correct, session.rounds, acc)
+    local hours = (os.clock() - session.start) / 3600
+    vPph.Text = hours > 0.01 and tostring(math.floor(session.points / hours)) or "-"
+    vBest.Text = tostring(stats.bestRun)
+    vDb.Text = tostring(countDb())
+end
+
+-- ==========================================
+-- 9. الكشف والتعليم (طبقة فوق كل شي)
+-- ==========================================
+local overlay = Instance.new("ScreenGui")
+overlay.Name = "GTC_Overlay"
+overlay.ResetOnSpawn = false
+overlay.IgnoreGuiInset = true
+pcall(function() overlay.ScreenInsets = Enum.ScreenInsets.None end)
+overlay.DisplayOrder = 9999
+overlay.Parent = playerGui
+
+local followers = {}
+
+local function clearHints()
+    for _, f in ipairs(followers) do pcall(function() f.ui:Destroy() end) end
+    followers = {}
+end
+
+local function follow(ui, target)
+    ui.Parent = overlay
+    table.insert(followers, { ui = ui, target = target })
+end
+
+table.insert(connections, RunService.RenderStepped:Connect(function()
+    local base = overlay.AbsolutePosition
+    for i = #followers, 1, -1 do
+        local f = followers[i]
+        if not f.ui.Parent or not f.target.Parent then
+            pcall(function() f.ui:Destroy() end)
+            table.remove(followers, i)
+        else
+            local sg = f.target:FindFirstAncestorWhichIsA("LayerCollector")
+            local off = sg and sg.AbsolutePosition or Vector2.zero
+            local pos = f.target.AbsolutePosition + off - base
+            f.ui.Position = UDim2.fromOffset(pos.X, pos.Y)
+            f.ui.Size = UDim2.fromOffset(f.target.AbsoluteSize.X, f.target.AbsoluteSize.Y)
+            f.ui.Visible = f.target.Visible
+        end
+    end
+end))
+
+local function getGtcRoot()
+    local react = playerGui:FindFirstChild("react")
+    return react and react:FindFirstChild("guessTheCard")
+end
+
+local function isOptionNode(node, nonce)
+    local n = node.Name
+    return n:sub(1, #nonce + 1) == nonce .. ":" and not n:find("rbxassetid", 1, true)
+end
+
+local function findCardImage(root, nonce)
+    local best, bestArea = nil, 0
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("ImageLabel") and d.Visible and d.AbsoluteSize.X > 60 then
+            local p, inOption = d.Parent, false
+            while p and p ~= root do
+                if isOptionNode(p, nonce) then inOption = true break end
+                p = p.Parent
+            end
+            local area = d.AbsoluteSize.X * d.AbsoluteSize.Y
+            if not inOption and area > bestArea then best, bestArea = d, area end
+        end
+    end
+    return best
+end
+
+local function findOptionTarget(root, nonce, name)
+    local holder = root:FindFirstChild(nonce .. ":" .. name, true)
+    if not holder then return nil end
+    local target, bestA = nil, 0
+    if holder:IsA("GuiObject") then target, bestA = holder, holder.AbsoluteSize.X * holder.AbsoluteSize.Y end
+    for _, d in ipairs(holder:GetDescendants()) do
+        if d:IsA("GuiObject") and d.Visible then
+            local a = d.AbsoluteSize.X * d.AbsoluteSize.Y
+            if a > bestA then target, bestA = d, a end
+        end
+    end
+    return target
+end
+
+local function showHints(nonce, name, sure)
+    clearHints()
+    local root = getGtcRoot()
+    if not root then return end
+    local color = sure and C.green or C.warn
+
+    if CONFIG.UNBLUR then
+        local id = (nameToIds[clean(name)] or {})[1]
+        local card = findCardImage(root, nonce)
+        if id and card then
+            local img = Instance.new("ImageLabel")
+            img.BackgroundTransparency = 1
+            img.Image = "rbxassetid://" .. id
+            img.ScaleType = Enum.ScaleType.Crop
+            corner(img, 12)
+            follow(img, card)
+            local tag = Instance.new("TextLabel")
+            tag.Size = UDim2.new(1, 0, 0, 26)
+            tag.Position = UDim2.new(0, 0, 1, -26)
+            tag.BackgroundColor3 = Color3.new(0, 0, 0)
+            tag.BackgroundTransparency = 0.35
+            tag.Text = name .. (sure and "" or "  (?)")
+            tag.Font = FONT
+            tag.TextScaled = true
+            tag.TextColor3 = color
+            tag.Parent = img
+        end
+    end
+
+    if CONFIG.HIGHLIGHT then
+        local target = findOptionTarget(root, nonce, name)
+        if target then
+            local box = Instance.new("Frame")
+            box.BackgroundTransparency = 1
+            corner(box, 40)
+            local st = Instance.new("UIStroke")
+            st.Color = color
+            st.Thickness = 5
+            st.Parent = box
+            follow(box, target)
+            local check = Instance.new("TextLabel")
+            check.Size = UDim2.fromOffset(32, 32)
+            check.AnchorPoint = Vector2.new(1, 0.5)
+            check.Position = UDim2.new(1, -14, 0.5, 0)
+            check.BackgroundColor3 = color
+            check.Text = "✓"
+            check.Font = FONT
+            check.TextSize = 22
+            check.TextColor3 = Color3.new(1, 1, 1)
+            check.Parent = box
+            corner(check, 16)
+        end
+    end
+end
+
+-- ==========================================
+-- 10. أزرار ونافذة اللعبة
+-- ==========================================
+local function pressBtn(btn)
+    local ok = pcall(function()
+        if firesignal then
+            firesignal(btn.MouseButton1Click)
+            firesignal(btn.Activated)
+        elseif getconnections then
+            for _, c in ipairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
+            for _, c in ipairs(getconnections(btn.Activated)) do c:Fire() end
+        else
+            error("no firesignal")
+        end
+    end)
+    return ok
+end
+
+local function btnText(b)
+    if b:IsA("TextButton") and b.Text ~= "" then return b.Text end
+    local t = b:FindFirstChildWhichIsA("TextLabel", true)
+    return t and t.Text or ""
+end
+
+local lastReplay = 0
+local function tryReplay()
+    if os.clock() - lastReplay < 3 then return false end
+    local root = getGtcRoot()
+    if not root then return false end
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("GuiButton") and d.Visible and d.AbsoluteSize.X > 0 then
+            local t = btnText(d):lower()
+            -- Play again بس، أبداً ما يضغط Continue (روبوكس)
+            if t == "play again" then
+                lastReplay = os.clock()
+                dprint("🔁 Play again")
+                pressBtn(d)
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local lastOpen = 0
+local warnedNoPrompt = false
+local function tryOpenWindow()
+    if not CONFIG.AUTO_OPEN or getGtcRoot() then return end
+    if os.clock() - lastOpen < 6 then return end
+    lastOpen = os.clock()
+    if not fireproximityprompt then
+        if not warnedNoPrompt then warnedNoPrompt = true warn("⚠️ الـ executor ما يدعم fireproximityprompt") end
+        return
+    end
+    for _, p in ipairs(workspace:GetDescendants()) do
+        if p:IsA("ProximityPrompt") and p.Enabled then
+            local txt = (p.ObjectText .. " " .. p.ActionText .. " " .. p:GetFullName()):lower()
+            if txt:find("guess") then
+                dprint("🚪 أفتح نافذة اللعبة")
+                pcall(fireproximityprompt, p)
+                return
+            end
+        end
+    end
+    if not warnedNoPrompt then
+        warnedNoPrompt = true
+        warn("⚠️ ما لقيت ProximityPrompt حق Guess the Card")
+    end
+end
+
+-- ==========================================
+-- 11. الجولة
+-- ==========================================
+local answered = {}
+local runStats = { sum = 0, n = 0 }
+local currentRunId = nil
+local pending = nil      -- آخر جولة جاوبناها (للتعلم)
+local lastFeedback = nil
+local lastResult = nil
+
+local function handleRound(round)
+    local nonce = round.nonce
+    if answered[nonce] then return end
+    answered[nonce] = true
+
+    local buf, w, h, options = round.pixels, round.width, round.height, round.options
+    if typeof(buf) ~= "buffer" or type(options) ~= "table" or #options == 0 then
+        warn("[GTC] بيانات الجولة ناقصة")
+        return
+    end
+    local bpp = buffer.len(buf) / (w * h)
+    if bpp ~= 3 and bpp ~= 4 then
+        warn("[GTC] صيغة بكسلات غريبة: " .. bpp)
+        return
+    end
+    if w ~= W or h ~= H then
+        W, H = w, h
+        dprint("📐 حجم الصورة تغيّر " .. w .. "x" .. h .. " — امسح " .. CONFIG.FILES.assetFp .. " إذا قلّت الدقة")
+    end
+
+    local t0 = os.clock()
+    local budget = 4
+    if type(round.deadline) == "number" then
+        budget = math.clamp(round.deadline - workspace:GetServerTimeNow() - CONFIG.SAFETY_MARGIN - 0.5, 0.5, 6)
+    end
+
+    local arrR = bufToArr(buf, w, h, bpp)
+    local fp = makeFp(arrR, w, h)
+    fp.px = grid(arrR, w, h, PX, PY)
+    local skinChance = tonumber(round.skinChance) or 0
+    local idx, dist, method, sure = chooseOption(options, fp, budget, skinChance)
+    vStage.Text = string.format("R%s • %.1fs • skin %d%%", tostring(round.round), tonumber(round.timer) or 0, math.floor(skinChance * 100))
+
+    dprint(string.format("🔎 جولة %s | [%d] %s | %s | مسافة %.1f | %.2fs",
+        tostring(round.round), idx - 1, options[idx], method, dist, os.clock() - t0))
+
+    vPick.Text = options[idx]
+    vPick.TextColor3 = sure and C.green or C.warn
+    vMethod.Text = method .. ((dist < math.huge and not method:find("pixel")) and string.format(" (%.0f)", dist) or "")
+    pending = { nonce = nonce, fp = fp, arr = arrR, w = w, h = h, picked = options[idx], sent = idx - 1 }
+    pcall(showHints, nonce, options[idx], sure)
+
+    if not CONFIG.AUTO_SOLVE then return end
+
+    -- وقت ذكي + عشوائي
+    local lo, hi = CONFIG.UNSURE_MIN, CONFIG.UNSURE_MAX
+    if sure then lo, hi = CONFIG.SURE_MIN, CONFIG.SURE_MAX end
+    local delay = lo + math.random() * (hi - lo)
+
+    -- السيرفر يعلّم الجولة لو متوسط وقت أجوبتك أقل من minAvg
+    if tonumber(round.round) == 1 or runStats.runId ~= currentRunId then
+        runStats.sum, runStats.n, runStats.runId = 0, 0, currentRunId
+    end
+    local target = ANTI.minAvg * CONFIG.AVG_SAFETY
+    local need = target * (runStats.n + 1) - runStats.sum
+    if delay < need then
+        dprint(string.format("🛡️ أطوّل الوقت عشان المتوسط (%.1f ← %.1f)", delay, need))
+        delay = need
+    end
+
+    if type(round.deadline) == "number" then
+        local left = round.deadline - workspace:GetServerTimeNow() - CONFIG.SAFETY_MARGIN
+        delay = math.max(0, math.min(delay, (os.clock() - t0) + left))
+    end
+    dprint(string.format("⏱️ بجاوب بعد %.1f ثانية", delay))
+    local spent = os.clock() - t0
+    if delay > spent then task.wait(delay - spent) end
+    -- الوقت اللي يحسبه السيرفر تقريباً = من بداية الجولة
+    local elapsed = (tonumber(round.timer) or 10) - math.max(0, (round.deadline or 0) - workspace:GetServerTimeNow())
+    runStats.sum += math.max(elapsed, os.clock() - t0)
+    runStats.n += 1
+
+    local feed = getFeed()
+    if not CONFIG.AUTO_SOLVE or not feed or feed.phase ~= "round" or not feed.round or feed.round.nonce ~= nonce then
+        dprint("⏭️ الجولة تغيّرت أو انطفى Auto Solve")
+        return
+    end
+
+    if not isAlive() then return end
+    local done = false
+    if CONFIG.ANSWER_MODE == "click" then
+        local root = getGtcRoot()
+        local holder = root and root:FindFirstChild(nonce .. ":" .. options[idx], true)
+        local b = holder and (holder:IsA("GuiButton") and holder or holder:FindFirstChildWhichIsA("GuiButton", true))
+        if b then done = pressBtn(b) end
+    end
+    if not done then send({ kind = "answer", nonce = nonce, option = idx - 1 }) end
+end
+
+-- معايرة التغبيش: نقارن صورة الكشف الواضحة بعد تغبيشها مع صورة الجولة
+local calibSamples = {}
+local calibrating = false
+local startPrefetchRef -- يتعبى بعدين
+
+local function calibrate(clearArr, roundArr, w, h)
+    if calibrating or not CONFIG.AUTO_CALIBRATE then return end
+    calibrating = true
+    local same = rms(clearArr, roundArr)
+    if same and same < 3 then
+        dprint("ℹ️ صورة الكشف نفس المغبشة، المعايرة مو ممكنة")
+        CONFIG.AUTO_CALIBRATE = false
+        calibrating = false
+        return
+    end
+    local bestR, bestD = CONFIG.BLUR_RADIUS, math.huge
+    for r = 0, 12 do
+        local d = rms(boxBlur(clearArr, w, h, r), roundArr)
+        if d and d < bestD then bestR, bestD = r, d end
+        task.wait()
+    end
+    table.insert(calibSamples, bestR)
+    dprint(string.format("🎯 معايرة: أفضل تغبيش %d (فرق %.1f)", bestR, bestD))
+    if #calibSamples >= 3 then
+        table.sort(calibSamples)
+        local r = calibSamples[math.ceil(#calibSamples / 2)]
+        CONFIG.AUTO_CALIBRATE = false
+        if r ~= CONFIG.BLUR_RADIUS then
+            print(string.format("♻️ درجة تغبيش اللعبة = %d (كانت %d)، بعيد حساب البصمات", r, CONFIG.BLUR_RADIUS))
+            CONFIG.BLUR_RADIUS = r
+            stats.blurRadius = r
+            saveStats()
+            assetFp = { __radius = r }
+            pixelCache = {}
+            failed = {}
+            saveAssetFp(true)
+            if startPrefetchRef then startPrefetchRef() end
+        else
+            stats.blurRadius = r
+            saveStats()
+            print("✅ درجة التغبيش مضبوطة: " .. r)
+        end
+    end
+    calibrating = false
+end
+
+local function handleFeedback(feed)
+    local fb = feed.feedback
+    if type(fb) ~= "table" or not pending or lastFeedback == pending.nonce then return end
+    lastFeedback = pending.nonce
+    clearHints()
+
+    session.rounds += 1
+    stats.totalRounds += 1
+    if fb.correct then
+        session.correct += 1
+        stats.totalCorrect += 1
+    end
+
+    if fb.name then
+        learn(fb.name, pending.fp)
+
+        -- اربط الاسم بالصورة الحقيقية
+        local rid = type(feed.revealAsset) == "string" and feed.revealAsset:match("%d+")
+        if rid then
+            local key = clean(fb.name)
+            if addId(fb.name, rid, true) or savedNames[key] ~= rid then
+                if savedNames[key] ~= rid then
+                    savedNames[key] = rid
+                    saveJson(CONFIG.FILES.names, savedNames)
+                    if missing[fb.name] then
+                        missing[fb.name] = nil
+                        saveJson(CONFIG.FILES.missing, missing)
+                        dprint("🔗 ربطت " .. fb.name .. " بصورتها")
+                    end
+                end
+            end
+        end
+
+        -- صورة الكشف الواضحة: تعبي البصمة لو الصورة ما تحمّلت، وتعاير التغبيش
+        local img = feed.image
+        if type(img) == "table" and typeof(img.pixels) == "buffer" and img.width and img.height then
+            local iw, ih = img.width, img.height
+            local ibpp = buffer.len(img.pixels) / (iw * ih)
+            if (ibpp == 3 or ibpp == 4) and iw == pending.w and ih == pending.h then
+                local clearArr = bufToArr(img.pixels, iw, ih, ibpp)
+                local roundArr = pending.arr
+                if rid and not assetFp[rid] then
+                    local blurred = boxBlur(clearArr, iw, ih, CONFIG.BLUR_RADIUS)
+                    local fp = makeFp(blurred, iw, ih)
+                    fp.p = toHex(grid(blurred, iw, ih, PX, PY))
+                    assetFp[rid] = fp
+                    failed[rid] = nil
+                    saveAssetFp()
+                    dprint("🧷 حفظت بصمة " .. fb.name .. " من صورة الكشف")
+                end
+                if CONFIG.AUTO_CALIBRATE and roundArr then
+                    task.spawn(calibrate, clearArr, roundArr, iw, ih)
+                end
+            end
+        end
+
+        if fb.correct then
+            dprint("✅ صح: " .. fb.name)
+        else
+            warn(string.format("[GTC] ❌ غلط: اخترت %s (أرسلت %s) والصح %s (correctOption=%s)",
+                tostring(pending.picked), tostring(pending.sent), tostring(fb.name), tostring(fb.correctOption)))
+        end
+    end
+    saveStats()
+    pending = nil
+end
+
+local function handleResults(feed)
+    local r = feed.result
+    if type(r) ~= "table" or not r.id or lastResult == r.id then return end
+    lastResult = r.id
+
+    local pts = tonumber(r.points) or 0
+    session.runs += 1
+    session.points += pts
+    stats.totalRuns += 1
+    stats.totalPoints += pts
+    if pts > stats.bestRun then stats.bestRun = pts end
+    saveStats()
+    print(string.format("🏁 خلصت الجولة: %d نقطة | %s جولة | متوسط %.2fs", pts, tostring(r.rounds), tonumber(r.averageSeconds) or 0))
+
+    if r.flagged then
+        warn("🚩 السيرفر علّم الجولة (flagged)!")
+        title.Text = "⚠ FLAGGED"
+        title.TextColor3 = C.red
+        mainStroke.Color = C.red
+        if CONFIG.STOP_ON_FLAG then
+            setAutoSolve(false)
+            CONFIG.AUTO_REPLAY = false
+            warn("⛔ وقفت Auto Solve و Auto Replay. زيد وقت الجواب قبل ما تكمل")
+        end
+    end
+end
+
+-- ==========================================
+-- 12. اللوب الرئيسي
+-- ==========================================
+local busy = false
+task.spawn(function()
+    while isAlive() and task.wait(0.1) do
+        local feed = getFeed()
+        local phase = feed and feed.phase
+        currentLives = feed and tonumber(feed.lives)
+        if feed and feed.runId then currentRunId = feed.runId end
+        env.__GTC_AUTO = CONFIG.AUTO_SOLVE
+
+        if feed then
+            if phase == "round" and type(feed.round) == "table" and feed.round.nonce then
+                if not busy and not answered[feed.round.nonce] then
+                    busy = true
+                    task.spawn(function()
+                        local ok, err = pcall(handleRound, feed.round)
+                        if not ok then warn("[GTC] خطأ: " .. tostring(err)) end
+                        busy = false
+                    end)
+                end
+            elseif phase == "feedback" then
+                handleFeedback(feed)
+            elseif phase == "results" then
+                clearHints()
+                handleResults(feed)
+                if CONFIG.AUTO_REPLAY then
+                    if not tryReplay() then tryOpenWindow() end
+                end
+            else
+                clearHints()
+            end
+        end
+        refreshUI(phase)
+    end
+end)
+
+-- تحميل بصمات كل البطاقات بالخلفية
+-- تحميل بصمات كل الصور (الأساسية أول، بعدين السكنات) بالخلفية
+local prefetchGen = 0
+local function startPrefetch()
+    if not CONFIG.PREFETCH then return end
+    prefetchGen += 1
+    local gen = prefetchGen
+    task.spawn(function()
+        local todo, seen = {}, {}
+        for _, ids in pairs(nameToIds) do
+            local id = ids[1]
+            if id and not assetFp[id] and not seen[id] then seen[id] = true table.insert(todo, id) end
+        end
+        local primaries = #todo
+        for _, ids in pairs(nameToIds) do
+            for j = 2, #ids do
+                local id = ids[j]
+                if not assetFp[id] and not seen[id] then seen[id] = true table.insert(todo, id) end
+            end
+        end
+        if #todo == 0 then return end
+        print(string.format("📥 تحميل %d صورة بالخلفية (%d أساسية + %d سكن)...", #todo, primaries, #todo - primaries))
+        for i, id in ipairs(todo) do
+            if not isAlive() or not editableWorks or gen ~= prefetchGen then return end
+            while busy do task.wait(0.2) end -- لا يزاحم الجولة
+            getAssetFp(id)
+            if i % 100 == 0 then print("📥 " .. i .. "/" .. #todo) end
+            if i == primaries then print("✅ خلصت الصور الأساسية، الحين السكنات") end
+            task.wait(0.03)
+        end
+        saveAssetFp(true)
+        print("✅ خلص تحميل كل البصمات")
+    end)
+end
+
+-- إغلاق
+closeBtn.MouseButton1Click:Connect(function()
+    alive = false
+    if env.__GTC_TOKEN == myToken then env.__GTC_AUTO = false end
+    clearHints()
+    saveAssetFp(true)
+    saveStats()
+    for _, c in ipairs(connections) do c:Disconnect() end
+    overlay:Destroy()
+    gui:Destroy()
+end)
+
+refreshUI(nil)
+startPrefetchRef = startPrefetch
+startPrefetch()
+print("🚀 GTC V15.3 Loaded!  (RightShift = إخفاء/إظهار)")
