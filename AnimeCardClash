@@ -1,8 +1,19 @@
 --[[
-    👑 GTC Solver V15.3 👑  —  Anime Card Clash • Guess the Card
+    ============ طريقة الاستخدام ============
+    1) شغّل السكربت مرة وحدة بس (لو غيّرت نسخة سوّ Rejoin).
+    2) انتظر لين يطلع "✅ خلص تحميل كل البصمات" أول مرة (كم دقيقة).
+    3) ادخل Guess the Card وخلّه يلعب.
+    - RightShift يخفي/يظهر الواجهة.
+    - طفّ Auto Solve لو تبي تجاوب بنفسك (يعلّم لك الجواب).
+    - عشان يكون قوي من أول يوم: حط ملف GTC_exact.json حق أحد ثاني
+      باسم GTC_exact_import.json داخل مجلد workspace حق الـ executor.
+    =========================================
+
+    👑 GTC Solver V15.5 👑  —  Anime Card Clash • Guess the Card
 
     يقرأ guessFeed مباشرة، ويطابق الصورة المغبشة مع صور البطاقات الأصلية.
 
+    V15.5: قاعدة بيانات كاملة (GTC_exact.json): يحفظ بكسلات الجولة المغبشة نفسها لكل صورة → تطابق طبق الأصل
     V15.3: قائمة الصور الرسمية من دوال اللعبة (getCardAsset + getSkinsForCard) — نفس اللي يختار منه السيرفر
 
     الجديد في V15:
@@ -50,7 +61,7 @@ local CONFIG = {
     -- وقت الجواب (ثواني من بداية الجولة) — عشوائي بين الأقل والأكثر
     SURE_MIN = 1.8, SURE_MAX = 4.0,       -- لما يكون متأكد
     UNSURE_MIN = 3.0, UNSURE_MAX = 6.5,   -- لما مو متأكد
-    SAFETY_MARGIN = 1.5,                  -- يجاوب قبل نهاية الوقت بكذا على الأقل
+    SAFETY_MARGIN = 2.0,                  -- يجاوب قبل نهاية الوقت بكذا على الأقل (أمان ضد التأخير)
     AVG_SAFETY = 1.6,                     -- يخلي متوسط وقت أجوبتك أعلى من حد الأنتي تشيت بكذا مرة
 
     BLUR_RADIUS = 4,            -- تغبيش الصورة الأصلية قبل المقارنة (يتعدّل لحاله من المعايرة)
@@ -65,7 +76,7 @@ local CONFIG = {
 
     PREFETCH = true,            -- يحمّل بصمات كل البطاقات بالخلفية
     TOGGLE_KEY = Enum.KeyCode.RightShift,
-    DEBUG = true,
+    DEBUG = false,             -- true = يطبع تفاصيل كل جولة في الكونسول
 
     FILES = {
         learned = "GTC_learned.json",
@@ -73,6 +84,8 @@ local CONFIG = {
         names = "GTC_names.json",
         missing = "GTC_missing.json",
         stats = "GTC_stats.json",
+        exact = "GTC_exact.json",        -- قاعدة البيانات الكاملة: بكسلات الجولة المغبشة نفسها لكل صورة
+        exactImport = "GTC_exact_import.json", -- حط هنا ملف خويك لو تبي تدمجه
     },
 }
 
@@ -95,7 +108,7 @@ local function saveJson(file, data)
     pcall(function() writefile(file, HttpService:JSONEncode(data)) end)
 end
 
-print("⏳ جاري تشغيل GTC V15.3...")
+print("⏳ جاري تشغيل GTC V15.5...")
 
 -- ==========================================
 -- 1. موديولات اللعبة
@@ -535,7 +548,9 @@ end
 local inflight = {}
 local function getAssetFp(id)
     if assetFp[id] then return assetFp[id] end
-    if failed[id] or not editableWorks then return nil end
+    if not editableWorks then return nil end
+    local f = failed[id]
+    if f and (f.tries >= 3 or os.clock() - f.at < 30) then return nil end
     if inflight[id] then
         while inflight[id] do task.wait() end
         return assetFp[id]
@@ -561,7 +576,7 @@ local function getAssetFp(id)
         saveAssetFp()
         return result
     end
-    failed[id] = true
+    failed[id] = { tries = ((failed[id] and failed[id].tries) or 0) + 1, at = os.clock() }
     failStreak += 1
     if failStreak == 1 then warn("⚠️ فشل تحميل صورة " .. id .. ": " .. tostring(result)) end
     if failStreak >= 6 and editableWorks then
@@ -574,6 +589,71 @@ end
 -- ==========================================
 -- 5. التعلم
 -- ==========================================
+-- ==========================================
+-- 5.0 قاعدة البيانات الكاملة (Exact DB)
+-- السيرفر يغبّش نفس الصورة بنفس الطريقة دايم → نحفظ بكسلات الجولة نفسها
+-- [imageId] = { n = clean(name), p = hex(24x32 RGB) }
+-- ==========================================
+local exactDb = loadJson(CONFIG.FILES.exact) or {}
+do
+    local imp = loadJson(CONFIG.FILES.exactImport)
+    if imp then
+        local added = 0
+        for id, e in pairs(imp) do
+            if type(e) == "table" and e.n and e.p and not exactDb[id] then
+                exactDb[id] = e
+                added += 1
+            end
+        end
+        if added > 0 then
+            saveJson(CONFIG.FILES.exact, exactDb)
+            print("📦 دمجت " .. added .. " صورة من " .. CONFIG.FILES.exactImport)
+        end
+    end
+end
+
+local exactByName = {} -- [clean(name)] = { id, id, ... }
+local exactArr = {}    -- [id] = مصفوفة مفكوكة
+local exactCount = 0
+local function indexExact(id, e)
+    local list = exactByName[e.n]
+    if not list then list = {} exactByName[e.n] = list end
+    for _, x in ipairs(list) do if x == id then return end end
+    table.insert(list, id)
+    exactCount += 1
+end
+for id, e in pairs(exactDb) do
+    if type(e) == "table" and e.n and e.p then indexExact(id, e) end
+end
+print("🎯 قاعدة البيانات الكاملة: " .. exactCount .. " صورة")
+
+local exactDirty = 0
+local function addExact(id, name, px)
+    if not id or not px then return end
+    local e = { n = clean(name), p = toHex(px) }
+    local isNew = exactDb[id] == nil
+    exactDb[id] = e
+    exactArr[id] = nil
+    indexExact(id, e)
+    exactDirty += 1
+    if isNew or exactDirty >= 5 then
+        exactDirty = 0
+        saveJson(CONFIG.FILES.exact, exactDb)
+    end
+    if isNew then dprint("🎯 أضفت " .. name .. " لقاعدة البيانات الكاملة (" .. exactCount .. ")") end
+end
+
+local function getExactArr(id)
+    local a = exactArr[id]
+    if not a then
+        local e = exactDb[id]
+        if not e then return nil end
+        a = fromHex(e.p)
+        exactArr[id] = a
+    end
+    return a
+end
+
 local learned = loadJson(CONFIG.FILES.learned) or {}
 do
     local n = 0
@@ -599,6 +679,24 @@ end
 -- ==========================================
 local function chooseOption(options, fp, budget, skinChance)
     skinChance = skinChance or 0
+
+    -- 0) قاعدة البيانات الكاملة: نسخة طبق الأصل من جولة سابقة
+    do
+        local eIdx, e1, e2 = nil, -2, -2
+        for i, name in ipairs(options) do
+            local bestI = -2
+            for _, id in ipairs(exactByName[clean(name)] or {}) do
+                local c = corr(getExactArr(id), fp.px)
+                if c and c > bestI then bestI = c end
+            end
+            if bestI > e1 then e2 = e1 eIdx, e1 = i, bestI
+            elseif bestI > e2 then e2 = bestI end
+        end
+        if eIdx and e1 >= 0.985 and (e1 - e2) >= 0.05 then
+            dprint(string.format("🎯 تطابق كامل: %.4f (الثاني %.3f)", e1, e2))
+            return eIdx, (1 - e1) * 100, string.format("exact %.1f%%", e1 * 100), true
+        end
+    end
     -- أ) التعلم
     local lIdx, lDist = nil, math.huge
     for i, name in ipairs(options) do
@@ -887,6 +985,7 @@ local vPph = infoRow("Points / h")
 local vBest = infoRow("Best run")
 local vDb = infoRow("Card prints")
 local vStage = infoRow("Stage")
+local vExact = infoRow("Exact DB")
 
 local function button(txt, on)
     local b = Instance.new("TextButton")
@@ -991,6 +1090,9 @@ local function refreshUI(phase)
     vPph.Text = hours > 0.01 and tostring(math.floor(session.points / hours)) or "-"
     vBest.Text = tostring(stats.bestRun)
     vDb.Text = tostring(countDb())
+    local totalImgs = 0
+    for _, ids in pairs(nameToIds) do totalImgs += #ids end
+    vExact.Text = string.format("%d / %d", exactCount, totalImgs)
 end
 
 -- ==========================================
@@ -1359,6 +1461,10 @@ local function handleFeedback(feed)
 
     if fb.name then
         learn(fb.name, pending.fp)
+        do
+            local rid0 = type(feed.revealAsset) == "string" and feed.revealAsset:match("%d+")
+            if rid0 and pending.fp.px then addExact(rid0, fb.name, pending.fp.px) end
+        end
 
         -- اربط الاسم بالصورة الحقيقية
         local rid = type(feed.revealAsset) == "string" and feed.revealAsset:match("%d+")
@@ -1385,14 +1491,16 @@ local function handleFeedback(feed)
             if (ibpp == 3 or ibpp == 4) and iw == pending.w and ih == pending.h then
                 local clearArr = bufToArr(img.pixels, iw, ih, ibpp)
                 local roundArr = pending.arr
-                if rid and not assetFp[rid] then
+                if rid and not (assetFp[rid] and assetFp[rid].src == "reveal") then
                     local blurred = boxBlur(clearArr, iw, ih, CONFIG.BLUR_RADIUS)
                     local fp = makeFp(blurred, iw, ih)
                     fp.p = toHex(grid(blurred, iw, ih, PX, PY))
+                    fp.src = "reveal" -- نفس قص/حجم صورة السيرفر بالضبط = أدق من تصغير الصورة الأصلية
+                    pixelCache[rid] = nil
                     assetFp[rid] = fp
                     failed[rid] = nil
                     saveAssetFp()
-                    dprint("🧷 حفظت بصمة " .. fb.name .. " من صورة الكشف")
+                    dprint("🧷 حدّثت بصمة " .. fb.name .. " من صورة الكشف (أدق)")
                 end
                 if CONFIG.AUTO_CALIBRATE and roundArr then
                     task.spawn(calibrate, clearArr, roundArr, iw, ih)
@@ -1526,4 +1634,4 @@ end)
 refreshUI(nil)
 startPrefetchRef = startPrefetch
 startPrefetch()
-print("🚀 GTC V15.3 Loaded!  (RightShift = إخفاء/إظهار)")
+print("🚀 GTC V15.5 Loaded!  (RightShift = إخفاء/إظهار)")
