@@ -9,11 +9,22 @@ end
 
 -- ==================== Obsidian UI ====================
 -- Uses deividcomsono/Obsidian (modern successor to LinoriaLib with search, icons, mobile support & themes)
-local OBSIDIAN_REF = "main"
+-- pinned to one commit, so an upstream change can't break (or change) the hub without you knowing
+local OBSIDIAN_REF = "3674d51ec8ca046a3b21b2bb17317eee12ecac89"
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/" .. OBSIDIAN_REF .. "/"
-local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
-local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
-local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+local function fetchLib(path)
+    local ok, res = pcall(function() return loadstring(game:HttpGet(repo .. path))() end)
+    if ok and res then return res end
+    warn("[Titan Hub] could not load " .. path .. ": " .. tostring(res))
+    return nil
+end
+local Library = fetchLib("Library.lua")
+local ThemeManager = Library and fetchLib("addons/ThemeManager.lua")
+local SaveManager = ThemeManager and fetchLib("addons/SaveManager.lua")
+if not SaveManager then
+    warn("[Titan Hub] UI library failed to load, nothing was started. Check your connection and run it again.")
+    return
+end
 local LOptions, LToggles = Library.Options, Library.Toggles
 
 Library.ForceCheckbox = false
@@ -25,7 +36,7 @@ local LWindow
 local uiCounter = 0
 
 -- only the menu keybind is excluded now: farm / roll / pity toggles are saved in the config
-local ignoreIdx = { "MenuKeybind", "SpySettingChange" }
+local ignoreIdx = { "MenuKeybind", "SpySettingChange", "SpendArmed" } -- SpendArmed must never be saved
 
 local function nextIdx(flag)
     if flag then return flag end
@@ -38,8 +49,6 @@ end
 local TabClass = {}
 TabClass.__index = TabClass
 
--- Related tabs are merged into one top-level tab. Each original tab becomes a "tabbox" (left / right column)
--- and each of its sections becomes a sub-tab inside it, so you click a section instead of scrolling.
 local WIN_H = 820
 -- No more merged pages with crowded sub-tab rows: every tab is its own sidebar page
 -- (sections become boxes on the page), and the sidebar is split into categories like modern hubs.
@@ -85,47 +94,7 @@ GroupOf.__categories = {
     { order = 500, name = "Extras" },
 }
 
-local Groups = {}
-
--- short sub-tab names (the buttons are narrow, long names overlap)
-local ShortNames = {
-    ["battle settings"] = "Battle", ["difficulty"] = "Diff", ["movement"] = "Move", ["smart farm"] = "Worlds",
-    ["raid control"] = "Control", ["raid bosses & difficulty"] = "Bosses",
-    ["control"] = "Control", ["quick setup"] = "Quick", ["secret bosses"] = "Secret", ["bosses"] = "Bosses",
-    ["reaper statues"] = "Statues", ["halloween quests"] = "Quests", ["prestige road"] = "Road", ["candy doors"] = "Doors", ["candy pickups"] = "Candy", ["halloween upgrades"] = "Upgrades", ["dealer"] = "Dealer", ["scrap shop"] = "Shop", ["potion fuser"] = "Fuser", ["auto-recycle"] = "Auto", ["card awakening"] = "Awaken", ["spooky tower"] = "Tower", ["secret areas"] = "Secret", ["codes"] = "Codes", ["daily & group chest"] = "Daily", ["card packs"] = "Packs",
-    ["end the tower at a floor"] = "At floor", ["end the tower on weather"] = "Weather", ["manual"] = "Manual", ["auto run"] = "Auto",
-    ["potion selection"] = "Select", ["auto drink"] = "Drink", ["weather burst"] = "Burst", ["before ending the infinity tower"] = "Pre-end",
-    ["potions to buy"] = "Potions", ["potions to craft"] = "Potions", ["buy"] = "Buy", ["craft"] = "Craft", ["debug"] = "Debug",
-    ["roll & tower"] = "Roll", ["pity roll"] = "Pity", ["offline rolls"] = "Offline",
-    ["endless raid"] = "Endless", ["prestige tower"] = "Prestige",
-    ["private server & auto reconnect"] = "Server", ["actions"] = "Actions", ["live tracker"] = "Tracker",
-}
-
-local function shortTitle(t)
-    t = tostring(t):gsub("%s*%b()", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    local mapped = ShortNames[t:lower()]
-    if mapped then return mapped end
-    t = t:gsub("^Fine:%s*", "")
-    if t == "Nightmare" then return "Night" end
-    if #t <= 9 then return t end
-    local first = t:match("%S+") or t
-    if #first <= 9 then return first end
-    return first:sub(1, 9)
-end
-
 function TabClass:_newBox(title)
-    if self._tabbox then
-        local name = shortTitle(title)
-        self._subCount = (self._subCount or 0) + 1
-        -- unique sub-tab names inside one tabbox
-        if self._subNames and self._subNames[name] then name = name .. " " .. self._subCount end
-        self._subNames = self._subNames or {}
-        self._subNames[name] = true
-        self._cur = self._tabbox:AddTab(name)
-        self._subs = self._subs or {}
-        table.insert(self._subs, self._cur)
-        return self._cur
-    end
     self._n += 1
     local box
     if self._n % 2 == 1 then
@@ -161,7 +130,7 @@ function TabClass:CreateInput(cfg)
     self:_box():AddInput(idx, {
         Default = cfg.Default or "",
         Numeric = false,
-        Finished = false,
+        Finished = true, -- commit on Enter: partial text must never reach the callback
         ClearTextOnFocus = false,
         Text = cfg.Name,
         Placeholder = cfg.Placeholder or "",
@@ -232,29 +201,18 @@ function TabClass:CreateDropdown(cfg)
     return { Set = function(_, list) setValue(list or {}) end }
 end
 
--- Stretch every sub-tab page with a blank spacer so the boxes reach the bottom of the (tall) window.
-local function fillGroups()
-    if Library.IsMobile then return end -- phones: no spacers, pages stay short and scroll
-    local contentH = WIN_H - 120
-    for _, grp in pairs(Groups) do
-        local perSide = { 0, 0 }
-        for _, e in ipairs(grp.objs or {}) do perSide[e.side] += 1 end
-        for _, e in ipairs(grp.objs or {}) do
-            local target = math.floor(contentH / math.max(1, perSide[e.side])) - 34
-            for _, sub in ipairs(e.obj._subs or {}) do
-                pcall(function()
-                    local layout = sub.Container and sub.Container:FindFirstChildOfClass("UIListLayout")
-                    local cur = layout and layout.AbsoluteContentSize.Y or 0
-                    if cur > 0 and target > cur and sub.AddBlank then
-                        sub:AddBlank(target - cur)
-                    end
-                end)
-            end
-        end
-    end
-end
-
 local IS_MOBILE = Library.IsMobile == true
+
+-- ===== Anime Adventures look =====
+-- kept on the Rayfield table (the main chunk is at Lua's 200-locals limit)
+Rayfield.AA = {
+    Font = Enum.Font.FredokaOne,
+    Back = Color3.fromRGB(22, 26, 54),     -- deep navy
+    Main = Color3.fromRGB(37, 44, 92),     -- boxes / buttons
+    Gold = Color3.fromRGB(255, 194, 26),   -- accent
+    Line = Color3.fromRGB(7, 8, 26),       -- dark outline
+    Text = Color3.fromRGB(255, 255, 255),
+}
 
 GroupOf.__headers = {}
 function GroupOf.__addHeaders(tabsFrame)
@@ -266,10 +224,12 @@ function GroupOf.__addHeaders(tabsFrame)
         lbl.LayoutOrder = c.order
         lbl.BackgroundTransparency = 1
         lbl.Size = UDim2.new(1, 0, 0, 24)
-        lbl.Font = Enum.Font.GothamMedium
-        lbl.Text = c.name
-        lbl.TextSize = 12
-        lbl.TextColor3 = Color3.fromRGB(125, 128, 145)
+        lbl.Font = Rayfield.AA.Font
+        lbl.Text = c.name:upper()
+        lbl.TextSize = 13
+        lbl.TextColor3 = Rayfield.AA.Gold
+        lbl.TextStrokeColor3 = Rayfield.AA.Line
+        lbl.TextStrokeTransparency = 0.2
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.TextYAlignment = Enum.TextYAlignment.Bottom
         local pad = Instance.new("UIPadding")
@@ -326,35 +286,74 @@ function Rayfield:CreateWindow(cfg)
         TabPadding = 8,
         MenuFadeTime = 0.2,
         Size = UDim2.fromOffset(winW, WIN_H),
-        Font = Enum.Font.Gotham,
-        CornerRadius = 10,
-        ShowMobileButtons = true,
+        Font = Rayfield.AA.Font,
+        CornerRadius = 12,
+        ShowMobileButtons = false, -- our own floating button instead
         MobileButtonsSide = "Left",
         SidebarCompacted = IS_MOBILE,
         EnableCompacting = true,
         Animations = { ToggleWindow = true, TabSwitch = true, Groupbox = true, Dropdown = true, KeyPicker = false },
         TabTransitionTime = 0.18,
         TabSwipeFrom = "bottom",
-        TabButtonsStyle = { Gap = 4, Padding = 6, CornerRadius = 8, Indicator = true, IndicatorWidth = 3, IndicatorHeight = 18 },
+        TabButtonsStyle = { Gap = 4, Padding = 6, CornerRadius = 10, Indicator = true, IndicatorWidth = 4, IndicatorHeight = 20 },
     })
+
+    -- floating open / close button, AA style (gold, thick dark outline). Drag to move.
+    pcall(function()
+        local UIS = game:GetService("UserInputService")
+        local root = (gethui and gethui()) or game:GetService("CoreGui")
+        local old = root:FindFirstChild("Titan_Float")
+        if old then old:Destroy() end
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "Titan_Float"
+        gui.ResetOnSpawn = false
+        gui.DisplayOrder = 999
+        gui.Parent = root
+        local size = IS_MOBILE and 54 or 46
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.fromOffset(size, size)
+        btn.Position = UDim2.new(0, 14, 0.35, 0)
+        btn.BackgroundColor3 = Color3.new(1, 1, 1)
+        btn.AutoButtonColor = false
+        btn.Text = "T"
+        btn.Font = Rayfield.AA.Font
+        btn.TextSize = IS_MOBILE and 30 or 26
+        btn.TextColor3 = Rayfield.AA.Text
+        btn.TextStrokeColor3 = Rayfield.AA.Line
+        btn.TextStrokeTransparency = 0
+        btn.Parent = gui
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 14)
+        local g = Instance.new("UIGradient", btn)
+        g.Color = ColorSequence.new(Color3.fromRGB(255, 216, 74), Color3.fromRGB(255, 154, 26))
+        g.Rotation = 90
+        local st = Instance.new("UIStroke", btn)
+        st.Color = Rayfield.AA.Line
+        st.Thickness = 3
+        st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        local dragging, start, startPos, moved
+        btn.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                dragging, moved, start, startPos = true, false, i.Position, btn.Position
+            end
+        end)
+        Library:GiveSignal(UIS.InputChanged:Connect(function(i)
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                local d = i.Position - start
+                if math.abs(d.X) + math.abs(d.Y) > 6 then moved = true end
+                btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end))
+        Library:GiveSignal(UIS.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                if dragging and not moved then pcall(function() Library:Toggle() end) end
+                dragging = false
+            end
+        end))
+        Library:OnUnload(function() pcall(function() gui:Destroy() end) end)
+    end)
+
     local win = {}
     function win:CreateTab(name)
-        local g = GroupOf[name]
-        -- fall back to plain tabs if this build has no Tabbox support
-        if g and not (Library.CreateWindow and LWindow.AddTab) then g = nil end
-        if g then
-            local grp = Groups[g]
-            if not grp then
-                grp = { tab = addPage(g), n = 0 }
-                Groups[g] = grp
-            end
-            grp.n += 1
-            local box = (grp.n % 2 == 1) and grp.tab:AddLeftTabbox() or grp.tab:AddRightTabbox()
-            local obj = setmetatable({ _tabbox = box, _name = name, _n = 0 }, TabClass)
-            grp.objs = grp.objs or {}
-            table.insert(grp.objs, { obj = obj, side = (grp.n % 2 == 1) and 1 or 2 })
-            return obj
-        end
         return setmetatable({ _tab = addPage(name), _name = name, _n = 0 }, TabClass)
     end
     return win
@@ -369,7 +368,13 @@ function Rayfield.ShopEntry(remote, shopId, name)
     local c = Rayfield.ShopCache[shopId]
     if not c or os.clock() - c.at > 20 then
         local ok, res = pcall(function() return remote:InvokeServer("get", shopId) end)
-        c = { at = os.clock(), entries = (ok and type(res) == "table" and type(res.entries) == "table") and res.entries or nil }
+        local left = ok and type(res) == "table" and tonumber(res.restockIn) or nil
+        c = {
+            at = os.clock(),
+            entries = (ok and type(res) == "table" and type(res.entries) == "table") and res.entries or nil,
+            restockAt = left and (os.time() + left) or nil,
+            balances = ok and type(res) == "table" and res.balances or nil,
+        }
         Rayfield.ShopCache[shopId] = c
     end
     if not c.entries then return nil end
@@ -379,16 +384,86 @@ function Rayfield.ShopEntry(remote, shopId, name)
     return false -- shop answered, but doesn't sell this
 end
 -- returns key or nil + reason; falls back to the old "<tab>:<name>" key when the shop data can't be read
-function Rayfield.ShopKey(remote, shopId, name, fallback)
+function Rayfield.ShopKey(remote, shopId, name, fallback, keep)
     local e = Rayfield.ShopEntry(remote, shopId, name)
     if e == false then return nil, "not sold here" end
     if e then
         if e.locked and not e.owned then return nil, "locked" end
-        if not e.unlimited and tonumber(e.stock) and e.stock <= 0 then return nil, "out of stock" end
+        if not e.unlimited and tonumber(e.stock) and tonumber(e.stock) <= 0 then return nil, "out of stock" end
+        if keep and keep > 0 then
+            local okReserve, reason = Rayfield.ShopReserveOk(shopId, e, keep)
+            if not okReserve then return nil, reason end
+        end
         Rayfield.ShopCache[shopId].at = 0 -- stock changes after a buy: re-read next time
         return e.id
     end
+    -- shop data unreadable: with a reserve set, the balance can't be checked, so don't buy
+    if keep and keep > 0 then return nil, "noreply" end
     return fallback
+end
+
+-- resets the buy counters when the server really restocked (restockIn jumped forward);
+-- the fixed cycle is only the fallback for when the shop data can't be read
+function Rayfield.ShopRoll(State, remote, shopId, cycle)
+    if remote then Rayfield.ShopEntry(remote, shopId, "") end
+    local c = Rayfield.ShopCache[shopId]
+    local at = c and c.restockAt
+    if at then
+        if State.restockAt and at > State.restockAt + 60 then
+            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+        end
+        State.restockAt = at
+    elseif os.time() - State.cycleStart >= cycle then
+        State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
+    end
+end
+
+-- Reads a buy reply. Seen from the server:
+--   { message = "Bought X!", shop = {...} }  /  { message = "You can't afford this yet!", shop = {...} }  /  nil (nothing happened)
+-- Only a confirmed purchase returns "bought". The reply's shop data also refreshes the cache.
+function Rayfield.ShopResult(shopId, res)
+    if type(res) ~= "table" then
+        if res == true then return "bought" end
+        return res == nil and "noreply" or "refused"
+    end
+    local shop = res.shop
+    if type(shop) == "table" then
+        local c = Rayfield.ShopCache[shopId] or {}
+        c.at = os.clock()
+        local first = type(shop.entries) == "table" and shop.entries[1]
+        if type(first) == "table" and first.name ~= nil then c.entries = shop.entries end
+        if type(shop.balances) == "table" then c.balances = shop.balances end
+        local left = tonumber(shop.restockIn)
+        if left then c.restockAt = os.time() + left end
+        Rayfield.ShopCache[shopId] = c
+    end
+    if res.success == false or res.ok == false or res.error ~= nil then return "refused" end
+    local msg = type(res.message) == "string" and res.message or ""
+    if msg:find("^Bought") or res.success == true or res.ok == true then return "bought" end
+    return msg == "" and "noreply" or "refused"
+end
+
+-- when to try this item again: soon after no answer, later after a real refusal
+function Rayfield.ShopRetry(why, long)
+    return os.time() + (why == "noreply" and 5 or long)
+end
+
+-- true if buying `entry` leaves at least `keep` of every currency it costs.
+-- A price or balance that can't be read counts as "don't buy".
+function Rayfield.ShopReserveOk(shopId, entry, keep)
+    local c = Rayfield.ShopCache[shopId]
+    local balances = c and c.balances
+    if type(entry.cost) ~= "table" or type(balances) ~= "table" then return false, "noreply" end
+    for _, price in ipairs(entry.cost) do
+        local have
+        for _, b in ipairs(balances) do
+            if type(b) == "table" and type(price) == "table" and b.name == price.name then have = tonumber(b.amount) end
+        end
+        local amount = type(price) == "table" and tonumber(price.amount)
+        if not have or not amount then return false, "noreply" end
+        if have - amount < keep then return false, "reserve" end
+    end
+    return true
 end
 
 function Rayfield:Notify(cfg)
@@ -411,7 +486,6 @@ function Rayfield:LoadConfiguration()
         local ok, err = pcall(Rayfield.AfterSettings)
         if not ok then warn("[Server tab] " .. tostring(err)) end
     end
-    task.delay(1.5, function() pcall(fillGroups) end) -- after the layout has measured every page
     local menu = settings:AddLeftGroupbox("Menu")
     menu:AddButton({
         Text = "Unload",
@@ -448,22 +522,40 @@ function Rayfield:LoadConfiguration()
         })
     end
     -- Window transparency: fades every Frame background of the menu (text stays solid)
+    -- + AA text outline. Frames made later (dropdowns, pages) get it too.
     local origT = setmetatable({}, { __mode = "k" })
+    local curT, outlineOn = 0.35, true
+    local function styleOne(d, skip)
+        if skip and d:IsDescendantOf(skip) then return end
+        if d:IsA("Frame") or d:IsA("ScrollingFrame") then
+            if origT[d] == nil then origT[d] = d.BackgroundTransparency end
+            local o = origT[d]
+            if o < 1 then d.BackgroundTransparency = o + (1 - o) * curT end
+        elseif d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+            d.TextStrokeColor3 = Rayfield.AA.Line
+            d.TextStrokeTransparency = outlineOn and 0.35 or 1
+        end
+    end
     local function applyTransparency(t)
+        curT = t or curT
         local root = Library.ScreenGui
         if not root then return end
         local skip = Library.NotificationArea
-        for _, d in ipairs(root:GetDescendants()) do
-            if (d:IsA("Frame") or d:IsA("ScrollingFrame")) and not (skip and d:IsDescendantOf(skip)) then
-                if origT[d] == nil then origT[d] = d.BackgroundTransparency end
-                local o = origT[d]
-                if o < 1 then d.BackgroundTransparency = o + (1 - o) * t end
-            end
-        end
+        for _, d in ipairs(root:GetDescendants()) do styleOne(d, skip) end
     end
+    pcall(function()
+        Library:GiveSignal(Library.ScreenGui.DescendantAdded:Connect(function(d)
+            task.defer(function() pcall(styleOne, d, Library.NotificationArea) end)
+        end))
+    end)
+    menu:AddToggle("AAOutline", {
+        Text = "AA text outline",
+        Default = true,
+        Callback = function(v) outlineOn = v; pcall(applyTransparency) end,
+    })
     menu:AddSlider("UiTransparency2", {
         Text = "Transparency",
-        Default = 20,
+        Default = 35,
         Min = 0,
         Max = 85,
         Rounding = 0,
@@ -484,12 +576,12 @@ function Rayfield:LoadConfiguration()
     ThemeManager:SetLibrary(Library)
     pcall(function()
         ThemeManager:SetDefaultTheme({
-            BackgroundColor = Color3.fromRGB(14, 15, 21),
-            MainColor = Color3.fromRGB(23, 25, 34),
-            AccentColor = Color3.fromRGB(139, 108, 255),
-            OutlineColor = Color3.fromRGB(38, 41, 56),
-            FontColor = Color3.fromRGB(236, 238, 246),
-            FontFace = "Gotham",
+            BackgroundColor = Rayfield.AA.Back,
+            MainColor = Rayfield.AA.Main,
+            AccentColor = Rayfield.AA.Gold,
+            OutlineColor = Rayfield.AA.Line,
+            FontColor = Rayfield.AA.Text,
+            FontFace = "FredokaOne",
         })
     end)
     SaveManager:SetLibrary(Library)
@@ -504,6 +596,12 @@ function Rayfield:LoadConfiguration()
     local auto = settings:AddRightGroupbox("Auto Save")
     auto:AddToggle("AutoSaveCfg", { Text = "Auto save config (when something changes)", Default = true })
     auto:AddLabel("Saves farm / roll / pity state, so it resumes after a server change.", true)
+    auto:AddToggle("SpendArmed", {
+        Text = "Allow auto-spending this session",
+        Default = false,
+        Callback = function(v) Rayfield.SpendArmed = v end,
+    })
+    auto:AddLabel("Off after every load: auto-buy, packs, crafting, fuser, upgrades and awakening wait for this. Buttons and potions are not affected.", true)
 
     local myTok = (getgenv().TitanSaveTok or 0) + 1
     getgenv().TitanSaveTok = myTok
@@ -631,7 +729,10 @@ local PrivateServerURL = ""
 local AutoReconnectEnabled = true
 local ScriptLoadURL = ""
 
-getgenv().TitanLoaded = function()
+Rayfield.Alive = true
+Rayfield.Cleanup = function()
+    if not Rayfield.Alive then return end
+    Rayfield.Alive = false
     ActiveMode = nil
     ActiveWorldKey = nil
     FarmToken += 1
@@ -643,9 +744,12 @@ getgenv().TitanLoaded = function()
     for _, conn in ipairs(activeConnections) do
         pcall(function() conn:Disconnect() end)
     end
-    pcall(function() Rayfield:Destroy() end)
-    getgenv().TitanLoaded = nil
+    if not Library.Unloaded then pcall(function() Rayfield:Destroy() end) end
+    if getgenv().TitanLoaded == Rayfield.Cleanup then getgenv().TitanLoaded = nil end
 end
+getgenv().TitanLoaded = Rayfield.Cleanup
+-- the menu's Unload button goes straight to the library: make it stop everything as well
+pcall(function() Library:OnUnload(Rayfield.Cleanup) end)
 
 -- ==================== Remotes ====================
 local challengeRemote, teleportAreaRemote, battleEvent, bossResultRemote
@@ -684,7 +788,7 @@ end
 local function onRemoteEvent(name, handler)
     task.spawn(function()
         local obj = Rep:WaitForChild(name, 180)
-        if obj and getgenv().TitanLoaded then
+        if obj and Rayfield.Alive then
             table.insert(activeConnections, obj.OnClientEvent:Connect(handler))
         end
     end)
@@ -742,23 +846,26 @@ local function scanWorld6()
     local bn = workspace:FindFirstChild("bossNpcs")
     local f6 = bn and bn:FindFirstChild("6")
     if not f6 then return false end
-    local ids, seen = {}, {}
+    -- merge: only part of the folder may be streamed in, so the known bosses must stay in the list
+    local list, seen, foundAny = BossHierarchy["6"], {}, false
+    for _, id in ipairs(list) do seen[id] = true end
     for _, m in ipairs(f6:GetChildren()) do
         if m:IsA("Model") and not m:GetAttribute("AreaOrder") then
             local id = m:GetAttribute("bossId")
             if type(id) ~= "string" or id == "" then
                 id = m.Name:lower():gsub("%s+", "_")
             end
-            if id ~= "" and not seen[id] then
-                seen[id] = true
-                table.insert(ids, id)
+            if id ~= "" then
+                foundAny = true
+                if not seen[id] then
+                    seen[id] = true
+                    table.insert(list, id)
+                end
                 if m.Name ~= "" and not BossDisplayName[id] then BossDisplayName[id] = m.Name end
             end
         end
     end
-    if #ids == 0 then return false end
-    BossHierarchy["6"] = ids
-    return true
+    return foundAny
 end
 pcall(scanWorld6)
 
@@ -818,7 +925,21 @@ local function norm(s)
 end
 
 -- small caches so heavy lookups do not run every frame
-local PerfCache = { cd = {}, scanAt = 0 }
+local PerfCache = { cd = {}, scanAt = 0, failCount = {}, startBusyUntil = 0 }
+
+-- battle_start does not say which system asked for it, so only one system may wait for one at a time.
+-- `hold` is an expiry, so a dead thread can never block the others for good.
+function PerfCache.acquireStart(hold, shouldContinue)
+    while os.clock() < PerfCache.startBusyUntil do
+        if shouldContinue and not shouldContinue() then return false end
+        task.wait(0.05)
+    end
+    PerfCache.startBusyUntil = os.clock() + hold
+    return true
+end
+function PerfCache.releaseStart()
+    PerfCache.startBusyUntil = 0
+end
 
 -- ==================== World navigation ====================
 local function returnToLobby()
@@ -878,7 +999,7 @@ local function nearWorldBosses(worldKey)
     end
     local folder = workspace:FindFirstChild("bossNpcs")
     folder = folder and folder:FindFirstChild(tostring(worldKey))
-    if not folder then return true end
+    if not folder then return false end -- not streamed in: we are NOT in that world yet
     for _, m in ipairs(folder:GetChildren()) do
         if m:IsA("Model") then
             local ok, pos = pcall(function() return m:GetPivot().Position end)
@@ -1050,14 +1171,13 @@ local function forceTeleportToWorld(worldKey)
             while os.clock() - t < 5 do
                 task.wait(0.25)
                 local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-                if r and nearWorldBosses(worldKey) then
-                    local moved = (r.Position - startPos).Magnitude >= 25
-                    if moved or os.clock() - t >= 2 then
-                        task.wait(0.5)
-                        lastTpWorld, lastTpChar = worldKey, player.Character
-                        if worldKey == "6" then refreshWorld6Data() end
-                        return
-                    end
+                local dist = r and (r.Position - startPos).Magnitude or 0
+                -- a long jump counts as arrived even when the boss folder has not streamed in yet
+                if r and (dist >= 100 or (nearWorldBosses(worldKey) and (dist >= 25 or os.clock() - t >= 2))) then
+                    task.wait(0.5)
+                    lastTpWorld, lastTpChar = worldKey, player.Character
+                    if worldKey == "6" then refreshWorld6Data() end
+                    return
                 end
             end
         end
@@ -1427,14 +1547,51 @@ onRemoteEvent("bossResult", function(won, boss, diff, cd)
 end)
 
 local BattleStarts, BattleEnds = 0, 0
-onRemoteEvent("battleEvent", function(action)
+PerfCache.fightStarts, PerfCache.fightEnds = 0, 0
+onRemoteEvent("battleEvent", function(action, data)
     if action == "battle_start" then
         BattleStarts += 1
+        -- every tower floor is its own battle_start and carries floorCount: those are not a new fight
+        local towerFloorStart = type(data) == "table" and data.floorCount ~= nil and data.isPrestige ~= true
+        if not towerFloorStart then PerfCache.fightStarts += 1 end
     elseif action == "battle_ended" then
         BattleEnds += 1
         PerfCache.cd = {}
+    elseif action == "battleTabs" and type(data) == "table" then
+        -- battle_ended doesn't say which battle ended; the "fight" tab disappearing does
+        if PerfCache.fightTab and data.fight == nil then PerfCache.fightEnds += 1 end
+        PerfCache.fightTab = data.fight
+        PerfCache.towerInTabs = data.tower ~= nil
     end
 end)
+
+-- the server explains a refused challenge right away, so there's no need to sit out the whole wait
+PerfCache.refuse = { at = -1, kind = nil }
+onRemoteEvent("sendUI", function(action, text)
+    if action ~= "message" or type(text) ~= "string" then return end
+    if text:find("Get closer", 1, true) then
+        PerfCache.refuse.at, PerfCache.refuse.kind = os.clock(), "distance"
+    elseif text:find("^Beat .+ first") then
+        PerfCache.refuse.at, PerfCache.refuse.kind = os.clock(), "locked"
+    end
+end)
+
+-- sends a request and reports whether a battle started within `window` seconds
+function PerfCache.sendAndWaitBattle(send, window)
+    PerfCache.acquireStart(window + 0.5)
+    local before = PerfCache.fightStarts
+    if not pcall(send) then
+        PerfCache.releaseStart()
+        return false, "send failed"
+    end
+    local t, started = os.clock(), false
+    while os.clock() - t < window do
+        if PerfCache.fightStarts ~= before then started = true break end
+        task.wait(0.1)
+    end
+    PerfCache.releaseStart()
+    return started
+end
 
 local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, useWalk)
     shouldContinue = shouldContinue or function() return true end
@@ -1468,7 +1625,7 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
     end
 
     local accepted = false
-    local startsBefore = BattleStarts
+    local startsBefore = PerfCache.fightStarts
     local bossResBefore = bossResCount()
 
     for attempt = 1, (isRemote and 2 or 3) do
@@ -1496,22 +1653,40 @@ local function hitAndRunBoss(bossName, difficulty, shouldContinue, forceWait, us
             if not shouldContinue() then return false end
         end
 
-        startsBefore = BattleStarts
+        local waitWindow = isRemote and 1.2 or 2.0
+        if not PerfCache.acquireStart(waitWindow + 0.5, shouldContinue) then return false end
+        startsBefore = PerfCache.fightStarts
         bossResBefore = bossResCount()
+        local sentAt = os.clock()
         if challengeRemote then
             pcall(function() challengeRemote:FireServer(tostring(bossName), tostring(difficulty)) end)
         end
 
-        local waitWindow = isRemote and 1.2 or 2.0
+        local refusedKind
         local t = os.clock()
         while os.clock() - t < waitWindow do
-            if BattleStarts ~= startsBefore
+            if PerfCache.refuse.at >= sentAt then
+                refusedKind = PerfCache.refuse.kind
+                break
+            end
+            if PerfCache.fightStarts ~= startsBefore
                 or bossResCount() ~= bossResBefore
                 or isBossOnCooldown(bossName, difficulty) then
                 accepted = true
                 break
             end
             task.wait(0.05)
+        end
+        PerfCache.releaseStart()
+        if refusedKind then
+            if refusedKind == "locked" then
+                -- needs a lower difficulty beaten first: no point asking again soon
+                PerfCache.failCount[tostring(bossName) .. "|" .. tostring(difficulty)] = 4
+            elseif not PerfCache.closerWarned then
+                PerfCache.closerWarned = true
+                Rayfield:Notify({ Title = "Farm", Content = "A boss refused: Get closer to fight. Farm style 'Remote (World Only)' or 'Teleport' can reach it.", Duration = 8 })
+            end
+            return false
         end
         if accepted then break end
     end
@@ -1678,7 +1853,7 @@ end
 task.spawn(function()
     local ps = player:WaitForChild("PlayerScripts", 60)
     if ps then ps:WaitForChild("AfkRejoinClient", 30) end
-    disableGameAfkScript()
+    if AntiAfk then disableGameAfkScript() end
 end)
 
 -- Block the game's own AFK rejoin (AfkRejoinClient -> requestRejoin after ~120s without mouse movement).
@@ -1701,7 +1876,7 @@ table.insert(activeConnections, { Disconnect = function() getgenv().TitanAntiAfk
 -- small mouse-move nudge as well, in case the AFK check also listens to input
 task.spawn(function()
     local VIM = game:GetService("VirtualInputManager")
-    while getgenv().TitanLoaded do
+    while Rayfield.Alive do
         task.wait(60)
         if AntiAfk then pcall(function() VIM:SendMouseMoveEvent(math.random(5, 15), math.random(5, 15), game) end) end
     end
@@ -1752,14 +1927,18 @@ local function executeRejoin()
         task.wait(1.5)
     end
 
-    if rejoinAttempt == 1 and game.JobId ~= "" then
+    local inPrivate = game.PrivateServerId ~= ""
+    if (rejoinAttempt == 1 or inPrivate) and game.JobId ~= "" then
         pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
         end)
-    else
+    elseif not inPrivate then
         pcall(function()
             TeleportService:Teleport(game.PlaceId, player)
         end)
+    end
+    if inPrivate and rejoinAttempt == 2 then
+        Rayfield:Notify({ Title = "Rejoin", Content = "Private server: staying out of public servers. Use your link if this keeps failing.", Duration = 8 })
     end
 end
 
@@ -1838,10 +2017,11 @@ do
 
     local scriptStopped = false
     local StopFlags = {
-        "CustomAutoBoss", "SmartFarmAll", "SmartFarm1", "SmartFarm2", "SmartFarm3", "SmartFarm4",
-        "SmartFarm5", "SmartFarm6", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
+        "CustomAutoBoss", "SmartFarmAll", "RaidAutoFarm", "SecretAutoBoss", "RollPityStart", "AutoInfTowerMulti",
         "AutoClaimQuests", "AutoClaimIndex", "FastBattle", "TowerAutoEnd", "TowerEndOnWeather",
         "AutoDrinkPotions", "DrinkOnWeather", "AutoBuyShopPotions", "AutoCraftPotions", "HalloweenAutoBoss", "HalloweenAutoPrayer", "HalloweenAutoDoors", "AutoEndless", "AutoPrestigeTower",
+        "HalloweenAutoCandy", "HalloweenAutoPacks", "HalloweenAutoQuests", "PrestigeRoadAutoClaim", "HwUpgradesAuto", "SpookyTowerAuto",
+        "ShadowShopAuto", "DealerAuto", "ScrapShopAuto", "FuserAuto", "AwakeningAuto", "AutoDailyGroup", "AutoBuyCandyShopPotions",
     }
 
     -- PAUSE only: each active toggle's own callback is called with false to stop its loop,
@@ -1981,7 +2161,8 @@ FarmTab:CreateToggle({
                   collapseBattleView()
                   if os.clock() - lastSkip > 0.5 then
                       lastSkip = os.clock()
-                      if battleEvent then pcall(function() battleEvent:FireServer("Skip") end) end
+                      local bui = getBattleParts()
+                      if battleEvent and bui and bui.Enabled then pcall(function() battleEvent:FireServer("Skip") end) end
                   end
                   task.wait(0.4 + math.random() * 0.3)
               end
@@ -1997,7 +2178,14 @@ FarmTab:CreateToggle({
    Name = "Anti AFK",
    CurrentValue = true,
    Flag = "AntiAfk",
-   Callback = function(Value) AntiAfk = Value; getgenv().TitanAntiAfk = Value end,
+   Callback = function(Value)
+      AntiAfk = Value
+      getgenv().TitanAntiAfk = Value
+      pcall(function()
+          local s = player.PlayerScripts:FindFirstChild("AfkRejoinClient")
+          if s then s.Disabled = Value end
+      end)
+   end,
 })
 
 FarmTab:CreateToggle({
@@ -2126,9 +2314,13 @@ local function attemptBoss(boss, diff, alive, worldKey, useWalk)
 
     if not fired then
         if not isCharAlive() then return false end
-        SkipUntil[k] = os.clock() + 15
+        -- locked / refused: wait 15s, 30s, 60s ... up to 10 min, so the ready bosses aren't kept waiting
+        local fails = (PerfCache.failCount[k] or 0) + 1
+        PerfCache.failCount[k] = fails
+        SkipUntil[k] = os.clock() + math.min(15 * 2 ^ (fails - 1), 600)
         return false
     end
+    PerfCache.failCount[k] = nil
     if not isCharAlive() then return false end
 
     if isRemote then
@@ -2181,16 +2373,6 @@ local function farmWorldOnce(worldKey, alive, bossFilter, useWalk)
         end
     end
     return didAny
-end
-
-local function runSmartWorldFarm(worldKey)
-    startMode(worldKey, function(alive)
-        if FarmWalk ~= "remote" then forceTeleportToWorld(worldKey) end
-        while alive() do
-            local didAny = farmWorldOnce(worldKey, alive, nil, false)
-            task.wait(didAny and 0.5 or 3)
-        end
-    end)
 end
 
 do
@@ -3042,7 +3224,8 @@ do
         end
 
         local dd = LOptions and LOptions.HalloweenBossesPick
-        if dd and type(dd.SetValues) == "function" then
+        if dd and type(dd.SetValues) == "function" and PerfCache.hwNameCount ~= #HwNames then
+            PerfCache.hwNameCount = #HwNames
             pcall(function() dd:SetValues(HwNames) end)
         end
     end
@@ -3050,7 +3233,7 @@ do
     refreshHalloween()
 
     local function isBossChosen(name, id)
-        if HwSelected[ALL_HW] or next(HwSelected) == nil then return true end
+        if HwSelected[ALL_HW] then return true end
         if HwSelected[name] then return true end
         if HwSelected[ALL_MAIN] and MainBossIds[id] then return true end
         if HwSelected[ALL_GHOSTS] and GhostIds[id] then return true end
@@ -3068,6 +3251,9 @@ do
     end
 
     local function runHalloween()
+        if next(HwSelected) == nil and not Rayfield.Loading then
+            Rayfield:Notify({ Title = "Halloween Event", Content = "No boss picked, so nothing will be fought", Duration = 5 })
+        end
         startMode("halloween", function(alive)
             while alive() do
                 if FarmWalk ~= "remote" and not nearWorldBosses("halloween") then
@@ -3330,6 +3516,7 @@ do
     -- Prayer and Candy Doors share ONE loop, so both toggles can be on together
     -- (they use the same character, so they run one after the other).
     local extrasRunning = false
+    local extrasGen = 0
     local function updateExtras()
         if not (DoPrayer or DoDoors or DoCandy) then
             if extrasRunning then
@@ -3340,6 +3527,8 @@ do
         end
         if extrasRunning then return end
         extrasRunning = true
+        extrasGen += 1
+        local myGen = extrasGen
         startMode("hwextras", function(alive)
             while alive() and (DoPrayer or DoDoors or DoCandy) do
                 if not nearWorldBosses("halloween") then
@@ -3352,13 +3541,14 @@ do
                 if DoCandy and alive() and candyPass(alive) then didAny = true end
                 task.wait(didAny and 1 or 4)
             end
-            extrasRunning = false
+            -- a newer run may already be going: don't mark that one as stopped
+            if extrasGen == myGen then extrasRunning = false end
         end)
     end
 
     HwTab:CreateSection("Reaper Statues")
 
-    HwTab:CreateToggle({
+    local prayerTog = HwTab:CreateToggle({
         Name = "Auto Prayer (Reaper Statues)",
         CurrentValue = false,
         Flag = "HalloweenAutoPrayer",
@@ -3370,7 +3560,7 @@ do
 
     HwTab:CreateSection("Candy Doors")
 
-    HwTab:CreateToggle({
+    local doorsTog = HwTab:CreateToggle({
         Name = "Auto Candy Doors",
         CurrentValue = false,
         Flag = "HalloweenAutoDoors",
@@ -3382,7 +3572,7 @@ do
 
     HwTab:CreateSection("Candy Pickups")
 
-    HwTab:CreateToggle({
+    local candyTog = HwTab:CreateToggle({
         Name = "Auto collect candies on the map",
         CurrentValue = false,
         Flag = "HalloweenAutoCandy",
@@ -3391,6 +3581,15 @@ do
             updateExtras()
         end,
     })
+
+    -- when another farm mode starts, these three show as off instead of looking on while stopped
+    ModeToggles["hwextras"] = {
+        Set = function(_, v)
+            prayerTog:Set(v)
+            doorsTog:Set(v)
+            candyTog:Set(v)
+        end,
+    }
 
     HwTab:CreateParagraph({
         Title = "Info",
@@ -3438,7 +3637,7 @@ do
                 if not useItemRemote then
                     task.wait(1)
                 else
-                    openSelected()
+                    if Rayfield.SpendArmed then openSelected() end
                     task.wait(math.max(PackDelay, 0.3))
                 end
             end
@@ -3492,7 +3691,7 @@ do
         Flag = "HalloweenPackAmount",
         Callback = function(v)
             local n = tonumber(v)
-            if n and n >= 1 then PackAmount = math.floor(n) end
+            if n and n >= 1 then PackAmount = math.clamp(math.floor(n), 1, 100) end
         end,
     })
 
@@ -3644,6 +3843,13 @@ local function makeLoop(every, fn)
     end
 end
 
+-- same as makeLoop, but does nothing until auto-spending is allowed for this session
+local function makeSpendLoop(every, fn)
+    return makeLoop(every, function(alive)
+        if Rayfield.SpendArmed then return fn(alive) end
+    end)
+end
+
 local function inHalloween() return player:GetAttribute("InHalloween") == true end
 
 -- ==================== Halloween Upgrades (halloweenUpgradesClient) ====================
@@ -3708,7 +3914,7 @@ do
         end,
     })
 
-    local loop = makeLoop(30, function(alive)
+    local loop = makeSpendLoop(30, function(alive)
         local n = buyUpgrades(alive)
         if n > 0 then xNotify("Halloween Upgrades", "Bought " .. n .. " upgrade level(s)", 3) end
     end)
@@ -3748,7 +3954,7 @@ do
         Callback = makeLoop(8, function()
             if not inHalloween() or inBattleNow() then return end
             local r = Rep:FindFirstChild("runInfTower")
-            if r then pcall(function() r:FireServer() end) end
+            if r then PerfCache.sendAndWaitBattle(function() r:FireServer() end, 1) end
         end),
     })
     UpTab:CreateButton({
@@ -3837,46 +4043,36 @@ do
     local MaxBuys = 5
     local CYCLE = 4 * 3600 + 60
     local RETRY_AFTER_FAIL = 900
+    local KeepCurrency = 0
 
     getgenv().TitanShadowShop = getgenv().TitanShadowShop or { bought = {}, nextTry = {}, cycleStart = os.time() }
     local State = getgenv().TitanShadowShop
 
-    local function refused(res)
-        if res == false or res == nil then return res == false end
-        if type(res) == "table" and (res.success == false or res.ok == false or res.error ~= nil) then return true end
-        if type(res) == "string" then
-            local s = res:lower()
-            for _, kw in ipairs({ "not enough", "out of stock", "sold out", "insufficient", "fail", "error", "cannot", "invalid", "locked" }) do
-                if s:find(kw, 1, true) then return true end
-            end
-        end
-        return false
-    end
-
     local function buyOne(name)
         local remote = Rep:FindFirstChild("raidShopRequest")
         if not remote then return false end
-        local key = Rayfield.ShopKey(remote, ShopId, name, "potions:" .. name)
-        if not key then return false end
+        local key, why = Rayfield.ShopKey(remote, ShopId, name, "potions:" .. name, KeepCurrency)
+        if not key then return false, why end
         local ok, res = pcall(function() return remote:InvokeServer("buy", ShopId, key) end)
-        if not ok or refused(res) then return false end
+        if not ok then return false, tostring(res) end
+        local outcome = Rayfield.ShopResult(ShopId, res)
+        if outcome ~= "bought" then return false, outcome end
         return true
     end
 
     local function buyCycle(alive)
-        if os.time() - State.cycleStart >= CYCLE then
-            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
-        end
+        Rayfield.ShopRoll(State, Rep:FindFirstChild("raidShopRequest"), ShopId, CYCLE)
         local total = 0
         for _, name in ipairs(BuyNames) do
             if Selected[name] then
                 while (not alive or alive()) and (State.bought[name] or 0) < MaxBuys and (State.nextTry[name] or 0) <= os.time() do
-                    if buyOne(name) then
+                    local ok, why = buyOne(name)
+                    if ok then
                         State.bought[name] = (State.bought[name] or 0) + 1
                         total += 1
                         task.wait(0.7)
                     else
-                        State.nextTry[name] = os.time() + RETRY_AFTER_FAIL
+                        State.nextTry[name] = Rayfield.ShopRetry(why, RETRY_AFTER_FAIL)
                         break
                     end
                 end
@@ -3906,13 +4102,19 @@ do
             if n and n >= 1 then MaxBuys = math.floor(n) end
         end,
     })
+    ShopTab:CreateInput({
+        Name = "Always keep at least this much of each currency",
+        Default = "0",
+        Flag = "ShadowShopKeep",
+        Callback = function(v) KeepCurrency = math.max(0, tonumber(v) or 0) end,
+    })
 
     ShopTab:CreateSection("Buy")
     ShopTab:CreateToggle({
         Name = "Auto buy (Shadow Market)",
         CurrentValue = false,
         Flag = "ShadowShopAuto",
-        Callback = makeLoop(120, function(alive)
+        Callback = makeSpendLoop(120, function(alive)
             if next(Selected) == nil then return end
             local n = buyCycle(alive)
             if n > 0 then xNotify("Shadow Market", "Bought " .. n .. " potion(s)", 4) end
@@ -3966,7 +4168,12 @@ do
         if not ok or not okGet or type(state) ~= "table" or type(state.offers) ~= "table" then
             return 0, msg or "the dealer is not here right now"
         end
-        local scrap = tonumber(state.scrap) or math.huge
+        local scrap = tonumber(state.scrap)
+        if not scrap then
+            -- unknown balance: the keep-limit can't be honoured, so don't spend
+            if KeepScrap > 0 then return 0, "could not read your Scrap" end
+            scrap = math.huge
+        end
         local n = 0
         for _, offer in ipairs(state.offers) do
             if type(offer) == "table" and not offer.bought and Want[offer.rarity] and offer.slot ~= nil then
@@ -4011,7 +4218,7 @@ do
         Name = "Auto buy from the Masked Man",
         CurrentValue = false,
         Flag = "DealerAuto",
-        Callback = makeLoop(90, function() dealerPass() end),
+        Callback = makeSpendLoop(90, function() dealerPass() end),
     })
     DealerTab:CreateButton({
         Name = "Check offers now",
@@ -4050,6 +4257,14 @@ do
     local Names, IdOf = {}, {}
     for _, it in ipairs(Items) do table.insert(Names, it.name); IdOf[it.name] = it.id end
     local Picked = {}
+    local KeepScrap = 0
+
+    -- true if paying `cost` would break the keep-limit (an unknown balance counts as breaking it)
+    local function breaksReserve(state, cost)
+        local have = tonumber(state.scrap)
+        if not have then return KeepScrap > 0 end
+        return have - cost < KeepScrap
+    end
 
     local function getState(remote)
         local ok, a, b, c = pcall(remote.InvokeServer, remote, "get", true)
@@ -4078,7 +4293,7 @@ do
                     local row = findRow(state, IdOf[name])
                     -- only normal stock: never the "extra" (2x, 4x ... price) purchases
                     if not row or row.extra or row.soon or not tonumber(row.count) or row.count <= 0 or not row.price then break end
-                    if tonumber(state.scrap) and state.scrap < row.price then break end
+                    if breaksReserve(state, tonumber(row.price) or 0) then break end
                     local ok, okBuy, msg, newState = pcall(remote.InvokeServer, remote, "buy", row.id, row.price)
                     if not (ok and okBuy) then
                         if msg then warn("[Scrap Shop] " .. tostring(msg)) end
@@ -4106,11 +4321,17 @@ do
             for _, n in ipairs(list) do Picked[n] = true end
         end,
     })
+    ScrapTab:CreateInput({
+        Name = "Always keep at least this much Scrap",
+        Default = "0",
+        Flag = "ScrapShopKeep",
+        Callback = function(v) KeepScrap = math.max(0, tonumber(v) or 0) end,
+    })
     ScrapTab:CreateToggle({
         Name = "Auto buy Scrap Shop stock",
         CurrentValue = false,
         Flag = "ScrapShopAuto",
-        Callback = makeLoop(300, function(alive)
+        Callback = makeSpendLoop(300, function(alive)
             if next(Picked) == nil then return end
             local n = scrapBuyPass(alive)
             if n > 0 then xNotify("Scrap Shop", "Bought " .. n .. " bundle(s)", 4) end
@@ -4173,7 +4394,7 @@ do
             end
         end
         if count == 0 then return 0, "nothing to fuse" end
-        if tonumber(state.scrap) and state.scrap < fee then return 0, "not enough Scrap (" .. fee .. " needed)" end
+        if breaksReserve(state, fee) then return 0, "not enough Scrap (" .. fee .. " + the amount you keep)" end
         local ok, okF, msg = pcall(remote.InvokeServer, remote, "fuseMany", plan, nil)
         if ok and okF then return count end
         return 0, msg or "refused"
@@ -4201,7 +4422,7 @@ do
         Name = "Auto fuse potions",
         CurrentValue = false,
         Flag = "FuserAuto",
-        Callback = makeLoop(300, function()
+        Callback = makeSpendLoop(300, function()
             if next(FusePicked) == nil then return end
             local n = fusePass()
             if n > 0 then xNotify("Potion Fuser", "Fused " .. n .. " potion(s)", 4) end
@@ -4298,7 +4519,7 @@ end
 -- only cards rarer than 1 in 10M can be awakened
 do
     local MIN_WEIGHT = 10000000
-    local tried = {} -- key -> os.time() of the last try (so we don't spam the same card)
+    local tried = {} -- key -> os.time() of the next allowed try (so we don't spam the same card)
 
     local function inventory()
         local ok, inv = pcall(function()
@@ -4332,19 +4553,23 @@ do
         local list = {}
         for key, card in pairs(inventory()) do
             local w = type(card) == "table" and tonumber(card.Weight) or 0
-            if w >= MIN_WEIGHT and not done[key] and os.time() - (tried[key] or 0) > 1800 then
+            if w >= MIN_WEIGHT and not done[key] and os.time() >= (tried[key] or 0) then
                 table.insert(list, { key = key, w = w })
             end
         end
         table.sort(list, function(a, b) return a.w > b.w end) -- rarest first
         for i, c in ipairs(list) do
             if i > 25 then break end
-            tried[c.key] = os.time()
+            tried[c.key] = os.time() + 300 -- not ready / no answer: look again in 5 min
             -- returns ok, info (or ok=false, message)
             local ok, okI, inf = pcall(remote.InvokeServer, remote, "info", c.key)
             if ok and okI and type(inf) == "table" and inf.eligible ~= false and not inf.awakened
                 and (tonumber(inf.have) or 0) >= (tonumber(inf.cost) or math.huge) then
-                local okS, okStart, smsg = pcall(remote.InvokeServer, remote, "start", c.key)
+                local okS, okStart, smsg
+                tried[c.key] = os.time() + 1800
+                PerfCache.sendAndWaitBattle(function()
+                    okS, okStart, smsg = pcall(remote.InvokeServer, remote, "start", c.key)
+                end, 2)
                 if okS and okStart then return true, tostring(c.key) end
                 if smsg then warn("[Awakening] " .. tostring(c.key) .. ": " .. tostring(smsg)) end
             end
@@ -4359,7 +4584,7 @@ do
         Name = "Auto start awakening trials",
         CurrentValue = false,
         Flag = "AwakeningAuto",
-        Callback = makeLoop(120, function()
+        Callback = makeSpendLoop(120, function()
             local ok, what = awakenPass()
             if ok then xNotify("Awakening", "Started trial: " .. what, 5) end
         end),
@@ -4422,14 +4647,17 @@ do
         if r then pcall(function() r:FireServer("login") end) end
     end
 
-    local function claimGroupChest()
+    local function claimGroupChest(auto)
         local r = Rep:FindFirstChild("claimDaily")
         if r then pcall(function() r:FireServer("gift", true) end) end
+        -- auto mode: walk onto the ring at most once a day, and never in the middle of a farm
+        if auto and (ActiveMode or os.time() - (getgenv().TitanPadLast or 0) < 86400) then return end
         -- also step on the glowing ring if it's loaded (the game gives the chest when you stand on it)
         local pad = game:GetService("CollectionService"):GetTagged("dailyGiftPad")[1]
         local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
         if pad and pad:IsA("BasePart") and hrp then
             local back = hrp.CFrame
+            getgenv().TitanPadLast = os.time()
             pcall(function()
                 hrp.CFrame = pad.CFrame + Vector3.new(0, 3, 0)
                 if firetouchinterest then
@@ -4451,11 +4679,11 @@ do
         Callback = makeLoop(600, function()
             claimLogin()
             task.wait(1)
-            claimGroupChest()
+            claimGroupChest(true)
         end),
     })
     QuestTab:CreateButton({ Name = "Claim daily login now", Callback = function() claimLogin() end })
-    QuestTab:CreateButton({ Name = "Claim group chest now", Callback = function() task.spawn(claimGroupChest) end })
+    QuestTab:CreateButton({ Name = "Claim group chest now", Callback = function() task.spawn(claimGroupChest, false) end })
     QuestTab:CreateParagraph({
         Title = "Info",
         Content = "The group chest only works if you're in the game's Roblox group. It's ready once a day.",
@@ -4548,8 +4776,9 @@ do
         if st ~= want and os.clock() - lastAutoToggle > 1.5 then
             lastAutoToggle = os.clock()
             tog()
+            -- only ours if we turned it on: never switch off an Auto Roll you started yourself
+            if want then autoOwned = true end
         end
-        if want then autoOwned = true end
         return true
     end
 
@@ -4566,11 +4795,27 @@ do
             end
         end
         if #WeatherNames == 0 then
-            WeatherNames = { "Arcane", "Aurora", "Awakened", "Doodle", "Eclipse", "Galactic", "Glitch", "Goofy",
+            WeatherNames = { "Arcane", "Aurora", "Awakened", "Cataclysm", "Doodle", "Eclipse", "Galactic", "Glitch", "Goofy",
                 "Hailstorm", "Ice Age", "Light Rain", "Mashup", "Monsoon", "Sandstorm", "Snowfall", "Thunderstorm", "Windy" }
         end
         table.sort(WeatherNames)
         for _, n in ipairs(WeatherNames) do WeatherSet[norm(n)] = true end
+
+        -- Halloween has its own weathers (halloweenInfo.WEATHERS), rarest first. They go in WeatherSet as well,
+        -- otherwise the HUD fallback in labelWeather would reject them.
+        local hwNames = {}
+        pcall(function()
+            local list = require(Rep.Modules.halloweenInfo).WEATHERS
+            table.sort(list, function(a, b) return (tonumber(a.weight) or 0) > (tonumber(b.weight) or 0) end)
+            for _, w in ipairs(list) do
+                if type(w.name) == "string" then table.insert(hwNames, w.name) end
+            end
+        end)
+        if #hwNames == 0 then
+            hwNames = { "Witching Hour", "Blood Moon", "Fog of Souls", "Harvest Moon", "Clear Night" }
+        end
+        for _, n in ipairs(hwNames) do WeatherSet[norm(n)] = true end
+        PerfCache.hwWeatherNames = hwNames
     end
 
     -- weather arrives through sendUI("weatherUpdate", data), not through its own remote
@@ -4696,7 +4941,8 @@ do
     PerfCache.weatherNames = WeatherNames
 
     local function weatherMatches(w)
-        if next(PityWeathers) == nil then return true end
+        -- nothing picked: hold, unless "any weather" is switched on explicitly
+        if next(PityWeathers) == nil then return PerfCache.pitySpendAny == true end
         if not w then return false end
         return PityWeathers[norm(w)] == true
     end
@@ -4793,6 +5039,13 @@ do
             PityWeathers = {}
             for _, n in ipairs(list) do PityWeathers[norm(n)] = true end
         end,
+    })
+
+    RollTab:CreateToggle({
+        Name = "Spend pity on any weather (when none is picked)",
+        CurrentValue = false,
+        Flag = "RollPitySpendAny",
+        Callback = function(v) PerfCache.pitySpendAny = v end,
     })
 
     RollTab:CreateToggle({
@@ -4907,6 +5160,15 @@ do (function()
             or floorNumber(labelText(ui, { "battleContainer", "floorCount" }))
     end
 
+    -- the floor from the Infinity Tower's own tab only (nil = no Infinity Tower running).
+    -- Auto-end uses this, so another tower's "Floor N" label can't end this one.
+    local function towerFloor()
+        local ok, tab = pcall(function() return player.PlayerGui.BattleUI.battleContainer.battleTabs.tower end)
+        if not (ok and tab) then return nil end
+        if tab:IsA("GuiObject") and not tab.Visible then return nil end
+        return floorNumber(labelText(tab, { "textLabel" }), true)
+    end
+
     TowerTab:CreateSection("End the tower at a floor (claim the big reward)")
 
     TowerTab:CreateInput({
@@ -4931,7 +5193,7 @@ do (function()
                 -- wait for the saved config so the target floor is applied first
                 while autoToken == myToken and Rayfield.Loading do task.wait(0.3) end
                 while autoToken == myToken do
-                    local f = readFloor()
+                    local f = towerFloor()
                     if f and TargetFloor > 0 and f >= TargetFloor then
                         local ok = endTowerPrepared()
                         Rayfield:Notify({
@@ -4954,12 +5216,20 @@ do (function()
     -- ===== end the tower when a chosen weather appears =====
     TowerTab:CreateSection("End the tower on weather")
 
-    local EndWeathers = { arcane = true, awakened = true }
+    local EndWeathers = { arcane = true, awakened = true } -- normal world tower
+    local HwEndWeathers, HwEndTyped = {}, {}               -- Halloween tower: nothing until you pick
+    local endedOn = {}                                     -- [world] = weather that already ended that tower
     local weatherTok = 0
     local weatherToggle
 
+    -- stop both auto-end loops on Unload / re-execute
+    table.insert(activeConnections, { Disconnect = function()
+        autoToken += 1
+        weatherTok += 1
+    end })
+
     TowerTab:CreateDropdown({
-        Name = "End tower when this weather appears",
+        Name = "Normal world: end tower on these weathers",
         Options = PerfCache.weatherNames or { "Arcane", "Awakened" },
         CurrentOption = { "Arcane", "Awakened" },
         MultipleOptions = true,
@@ -4967,6 +5237,32 @@ do (function()
         Callback = function(list)
             EndWeathers = {}
             for _, n in ipairs(list) do EndWeathers[norm(n)] = true end
+        end,
+    })
+
+    TowerTab:CreateDropdown({
+        Name = "Halloween: end tower on these weathers",
+        Options = PerfCache.hwWeatherNames or { "Witching Hour", "Blood Moon", "Fog of Souls", "Harvest Moon", "Clear Night" },
+        CurrentOption = {},
+        MultipleOptions = true,
+        Flag = "TowerEndWeathersHalloween",
+        Callback = function(list)
+            HwEndWeathers = {}
+            for _, n in ipairs(list) do HwEndWeathers[norm(n)] = true end
+        end,
+    })
+
+    TowerTab:CreateInput({
+        Name = "Other Halloween weathers (names, comma separated)",
+        Default = "",
+        Placeholder = "for weathers missing from the list",
+        Flag = "TowerEndWeathersHalloweenTyped",
+        Callback = function(v)
+            HwEndTyped = {}
+            for n in tostring(v or ""):gmatch("[^,]+") do
+                local key = norm(n)
+                if key ~= "" then HwEndTyped[key] = true end
+            end
         end,
     })
 
@@ -4979,20 +5275,38 @@ do (function()
             local myTok = weatherTok
             if not Value then return end
             task.spawn(function()
+                local fromLoad = Rayfield.Loading
                 while weatherTok == myTok and Rayfield.Loading do task.wait(0.3) end
+                if fromLoad then
+                    -- turned on by the saved config: only a weather that starts from now on may end the tower
+                    local w0 = PerfCache.getWeather and PerfCache.getWeather()
+                    if w0 then
+                        endedOn[player:GetAttribute("InHalloween") == true and "halloween" or "normal"] = norm(w0)
+                    end
+                end
                 while weatherTok == myTok do
                     local w = PerfCache.getWeather and PerfCache.getWeather()
-                    if w and EndWeathers[norm(w)] then
+                    local key = w and norm(w) or nil
+                    local inHw = player:GetAttribute("InHalloween") == true
+                    local world = inHw and "halloween" or "normal"
+                    -- a new weather in this world may end this world's tower again
+                    if endedOn[world] ~= key then endedOn[world] = nil end
+                    local wanted = key ~= nil and (inHw and (HwEndWeathers[key] or HwEndTyped[key]) or (not inHw and EndWeathers[key]))
+                    -- stays on for both worlds. Once per weather: Auto Run restarts the tower straight away,
+                    -- and without this it would be ended again (with more potions) while the weather lasts.
+                    -- No running tower: nothing to end, so keep waiting (and keep the potions).
+                    if wanted and endedOn[world] ~= key and towerFloor() then
                         local ok = endTowerPrepared()
                         Rayfield:Notify({
                             Title = "Infinity Tower",
-                            Content = ok and ("Weather " .. w .. " is active - ending the tower")
+                            Content = ok and ((inHw and "Halloween" or "Normal") .. " tower: weather " .. w .. " is active - ending it")
                                 or "Tower remote not ready yet",
                             Duration = 6,
                         })
                         if ok then
-                            weatherToggle:Set(false)
-                            return
+                            endedOn[world] = key
+                        else
+                            task.wait(5)
                         end
                     end
                     task.wait(0.5)
@@ -5043,11 +5357,15 @@ do (function()
             local towerToken = autoTowerToken
             if not Value then return end
             task.spawn(function()
+                local lastFire = os.clock() -- no forced request at load: a tower that is already running stays untouched
                 while autoTowerToken == towerToken do
                     -- FIX: removed "and not ActiveMode" so the tower runs together with a farm mode
                     -- (the game allows 2 battles at once: 1 farm + 1 tower)
-                    if runInfTowerRemote then
-                        pcall(function() runInfTowerRemote:FireServer() end)
+                    -- a running tower is left alone: the server only answers "already climbing"
+                    -- (re-checked every 5 min in case the tab is stale)
+                    if runInfTowerRemote and (not towerFloor() or os.clock() - lastFire > 300) then
+                        lastFire = os.clock()
+                        PerfCache.sendAndWaitBattle(function() runInfTowerRemote:FireServer() end, 1)
                     end
                     task.wait(15)
                 end
@@ -5692,6 +6010,7 @@ do (function()
     local MaxBuys = 5                  -- max purchases per potion per restock cycle (the shop shows 5/5)
     local CYCLE = 4 * 3600 + 60        -- the shop restocks about every 4 hours
     local RETRY_AFTER_FAIL = 900       -- after a refused purchase, wait this long before trying that potion again
+    local KeepCurrency = 0             -- never spend below this much of any currency
     local buyToken = 0
 
     -- survives re-execute / server hop in the same executor session (best effort)
@@ -5701,9 +6020,7 @@ do (function()
     table.insert(activeConnections, { Disconnect = function() buyToken += 1 end })
 
     local function rollCycle()
-        if os.time() - State.cycleStart >= CYCLE then
-            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
-        end
+        Rayfield.ShopRoll(State, shopRemote, ShopId, CYCLE)
     end
 
     local function show(v)
@@ -5714,27 +6031,16 @@ do (function()
         return tostring(v)
     end
 
-    -- explicit refusals only; a nil / true / data reply counts as an attempt (bounded by MaxBuys anyway)
-    local function refused(res)
-        if res == false then return true end
-        if type(res) == "table" and (res.success == false or res.ok == false or res.error ~= nil) then return true end
-        if type(res) == "string" then
-            local s = res:lower()
-            for _, kw in ipairs({ "not enough", "out of stock", "sold out", "insufficient", "fail", "error", "cannot", "invalid" }) do
-                if s:find(kw, 1, true) then return true end
-            end
-        end
-        return false
-    end
 
     local function buyOne(name)
         if not shopRemote then return false, "remote not ready" end
-        local key, why = Rayfield.ShopKey(shopRemote, ShopId, name, "potions:" .. name)
+        local key, why = Rayfield.ShopKey(shopRemote, ShopId, name, "potions:" .. name, KeepCurrency)
         if not key then return false, why end
         local ok, res = pcall(function() return shopRemote:InvokeServer("buy", ShopId, key) end)
         if not ok then return false, tostring(res) end
         warn("[Raid Shop] " .. name .. " -> " .. show(res))
-        if refused(res) then return false, res end
+        local outcome = Rayfield.ShopResult(ShopId, res)
+        if outcome ~= "bought" then return false, outcome end
         return true, res
     end
 
@@ -5746,13 +6052,13 @@ do (function()
         for _, name in ipairs(BuyNames) do
             if Selected[name] then
                 while alive() and (State.bought[name] or 0) < MaxBuys and (State.nextTry[name] or 0) <= os.time() do
-                    local ok = buyOne(name)
+                    local ok, why = buyOne(name)
                     if ok then
                         State.bought[name] = (State.bought[name] or 0) + 1
                         total += 1
                         task.wait(0.7)
                     else
-                        State.nextTry[name] = os.time() + RETRY_AFTER_FAIL
+                        State.nextTry[name] = Rayfield.ShopRetry(why, RETRY_AFTER_FAIL)
                         break
                     end
                 end
@@ -5802,6 +6108,14 @@ do (function()
         end,
     })
 
+    ShopTab:CreateInput({
+        Name = "Always keep at least this much of each currency",
+        Default = "0",
+        Placeholder = "e.g. 100",
+        Flag = "ShopKeepCurrency",
+        Callback = function(v) KeepCurrency = math.max(0, tonumber(v) or 0) end,
+    })
+
     ShopTab:CreateSection("Buy")
 
     ShopTab:CreateButton({
@@ -5840,7 +6154,7 @@ do (function()
             task.spawn(function()
                 while alive() and Rayfield.Loading do task.wait(0.3) end
                 while alive() do
-                    if hasSelection() then
+                    if hasSelection() and Rayfield.SpendArmed then
                         local n = buyCycle(alive)
                         if n > 0 then
                             Rayfield:Notify({ Title = "Shop", Content = "Bought " .. n .. " potion(s) from the Kaiju Raid shop", Duration = 4 })
@@ -5915,6 +6229,7 @@ do (function()
     local MaxBuys = 10                 -- Candy Shop potions have 10/10 stock (Blood Moon Reroll has 100/100)
     local CYCLE = 24 * 3600 + 60       -- Candy Shop restocks every 24 hours
     local RETRY_AFTER_FAIL = 900       -- after a refused purchase, wait 15 minutes before trying again
+    local KeepCurrency = 5000          -- never spend Candy below this
     local candyBuyToken = 0
 
     getgenv().TitanCandyShop = getgenv().TitanCandyShop or { bought = {}, nextTry = {}, cycleStart = os.time() }
@@ -5923,9 +6238,7 @@ do (function()
     table.insert(activeConnections, { Disconnect = function() candyBuyToken += 1 end })
 
     local function rollCycle()
-        if os.time() - State.cycleStart >= CYCLE then
-            State.bought, State.nextTry, State.cycleStart = {}, {}, os.time()
-        end
+        Rayfield.ShopRoll(State, shopRemote, ShopId, CYCLE)
     end
 
     local function show(v)
@@ -5936,28 +6249,18 @@ do (function()
         return tostring(v)
     end
 
-    local function refused(res)
-        if res == false then return true end
-        if type(res) == "table" and (res.success == false or res.ok == false or res.error ~= nil) then return true end
-        if type(res) == "string" then
-            local s = res:lower()
-            for _, kw in ipairs({ "not enough", "out of stock", "sold out", "insufficient", "fail", "error", "cannot", "invalid" }) do
-                if s:find(kw, 1, true) then return true end
-            end
-        end
-        return false
-    end
 
     local function buyOne(name)
         if not shopRemote then return false, "remote not ready" end
-        local key, why = Rayfield.ShopKey(shopRemote, ShopId, name, candyKey(name))
+        local key, why = Rayfield.ShopKey(shopRemote, ShopId, name, candyKey(name), KeepCurrency)
         if not key then return false, why end
         local ok, res = pcall(function()
             return shopRemote:InvokeServer("buy", ShopId, key, nil)
         end)
         if not ok then return false, tostring(res) end
         warn("[Candy Shop] " .. name .. " -> " .. show(res))
-        if refused(res) then return false, res end
+        local outcome = Rayfield.ShopResult(ShopId, res)
+        if outcome ~= "bought" then return false, outcome end
         return true, res
     end
 
@@ -5969,13 +6272,13 @@ do (function()
         for _, name in ipairs(CandyBuyNames) do
             if Selected[name] then
                 while alive() and (State.bought[name] or 0) < MaxBuys and (State.nextTry[name] or 0) <= os.time() do
-                    local ok = buyOne(name)
+                    local ok, why = buyOne(name)
                     if ok then
                         State.bought[name] = (State.bought[name] or 0) + 1
                         total += 1
                         task.wait(0.7)
                     else
-                        State.nextTry[name] = os.time() + RETRY_AFTER_FAIL
+                        State.nextTry[name] = Rayfield.ShopRetry(why, RETRY_AFTER_FAIL)
                         break
                     end
                 end
@@ -6025,6 +6328,14 @@ do (function()
         end,
     })
 
+    CandyShopTab:CreateInput({
+        Name = "Always keep at least this much Candy",
+        Default = "5000",
+        Placeholder = "e.g. 5000",
+        Flag = "CandyShopKeep",
+        Callback = function(v) KeepCurrency = math.max(0, tonumber(v) or 0) end,
+    })
+
     CandyShopTab:CreateSection("Buy")
 
     CandyShopTab:CreateButton({
@@ -6063,7 +6374,7 @@ do (function()
             task.spawn(function()
                 while alive() and Rayfield.Loading do task.wait(0.3) end
                 while alive() do
-                    if hasSelection() then
+                    if hasSelection() and Rayfield.SpendArmed then
                         local n = buyCycle(alive)
                         if n > 0 then
                             Rayfield:Notify({ Title = "Candy Shop", Content = "Bought " .. n .. " item(s) from the Halloween Candy Shop", Duration = 4 })
@@ -6287,7 +6598,7 @@ do (function()
                 while craftToken == myToken and Rayfield.Loading do task.wait(0.3) end
                 local warnedUnread = false
                 while craftToken == myToken do
-                    if hasSelection() and craftRemote then
+                    if hasSelection() and craftRemote and Rayfield.SpendArmed then
                         local sent, unreadable = craftDue()
                         if sent > 0 then
                             Rayfield:Notify({ Title = "Crafting", Content = "Sent " .. sent .. " craft request(s)", Duration = 4 })
@@ -6438,15 +6749,9 @@ do (function()
     local function startEndless()
         if not endlessRemote then return false, "endlessAction remote not ready" end
         if GoToNpc and not goToNpc() then return false, "Kaiju Researcher not found" end
-        local before = BattleStarts
-        local ok = pcall(function() endlessRemote:FireServer("start") end)
-        if not ok then return false, "send failed" end
-        local t = os.clock()
-        while os.clock() - t < 5 do
-            if BattleStarts ~= before then return true end
-            task.wait(0.1)
-        end
-        return false, "no battle started (already running, or the server refused)"
+        local started, why = PerfCache.sendAndWaitBattle(function() endlessRemote:FireServer("start") end, 5)
+        if started then return true end
+        return false, why or "no battle started (already running, or the server refused)"
     end
 
     EndlessTab:CreateSection("Endless Raid")
@@ -6494,14 +6799,17 @@ do (function()
                 while endlessToken == my and Rayfield.Loading do task.wait(0.3) end
                 local fails = 0
                 while endlessToken == my do
-                    local endsBefore = BattleEnds
+                    local endsBefore, fightEndsBefore = BattleEnds, PerfCache.fightEnds
                     local ok, why = startEndless()
                     local t = os.clock()
                     if ok then
                         fails = 0
                         -- wait for a battle end (or MaxWait), never sooner than MinGap
                         while endlessToken == my and os.clock() - t < MaxWait do
-                            if BattleEnds ~= endsBefore and os.clock() - t >= MinGap then break end
+                            -- with a tower running, battle_ended also fires for its floors: only the fight tab counts then
+                            local ended = PerfCache.fightEnds ~= fightEndsBefore
+                                or (BattleEnds ~= endsBefore and not PerfCache.towerInTabs)
+                            if ended and os.clock() - t >= MinGap then break end
                             task.wait(0.5)
                         end
                     else
@@ -6597,15 +6905,9 @@ do (function()
     local function startPrestige()
         if not prestigeRemote then return false, "runPrestigeTower remote not ready" end
         if endScreen() then closeEndScreen() end
-        local before = BattleStarts
-        local ok = pcall(function() prestigeRemote:FireServer() end)
-        if not ok then return false, "send failed" end
-        local t = os.clock()
-        while os.clock() - t < 5 do
-            if BattleStarts ~= before then return true end
-            task.wait(0.1)
-        end
-        return false, "no battle started (already running, or the server refused)"
+        local started, why = PerfCache.sendAndWaitBattle(function() prestigeRemote:FireServer() end, 5)
+        if started then return true end
+        return false, why or "no battle started (already running, or the server refused)"
     end
 
     local function recordRun(floor)
@@ -7031,7 +7333,7 @@ do (function()
                 "Bosses beaten: " .. S.bosses,
                 "Tower floor: " .. (f and tostring(f) or "-") .. "  (best " .. S.topFloor .. ")",
                 "Tower cards: " .. (towerCards and commas(towerCards) or "-"),
-                "Potions drunk: " .. drunk .. "  |  active: " .. (pots and tostring(pots) or "-"),
+                "Potion requests: " .. drunk .. "  |  active: " .. (pots and tostring(pots) or "-"),
                 "Crafted: " .. crafted,
                 "Pity: " .. pityText,
                 "Weather: " .. weather,
@@ -7098,3 +7400,16 @@ Rayfield:LoadConfiguration()
 task.delay(3, queueReload)
 
 Rayfield:Notify({ Title = "Titan Hub", Content = "Loaded", Duration = 3 })
+
+-- say so when saved auto-spending toggles are waiting, so a paused shop doesn't look broken
+task.delay(4, function()
+    local waiting = 0
+    for _, f in ipairs({ "AutoBuyShopPotions", "AutoBuyCandyShopPotions", "ShadowShopAuto", "DealerAuto", "ScrapShopAuto",
+        "FuserAuto", "HwUpgradesAuto", "HalloweenAutoPacks", "AutoCraftPotions", "AwakeningAuto" }) do
+        local t = LToggles[f]
+        if t and t.Value then waiting += 1 end
+    end
+    if waiting > 0 and not Rayfield.SpendArmed then
+        Rayfield:Notify({ Title = "Auto-spending paused", Content = waiting .. " auto-spend option(s) are on. Allow them in Settings > Auto Save.", Duration = 10 })
+    end
+end)
